@@ -1,0 +1,188 @@
+########## STARVATION RUN 1 ##########
+   Compiling unicode-ident v1.0.24
+   Compiling fnv v1.0.7
+   Compiling getrandom v0.3.4
+   Compiling bit-vec v0.8.0
+   Compiling proc-macro2 v1.0.106
+   Compiling gimli v0.33.0
+   Compiling bit-set v0.8.0
+   Compiling fancy-regex v0.18.0
+   Compiling quote v1.0.45
+   Compiling syn v2.0.117
+   Compiling cranelift-codegen v0.131.2
+   Compiling synstructure v0.13.2
+   Compiling serde_derive v1.0.228
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling ref-cast-impl v1.0.25
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing-attributes v0.1.31
+   Compiling clap_derive v4.6.1
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling ref-cast v1.0.25
+   Compiling tokio v1.52.3
+   Compiling zerofrom v0.1.8
+   Compiling async-trait v0.1.89
+   Compiling tracing v0.1.44
+   Compiling thiserror v2.0.18
+   Compiling clap v4.6.1
+   Compiling yoke v0.8.3
+   Compiling serde v1.0.228
+   Compiling tracing-subscriber v0.3.23
+   Compiling tungstenite v0.30.0
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling fluent-uri v0.4.1
+   Compiling ahash v0.8.12
+   Compiling email_address v0.2.9
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling trybuild v1.0.118
+   Compiling referencing v0.46.5
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling toml v0.8.23
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling jsonschema v0.46.5
+   Compiling cranelift-native v0.131.2
+   Compiling cranelift-module v0.131.2
+   Compiling cranelift-frontend v0.131.2
+   Compiling cranelift-jit v0.131.2
+   Compiling beamr v0.16.3
+   Compiling haematite v0.8.1
+   Compiling liminal-rs v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a3d39d6a59f58cb72/crates/liminal)
+   Compiling liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a3d39d6a59f58cb72/crates/liminal-server)
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a3d39d6a59f58cb72/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 47.60s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=32 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (96328095) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:424:5:
+the mixed-fate pin lost a subscriber on 4/6 fresh boots:
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+iteration 2: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+iteration 3: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+iteration 4: burst=400 accepted=400 first_received=400 first_error=None second_received=32 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+STARVATION RUN 1 TRUE EXIT=101
+########## STARVATION RUN 2 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.36s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+BURST PIN iteration 3: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (96330048) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:374:5:
+the burst pin lost a subscriber on 3/6 fresh boots:
+iteration 2: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+iteration 3: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+iteration 5: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (96330049) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:424:5:
+the mixed-fate pin lost a subscriber on 2/6 fresh boots:
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+iteration 2: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+STARVATION RUN 2 TRUE EXIT=101
+########## STARVATION RUN 3 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+BURST PIN iteration 1: ok=false :: burst=400 accepted=400 tcp_received=64 tcp_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+BURST PIN iteration 3: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+BURST PIN iteration 4: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+BURST PIN iteration 5: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (96332129) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:374:5:
+the burst pin lost a subscriber on 6/6 fresh boots:
+iteration 0: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+iteration 1: burst=400 accepted=400 tcp_received=64 tcp_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") ws_received=400 ws_error=None publisher_frames=[]
+iteration 2: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+iteration 3: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+iteration 4: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+iteration 5: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (96332130) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:424:5:
+the mixed-fate pin lost a subscriber on 3/6 fresh boots:
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+iteration 4: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+iteration 5: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("protocol error: server ended the subscription (reason 65535): subscription shed: connection inbox byte budget or per-inbox fairness limit exceeded") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+STARVATION RUN 3 TRUE EXIT=101
