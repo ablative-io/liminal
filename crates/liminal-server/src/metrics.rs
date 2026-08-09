@@ -245,8 +245,11 @@ impl ServerMetrics {
         let transport_deliveries: [CounterHandle; MOUNT_KINDS.len()] =
             transport_deliveries.try_into().ok()?;
         let sheds_total = registry.register_counter(SHEDS_TOTAL, no_labels()).ok()?;
-        let admission_refusals =
-            register_labelled(registry, ADMISSION_REFUSALS_TOTAL, &AdmissionRefusal::LABELS)?;
+        let admission_refusals = register_labelled(
+            registry,
+            ADMISSION_REFUSALS_TOTAL,
+            &AdmissionRefusal::LABELS,
+        )?;
         let handshake_refusals =
             register_labelled(registry, HANDSHAKE_REFUSALS_TOTAL, &UpgradeRefusal::LABELS)?;
         Some(Self {
@@ -275,7 +278,11 @@ fn register_labelled<const N: usize>(
 ) -> Option<[CounterHandle; N]> {
     let mut handles = Vec::with_capacity(N);
     for label in labels {
-        handles.push(registry.register_counter(name, [(REASON_LABEL, *label)]).ok()?);
+        handles.push(
+            registry
+                .register_counter(name, [(REASON_LABEL, *label)])
+                .ok()?,
+        );
     }
     handles.try_into().ok()
 }

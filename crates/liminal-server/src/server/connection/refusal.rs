@@ -57,7 +57,7 @@ pub(in crate::server) const MAX_CLOSE_REASON_BYTES: usize = 123;
 /// consults the authority, so it is a pure function of the refusal that already
 /// happened. Adding a variant here is the only way to add a metric label value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AdmissionRefusal {
+pub enum AdmissionRefusal {
     /// The incarnation authority is holding after an ambiguous durable write.
     AdmissionHeld,
     /// The incarnation authority surrendered the stream to another process.
@@ -282,7 +282,9 @@ pub(in crate::server) fn send_websocket_refusal(
     // process that is now never going to exist. A refusal write has to be able
     // to complete here and now, so it goes back to blocking under a timeout.
     let stream = socket.get_ref();
-    stream.set_nonblocking(false).map_err(tungstenite::Error::Io)?;
+    stream
+        .set_nonblocking(false)
+        .map_err(tungstenite::Error::Io)?;
     stream
         .set_write_timeout(Some(REFUSAL_WRITE_TIMEOUT))
         .map_err(tungstenite::Error::Io)?;

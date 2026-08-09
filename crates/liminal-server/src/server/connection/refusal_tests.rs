@@ -112,8 +112,7 @@ fn every_close_reason_fits_in_a_control_frame() {
 }
 
 #[test]
-fn each_refusal_class_is_distinguishable_on_the_wire()
--> Result<(), Box<dyn std::error::Error>> {
+fn each_refusal_class_is_distinguishable_on_the_wire() {
     // The three classes the brief calls out by name, plus the surrendered
     // authority, must not collapse into one another: an operator reading a
     // browser console has to be able to tell "the server is full" from "the
@@ -145,12 +144,10 @@ fn each_refusal_class_is_distinguishable_on_the_wire()
             class.label()
         );
     }
-    Ok(())
 }
 
 #[test]
-fn the_saturation_refusal_classifies_from_its_own_server_error()
--> Result<(), Box<dyn std::error::Error>> {
+fn the_saturation_refusal_classifies_from_its_own_server_error() {
     // Classification reads the error the admission path actually produced, so
     // the pin builds the error the way the supervisor builds it rather than
     // asserting against a hand-picked variant.
@@ -182,7 +179,6 @@ fn the_saturation_refusal_classifies_from_its_own_server_error()
         AdmissionRefusal::classify(&ServerError::ConnectionPidCollision { pid: 1 }),
         AdmissionRefusal::SpawnFailed
     );
-    Ok(())
 }
 
 #[test]

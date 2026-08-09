@@ -137,7 +137,7 @@ pub(super) struct AcceptorSettings {
 /// response carried by [`Self::status`] and the connection closes. Nothing on
 /// this enum enters connection supervision.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UpgradeRefusal {
+pub enum UpgradeRefusal {
     /// The request head exceeded [`MAX_UPGRADE_REQUEST_BYTES`].
     OversizedRequestHead {
         /// Bytes received before the bound tripped.

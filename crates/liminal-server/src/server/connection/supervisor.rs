@@ -25,17 +25,17 @@ use liminal::protocol::WorkerRegistration;
 use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::incarnation::ConnectionIncarnationAuthority;
-use super::refusal::AdmissionRefusal;
-use crate::health::AdmissionReadiness;
 use super::loopback::{LoopbackConnectionProcess, LoopbackServerEnd};
 use super::notifier::ConnectionNotifier;
 use super::process::ConnectionProcess;
+use super::refusal::AdmissionRefusal;
 use super::services::{
     ConnectionServices, LiminalConnectionServices, ProductionSubsystems, SubsystemFactory,
     build_connection_services_via,
 };
 use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig};
+use crate::health::AdmissionReadiness;
 use crate::server::mount::MountKind;
 use crate::server::participant::{
     ConnectionFateClass, InstalledParticipantService, ParticipantSemanticHandler,
@@ -208,10 +208,6 @@ impl ConnectionSupervisor {
         })
     }
 
-    /// Spawns one supervised beamr process that owns `stream`.
-    ///
-    /// # Errors
-    /// Returns [`ServerError`] when stream configuration or beamr spawn fails.
     /// A handle on whether this server can admit a connection, for the
     /// readiness probe (P0 #56 R4).
     ///
@@ -237,6 +233,10 @@ impl ConnectionSupervisor {
         crate::metrics::admission_refused(AdmissionRefusal::classify(error));
     }
 
+    /// Spawns one supervised beamr process that owns `stream`.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when stream configuration or beamr spawn fails.
     pub fn spawn_connection(&self, stream: TcpStream) -> Result<ConnectionHandle, ServerError> {
         self.inner
             .spawn_connection(stream)

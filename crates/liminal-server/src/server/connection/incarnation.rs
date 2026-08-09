@@ -277,7 +277,7 @@ impl ConnectionIncarnationAuthority {
                 &mut state,
                 &self.admission,
                 "connection allocation persistence",
-                failure,
+                &failure,
             )),
             Ok(Ok(IncarnationAllocation::Allocated {
                 connection_incarnation,
@@ -355,7 +355,7 @@ impl ConnectionIncarnationAuthority {
                 &mut state,
                 &self.admission,
                 "connection-fate Open persistence",
-                failure,
+                &failure,
             )),
             Ok(Ok(intent)) => Ok(intent),
         };
@@ -387,7 +387,7 @@ impl ConnectionIncarnationAuthority {
                 &mut state,
                 &self.admission,
                 "connection-fate Complete persistence",
-                failure,
+                &failure,
             )),
             Ok(Ok(())) => Ok(()),
         };
@@ -400,12 +400,12 @@ impl ConnectionIncarnationAuthority {
         state: &'guard Mutex<ConnectionIncarnationAuthorityState>,
         phase: &'static str,
     ) -> Result<MutexGuard<'guard, ConnectionIncarnationAuthorityState>, ServerError> {
-        state.lock().map_err(|error| {
-            ServerError::ParticipantIncarnation {
+        state
+            .lock()
+            .map_err(|error| ServerError::ParticipantIncarnation {
                 phase,
                 message: error.to_string(),
-            }
-        })
+            })
     }
 
     /// Turns one failed operation into the right STATE transition.
@@ -423,7 +423,7 @@ impl ConnectionIncarnationAuthority {
         state: &mut ConnectionIncarnationAuthorityState,
         admission: &AdmissionReadiness,
         phase: &'static str,
-        failure: IncarnationOperationError,
+        failure: &IncarnationOperationError,
     ) -> ServerError {
         match failure.reach {
             DurableWriteReach::NotAttempted => {
@@ -546,7 +546,10 @@ impl ConnectionIncarnationAuthority {
 
     /// Widens the resume window after a failed replay and refuses this attempt.
     fn back_off(held: &mut AmbiguousDurableWrite, resume_error: &str) -> ServerError {
-        held.resume_backoff = held.resume_backoff.saturating_mul(2).min(RESUME_BACKOFF_CEILING);
+        held.resume_backoff = held
+            .resume_backoff
+            .saturating_mul(2)
+            .min(RESUME_BACKOFF_CEILING);
         held.attempts_until_resume = held.resume_backoff;
         tracing::warn!(
             resume_error,
@@ -586,12 +589,10 @@ impl ConnectionIncarnationAuthority {
             ConnectionIncarnationAuthorityState::AmbiguousDurableWrite(held) => {
                 Self::held_refusal(held)
             }
-            ConnectionIncarnationAuthorityState::Ready(_) => {
-                ServerError::ParticipantIncarnation {
-                    phase: "connection allocation state",
-                    message: "authority reported not-ready while holding a ready stream".to_owned(),
-                }
-            }
+            ConnectionIncarnationAuthorityState::Ready(_) => ServerError::ParticipantIncarnation {
+                phase: "connection allocation state",
+                message: "authority reported not-ready while holding a ready stream".to_owned(),
+            },
         }
     }
 }

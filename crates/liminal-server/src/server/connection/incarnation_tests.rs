@@ -227,8 +227,8 @@ fn started_authority(
 /// teardown path and the admission path share one authority, one bad Complete
 /// refused every subsequent connection for the process lifetime.
 #[test]
-fn a_pre_durable_write_failure_leaves_admission_working()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_pre_durable_write_failure_leaves_admission_working() -> Result<(), Box<dyn std::error::Error>>
+{
     let store = store()?;
     let authority = started_authority(&store, 4, 3)?;
     let before = block_on(store.read_from(IncarnationStream::stream_key(), 0, 64))??;
@@ -641,6 +641,8 @@ fn readiness_goes_false_while_admission_is_held_and_true_again_on_recovery()
     // Recovery is visible on the same surface: nothing restarts, and readiness
     // comes back on its own once the store does.
     failing.bring_reads_up();
+    // The client ends are retained so the admitted connection is not torn down
+    // by an EOF before readiness is read back.
     let mut sockets = Vec::new();
     for _ in 0..8_u8 {
         let (client, server) = tcp_pair()?;
@@ -649,6 +651,10 @@ fn readiness_goes_false_while_admission_is_held_and_true_again_on_recovery()
             break;
         }
     }
+    assert!(
+        !sockets.is_empty(),
+        "at least one attempt must have been made"
+    );
     assert!(
         readiness_check(&readiness.snapshot()).ready,
         "readiness must return once admission does"
@@ -768,6 +774,7 @@ fn an_ambiguous_durable_write_holds_admission_and_then_recovers_by_reading()
     // 3. The store comes back. Nothing restarts; nothing is told. The next
     //    connections simply arrive, and one of them is admitted.
     failing.bring_reads_up();
+    // Retained so an admitted connection is not immediately closed by EOF.
     let mut sockets = Vec::new();
     let mut admitted = false;
     for _ in 0..RECOVERY_ATTEMPT_BUDGET {
@@ -778,6 +785,10 @@ fn an_ambiguous_durable_write_holds_admission_and_then_recovers_by_reading()
             break;
         }
     }
+    assert!(
+        !sockets.is_empty(),
+        "at least one attempt must have been made"
+    );
     assert!(
         admitted,
         "admission must recover by re-reading the store, without a process restart"
