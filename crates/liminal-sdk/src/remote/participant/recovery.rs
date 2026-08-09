@@ -15,8 +15,8 @@ use liminal_protocol::wire::{ClientRequest, DetachRequest};
 use super::{
     OperationDurability, ParticipantResumeStore, RemoteOperationTransportFate,
     RemoteParticipantError, RemoteParticipantHandle, RemoteParticipantOperation,
-    RemoteParticipantSendOutcome, RemoteReconnectPermit, RemoteReconnectPermitOutcome, persist,
-    record_connection_fate, record_operation_transport_fate, take_aggregate,
+    RemoteParticipantSendOutcome, RemoteReconnectPermit, RemoteReconnectPermitOutcome,
+    persist_retaining, record_connection_fate, record_operation_transport_fate, take_aggregate,
 };
 
 /// Result of releasing a committed cold-restored operation.
@@ -240,7 +240,7 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
         let mut aggregate = take_aggregate(&mut state)?;
         let abandonment = aggregate.take_restored_operation_abandonment();
         if abandonment.is_some() {
-            persist(&mut state.store, &aggregate)?;
+            aggregate = persist_retaining(&mut state, aggregate)?;
         }
         state.aggregate = Some(aggregate);
         Ok(abandonment)
@@ -397,7 +397,7 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
                 });
             }
         };
-        persist(&mut state.store, &aggregate)?;
+        let aggregate = persist_retaining(&mut state, aggregate)?;
         state.aggregate = Some(aggregate);
         drop(state);
 
@@ -412,7 +412,7 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
         let aggregate = take_aggregate(&mut state)?;
         match record_attempt_fate(aggregate, attempt, fate) {
             ReconnectAttemptFateDecision::Recorded(aggregate) => {
-                persist(&mut state.store, &aggregate)?;
+                let aggregate = persist_retaining(&mut state, aggregate)?;
                 state.aggregate = Some(aggregate);
                 match transport_result {
                     Ok(provenance) => Ok(RemoteReconnectAttemptOutcome::Connected { provenance }),
@@ -479,7 +479,7 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
                 return Ok(RemoteDetachReplayOutcome::Refused { reason });
             }
         };
-        persist(&mut state.store, &aggregate)?;
+        let aggregate = persist_retaining(&mut state, aggregate)?;
         let (request, correlation) = attempt.into_request();
         let request = ClientRequest::Detach(DetachRequest {
             conversation_id: request.conversation_id,
@@ -534,7 +534,7 @@ fn checkpoint_state<S: ParticipantResumeStore>(
     state: &mut super::RemoteParticipantState<S>,
 ) -> Result<(), RemoteParticipantError> {
     let aggregate = take_aggregate(state)?;
-    persist(&mut state.store, &aggregate)?;
+    let aggregate = persist_retaining(state, aggregate)?;
     state.aggregate = Some(aggregate);
     Ok(())
 }

@@ -218,7 +218,10 @@ fn refused_detach_authority_never_destroys_live_participant_state() -> TestResul
     // Whatever it reported, the handle still owns its aggregate. These three
     // probe different seams: no persist, a persist, then a persist again --
     // proving the re-seat holds on the failing path too, not just once.
-    alive(&restored.recover_expected_operation(), "recover_expected_operation")?;
+    alive(
+        &restored.recover_expected_operation(),
+        "recover_expected_operation",
+    )?;
     alive(&restored.record_transport_fate(), "record_transport_fate")?;
     alive(
         &restored.recover_expected_operation(),
@@ -232,9 +235,7 @@ fn refused_detach_authority_never_destroys_live_participant_state() -> TestResul
 /// its credential, holding an issued gen-1 detach it never got an answer to.
 /// Returns the loopback, those bytes, and a config on a fresh session whose
 /// broker has rotated past the replayed generation.
-fn torn_rotation_state(
-    token: DetachAttemptToken,
-) -> TestResult<(Loopback, Vec<u8>, RemoteConfig)> {
+fn torn_rotation_state(token: DetachAttemptToken) -> TestResult<(Loopback, Vec<u8>, RemoteConfig)> {
     let loopback = Loopback::spawn(vec![
         vec![
             Action::Respond(vec![enroll_bound(CONVERSATION, [1; 16])?]),

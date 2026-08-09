@@ -395,9 +395,9 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
         operation: RemoteParticipantOperation,
     ) -> Result<RemoteParticipantSendOutcome, RemoteParticipantError> {
         let mut state = self.state.lock();
-        let aggregate = take_aggregate(&mut state)?;
+        let mut aggregate = take_aggregate(&mut state)?;
         if operation.durability == OperationDurability::WriteAhead {
-            persist(&mut state.store, &aggregate)?;
+            aggregate = persist_retaining(&mut state, aggregate)?;
         }
         let (request, correlation) = operation.operation.into_request();
         match self
@@ -465,7 +465,7 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
             match decide_correlated_inbound(aggregate, value, correlation) {
                 ClientCorrelatedInboundDecision::Applied(applied) => {
                     let (aggregate, value) = applied.into_parts();
-                    persist(&mut state.store, &aggregate)?;
+                    let aggregate = persist_retaining(&mut state, aggregate)?;
                     state.aggregate = Some(aggregate);
                     Ok(RemoteParticipantInbound::Applied { value, provenance })
                 }
@@ -485,7 +485,7 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
             match decide_inbound(aggregate, value) {
                 ClientInboundDecision::Applied(applied) => {
                     let (aggregate, value) = applied.into_parts();
-                    persist(&mut state.store, &aggregate)?;
+                    let aggregate = persist_retaining(&mut state, aggregate)?;
                     state.aggregate = Some(aggregate);
                     Ok(RemoteParticipantInbound::Applied { value, provenance })
                 }
@@ -523,6 +523,49 @@ pub(super) fn persist<S: ParticipantResumeStore>(
     store
         .persist(&record.encode_canonical())
         .map_err(RemoteParticipantError::Storage)
+}
+
+/// Persists `aggregate`, returning it to the caller on success and RE-SEATING it
+/// in `state` when encoding refused.
+///
+/// The two failure modes are not alike, and the difference is durability
+/// ambiguity:
+///
+/// * [`RemoteParticipantError::Storage`] means the store was asked to commit
+///   bytes and did not say it succeeded. Whether those bytes landed is unknown,
+///   so no further authority may be released from this aggregate. The handle
+///   is deliberately left bricked and the next call reports
+///   [`StateUnavailable`](RemoteParticipantError::StateUnavailable) -- the
+///   contract documented on that variant.
+/// * [`RemoteParticipantError::ResumeEncode`] means `resume_record`, a pure
+///   function of the aggregate, refused. Nothing was written and no authority
+///   was released, so there is nothing ambiguous to protect. Dropping the
+///   aggregate here converts a typed, catchable refusal into a permanently dead
+///   participant.
+///
+/// The re-seat lives in this function rather than at each seam on purpose: the
+/// SDK has ten `take_aggregate` -> persist -> re-seat sites, the `?` skips the
+/// re-seat at every one of them, and a new seam would inherit the same bug.
+/// Here it cannot be forgotten.
+///
+/// A caller that still needs the aggregate takes it back from the `Ok`; a
+/// caller that does not re-seats it itself. On the `ResumeEncode` path the
+/// aggregate is already seated, so callers must not seat it again.
+pub(super) fn persist_retaining<S: ParticipantResumeStore>(
+    state: &mut RemoteParticipantState<S>,
+    aggregate: ClientParticipantAggregate,
+) -> Result<ClientParticipantAggregate, RemoteParticipantError> {
+    match aggregate.resume_record() {
+        Ok(record) => state
+            .store
+            .persist(&record.encode_canonical())
+            .map(|()| aggregate)
+            .map_err(RemoteParticipantError::Storage),
+        Err(error) => {
+            state.aggregate = Some(aggregate);
+            Err(RemoteParticipantError::ResumeEncode(error))
+        }
+    }
 }
 
 fn record_operation_transport_fate<S: ParticipantResumeStore>(
@@ -608,7 +651,7 @@ pub(super) fn record_connection_fate<S: ParticipantResumeStore>(
             )
         }
     };
-    persist(&mut state.store, &aggregate)?;
+    let aggregate = persist_retaining(state, aggregate)?;
     state.aggregate = Some(aggregate);
     Ok(outcome)
 }
