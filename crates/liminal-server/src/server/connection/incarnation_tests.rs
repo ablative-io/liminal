@@ -18,7 +18,7 @@ use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
 use crate::server::listener::ServerListener;
 use crate::server::participant::incarnation_stream::{
-    ConnectionFateClass, IncarnationStream, encode_allocate_event_fixture,
+    ConnectionFateClass, IncarnationStartup, IncarnationStream, encode_allocate_event_fixture,
     encode_complete_connection_fate_event_fixture, encode_open_connection_fate_event_fixture,
     encode_startup_event_fixture,
 };
@@ -190,6 +190,62 @@ fn connection_ordinal_exhaustion_is_a_typed_admission_failure()
             attempted_server_incarnation: 9,
         })
     ));
+    Ok(())
+}
+
+/// Builds a live authority over `store` with no injected failure.
+fn started_authority(
+    store: &Arc<dyn DurableStore>,
+    maximum_references: usize,
+    maximum_conversations: usize,
+) -> Result<ConnectionIncarnationAuthority, Box<dyn std::error::Error>> {
+    let startup =
+        block_on(IncarnationStream::new(Arc::clone(store), maximum_references).startup())??;
+    let IncarnationStartup::Started(started) = startup else {
+        return Err("fresh stream unexpectedly required recovery or exhaustion".into());
+    };
+    Ok(ConnectionIncarnationAuthority::from_started_for_test(
+        started,
+        maximum_conversations,
+    ))
+}
+
+/// P0 #56 pin 1: a failure that CANNOT have written durable bytes must not
+/// disarm admission for the rest of the process.
+///
+/// `complete_connection_fate` validates the named Open against the unmatched set
+/// BEFORE it encodes or appends anything
+/// (`participant/incarnation_stream.rs::complete_connection_fate`), so a Complete
+/// for an absent Open is a pure pre-write refusal: the durable stream is
+/// byte-identical afterwards and nothing about it is ambiguous. Before this fix
+/// that refusal still left the shared authority `Failed`, and because the
+/// teardown path and the admission path share one authority, one bad Complete
+/// refused every subsequent connection for the process lifetime.
+#[test]
+fn a_pre_durable_write_failure_leaves_admission_working()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = store()?;
+    let authority = started_authority(&store, 4, 3)?;
+    let before = block_on(store.read_from(IncarnationStream::stream_key(), 0, 64))??;
+
+    // No Open has ever been appended, so this Complete cannot match one.
+    let refused = authority.complete_connection_fate(9_999);
+    assert!(
+        refused.is_err(),
+        "a Complete for an absent Open must be refused"
+    );
+
+    // The pre-write refusal wrote nothing: the durable stream is unchanged.
+    let after = block_on(store.read_from(IncarnationStream::stream_key(), 0, 64))??;
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "a pre-write refusal must not append to the durable stream"
+    );
+
+    // And the next connection is admitted normally.
+    let admitted = authority.allocate(&[])?;
+    assert_eq!(admitted, ConnectionIncarnation::new(1, 0));
     Ok(())
 }
 
