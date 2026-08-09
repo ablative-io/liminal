@@ -483,3 +483,58 @@ fn b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate()
     );
     Ok(())
 }
+
+/// A shed WebSocket subscription must surface a typed error to the consumer, not
+/// silence. The SDK reader mapped every non-`Deliver` frame to `None` and its
+/// caller ignored that, so the server's `SubscribeError` -- the one frame that
+/// explains the silence -- was dropped between the socket and the consumer.
+///
+/// Terminal by design: the shed releases the subscription at the channel actor,
+/// so there is nothing left to receive on. This pins that the consumer is TOLD,
+/// and pins nothing about resubscribing (that policy is not this lane's).
+#[test]
+fn c_a_shed_websocket_subscription_surfaces_a_typed_error() -> Result<(), Box<dyn Error>> {
+    let _gate = PIN_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let server = RunningServer::start(Some(1))?;
+    let ws_stream = open_ws_subscription(&server)?;
+    let accepted = publish_burst(&server, SHED_BURST)?;
+    let (received, error) = drain_ws(&ws_stream, accepted);
+
+    assert!(
+        received < accepted,
+        "the fixture failed to force a shed: received {received} of {accepted} accepted"
+    );
+    let error = error.ok_or("a shed subscriber returned no terminal error at all")?;
+    assert!(
+        error.contains("shed"),
+        "the WebSocket subscriber was shed and told only that nothing arrived; the \
+         server's SubscribeError never reached the consumer. terminal error was: {error}"
+    );
+    Ok(())
+}
+
+/// The TCP twin of pin C. Its reader had the same hole -- an `_ => {}` arm that
+/// ignored every non-`Deliver` frame -- so the two transports must be fixed and
+/// pinned together or the SDK teaches two different lessons about the same event.
+#[test]
+fn d_a_shed_tcp_subscription_surfaces_a_typed_error() -> Result<(), Box<dyn Error>> {
+    let _gate = PIN_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let server = RunningServer::start(Some(1))?;
+    let tcp_stream = open_tcp_subscription(&server)?;
+    let accepted = publish_burst(&server, SHED_BURST)?;
+    let (received, error) = drain_tcp(&tcp_stream, accepted);
+
+    assert!(
+        received < accepted,
+        "the fixture failed to force a shed: received {received} of {accepted} accepted"
+    );
+    let error = error.ok_or("a shed subscriber returned no terminal error at all")?;
+    assert!(
+        error.contains("shed"),
+        "the TCP subscriber was shed and told only that nothing arrived; the server's \
+         SubscribeError never reached the consumer. terminal error was: {error}"
+    );
+    Ok(())
+}
