@@ -312,11 +312,23 @@ pub struct LimitsConfig {
     /// enqueue and released at dequeue.
     #[serde(default = "default_max_connection_inbox_bytes")]
     pub max_connection_inbox_bytes: usize,
-    /// Per-inbox envelope-count secondary fairness trip (§5: 256) — stops one
-    /// subscription starving its siblings inside the shared byte budget; no longer
-    /// load-bearing for the signed bound.
+    /// Per-inbox envelope-count secondary fairness trip — stops one subscription
+    /// starving its siblings inside the shared byte budget. See
+    /// [`LimitsConfig::DEFAULT_MAX_SUBSCRIPTION_INBOX_DEPTH`] for why the default
+    /// is what it is; the short version is that this cap is the CRUDE bound and
+    /// [`LimitsConfig::max_connection_inbox_bytes`] is the real one.
     #[serde(default = "default_max_subscription_inbox_depth")]
     pub max_subscription_inbox_depth: usize,
+    /// Per-slice cap on `Deliver` frames one connection may enqueue across all of
+    /// its subscriptions, before the scheduler moves on to its peers.
+    ///
+    /// Operator-visible because P0 #55 proved it decides whether a subscriber
+    /// behind a burst survives — but see
+    /// [`LimitsConfig::DEFAULT_DELIVERY_SLICE_BUDGET`] for why the DEFAULT is not
+    /// raised. Raising it trades one starvation for another, and the measurement
+    /// that showed it moves the outcome could not see the starvation it causes.
+    #[serde(default = "default_delivery_slice_budget")]
+    pub delivery_slice_budget: usize,
     /// Runtime-registered channels this deployment admits.
     ///
     /// # Why this cap departs the uniform pattern
@@ -360,15 +372,73 @@ impl LimitsConfig {
     pub const DEFAULT_MAX_PENDING_REPLIES_PER_CONVERSATION: usize = 8;
     /// §5 default: shared per-connection inbox byte budget (4 MiB).
     pub const DEFAULT_MAX_CONNECTION_INBOX_BYTES: usize = 4 * 1024 * 1024;
-    /// §5 default: per-inbox envelope-count fairness trip.
-    pub const DEFAULT_MAX_SUBSCRIPTION_INBOX_DEPTH: usize = 256;
+    /// Default per-inbox envelope-count fairness trip.
+    ///
+    /// # Why 4096 and not the §5-era 256 (P0 #55)
+    ///
+    /// A subscription inbox is bounded TWICE: by
+    /// [`Self::DEFAULT_MAX_CONNECTION_INBOX_BYTES`] (4 MiB, shared across all of
+    /// one connection's inboxes) and by this envelope COUNT. Memory is the real
+    /// resource, so the byte budget is the bound that should bind and this one is
+    /// meant to be a fairness backstop behind it.
+    ///
+    /// Which one binds first is decided by record size. For a connection holding a
+    /// single subscription, the crossover — the record size at which the two caps
+    /// trip together — is `4 MiB / depth`:
+    ///
+    /// | depth | crossover record size  | binds first for a 1 KiB record |
+    /// |-------|------------------------|--------------------------------|
+    /// | 256   | 4194304/256 = 16 KiB   | the COUNT (at 256 KiB, 6% of 4 MiB) |
+    /// | 4096  | 4194304/4096 = 1 KiB   | the BYTES (as intended)        |
+    ///
+    /// At 256 the count cap therefore binds for every record smaller than 16 KiB —
+    /// which is nearly all real traffic — and it binds at a small fraction of the
+    /// memory the connection is actually permitted: at a 164-byte record, 256
+    /// envelopes is 41 KiB, ~1% of the 4 MiB budget. A replay burst is thousands of
+    /// SMALL records, which is precisely the shape that hits the crude bound while
+    /// the real bound sits untouched. That is the P0: a live subscriber shed for
+    /// exceeding a fairness trip it reached at 1% of its memory allowance.
+    ///
+    /// At 4096 the crossover falls to 1 KiB, so bytes bind for realistic records
+    /// and this cap returns to backstop duty.
+    ///
+    /// Honest bound on that arithmetic: the byte budget is per CONNECTION and this
+    /// cap is per SUBSCRIPTION, so with `S` subscriptions sharing one connection
+    /// the effective crossover is `4 MiB / S / depth`. The table above is the `S=1`
+    /// case. A connection holding many subscriptions of small records can still
+    /// reach the count cap first — which is exactly the sibling-starvation case
+    /// this cap exists to catch.
+    pub const DEFAULT_MAX_SUBSCRIPTION_INBOX_DEPTH: usize = 4096;
+    /// Default per-slice `Deliver` budget for one connection — the source of truth
+    /// for [`crate::config::LimitsConfig::delivery_slice_budget`] and for the
+    /// delivery pump's own `DELIVERY_SLICE_BUDGET`.
+    ///
+    /// # Why this is NOT raised (P0 #55)
+    ///
+    /// This is the cross-connection FAIRNESS bound: it caps how long one connection
+    /// may hold a shared scheduler thread before its peers get a turn. Raising it
+    /// makes a burst subscriber's own drain finish in fewer scheduling round trips,
+    /// and the P0 #55 2x2 measured exactly that — 0/192 boots lost a subscriber at
+    /// 256 against roughly half of them at 32.
+    ///
+    /// That experiment does not license raising the default. It ran two or three
+    /// connections, so the peer starvation a raise would CAUSE was unobservable BY
+    /// CONSTRUCTION: with no queue of waiting peers there is nothing for a longer
+    /// slice to delay. What was measured is that this knob moves the outcome, not
+    /// that moving it is safe.
+    ///
+    /// So the number stays 32 and becomes an operator DECISION instead: a
+    /// deployment that knows its connection count and its burst shape can raise it
+    /// deliberately. The default does not make that trade on anyone's behalf.
+    /// The P0's actual fix is [`Self::DEFAULT_MAX_SUBSCRIPTION_INBOX_DEPTH`].
+    pub const DEFAULT_DELIVERY_SLICE_BUDGET: usize = 32;
 
     /// Validates the caps: every value must be non-zero (a zero cap gates nothing
     /// — the unlimited-by-silence state §5 outlaws). Errors are accumulated into
     /// `errors` (one per offending field) so an operator sees every bad cap at
     /// once, matching the rest of config validation.
     pub(crate) fn collect_errors(&self, errors: &mut Vec<String>) {
-        let checks: [(&str, usize); 8] = [
+        let checks: [(&str, usize); 9] = [
             ("max_connections", self.max_connections),
             (
                 "max_subscriptions_per_connection",
@@ -398,6 +468,10 @@ impl LimitsConfig {
                 "max_subscription_inbox_depth",
                 self.max_subscription_inbox_depth,
             ),
+            // A zero here would make the delivery pump enqueue nothing on any
+            // slice — every subscription silently stalled forever, which is the
+            // unlimited-by-silence failure wearing the opposite sign.
+            ("delivery_slice_budget", self.delivery_slice_budget),
         ];
         for (field, value) in checks {
             if value == 0 {
@@ -444,6 +518,7 @@ impl Default for LimitsConfig {
             max_pending_replies_per_conversation: default_max_pending_replies_per_conversation(),
             max_connection_inbox_bytes: default_max_connection_inbox_bytes(),
             max_subscription_inbox_depth: default_max_subscription_inbox_depth(),
+            delivery_slice_budget: default_delivery_slice_budget(),
             // No signed bound exists for this cap, so the default is the
             // absence of a declaration — never a number.
             max_channels: None,
@@ -474,6 +549,9 @@ const fn default_max_connection_inbox_bytes() -> usize {
 }
 const fn default_max_subscription_inbox_depth() -> usize {
     LimitsConfig::DEFAULT_MAX_SUBSCRIPTION_INBOX_DEPTH
+}
+const fn default_delivery_slice_budget() -> usize {
+    LimitsConfig::DEFAULT_DELIVERY_SLICE_BUDGET
 }
 
 /// Participant lifecycle configuration (`[participant]`).

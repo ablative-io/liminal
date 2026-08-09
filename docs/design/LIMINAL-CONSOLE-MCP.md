@@ -814,8 +814,9 @@ cost, not smuggled in here. **Absent-by-profile** in worker-front-door.
 host atomics)"). An earlier revision deferred it; Ruling A reversed that:
 implement the settled seam, do not amend it. The shape chosen is
 **per-subscription** (not per-connection aggregate) because the governing cap
-— `max_subscription_inbox_depth` = 256 — is per-subscription: an aggregate
-cannot be compared against the cap it exists to observe.
+— `max_subscription_inbox_depth` = 4096 (256 before the P0 #55 defaults ruling)
+— is per-subscription: an aggregate cannot be compared against the cap it exists
+to observe.
 
 **Re-priced honestly (Sol r2 — "one Relaxed write beside the lock" was an
 under-claim):** because the write is mandated INSIDE the lock, the cost is
@@ -886,7 +887,15 @@ atomic the relevant view already maintains:
 | `max_pending_conversation_replies_per_connection` | 32 | conversations.`pending_replies` (per-connection, bundle — §4.4) | `arcswap` |
 | `max_pending_replies_per_conversation` | 8 | `max_pending_plus_tombstones_per_conversation` (per-connection WORST-conversation value, bundle — full row below). **Scope-matching, per Sol r2:** the earlier `saturated_conversations` pairing was semantically invalid — a count of saturated conversations (e.g. 9) compared against limit 8 reads as false over-cap pressure; the caps row needs a value in the CAP'S unit (pending+tombstones of the worst conversation), which this is. | `arcswap` |
 | `max_connection_inbox_bytes` | 4 MiB | subscriptions.`inbox_bytes_used` (per-connection, shared budget atomic — §4.3) | `arcswap` |
-| `max_subscription_inbox_depth` | 256 | subscriptions.`depth` (per-subscription — §4.3) + overflow counter | `arcswap` + `atomic` |
+| `max_subscription_inbox_depth` | 4096 | subscriptions.`depth` (per-subscription — §4.3) + overflow counter | `arcswap` + `atomic` |
+
+`limits.delivery_slice_budget` (default 32) is the ninth cap in the config
+section and is deliberately ABSENT from this table. Every row above pairs a cap
+with a gauge in the cap's own unit; the slice budget's unit is frames-per-slice,
+and no gauge for it has been designed. Adding a row with a plausible-looking
+pairing would invent a design decision nobody made — the same error Sol r2 caught
+on the `max_pending_replies_per_conversation` row. It joins the table when its
+gauge is specified, not before.
 
 **Granularity, resolved (supersedes the earlier deferral):** an earlier
 revision paired two per-connection caps with process-global gauges and

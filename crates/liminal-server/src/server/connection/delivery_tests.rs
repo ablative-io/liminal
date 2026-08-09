@@ -4,11 +4,18 @@ use liminal::channel::SchemaId;
 use liminal::envelope::{Envelope, PublisherId};
 use liminal::protocol::{Frame, SchemaId as ProtocolSchemaId, decode};
 
-use super::{DELIVERY_SLICE_BUDGET, service_subscriptions};
+use super::service_subscriptions;
 use crate::ServerError;
+use crate::config::LimitsConfig;
 use crate::server::connection::outbound::OutboundWriter;
 use crate::server::connection::services::{ConnectionSubscription, SubscriptionResource};
 use crate::server::connection::state::ConnectionProcessState;
+
+/// The stock per-slice budget these unit tests mean when they say "a slice".
+///
+/// The pump takes its budget from `limits.delivery_slice_budget` now, so these
+/// direct callers name the DEFAULT explicitly rather than inherit it.
+const DELIVERY_SLICE_BUDGET: usize = LimitsConfig::DEFAULT_DELIVERY_SLICE_BUDGET;
 
 /// A subscription resource that hands out preset envelopes in order, standing in
 /// for a live subscriber inbox. `overflowed` stands in for a §5 inbox overflow so

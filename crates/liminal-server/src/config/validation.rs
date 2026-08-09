@@ -995,7 +995,20 @@ mod tests {
         );
         assert_eq!(config.limits.max_pending_replies_per_conversation, 8);
         assert_eq!(config.limits.max_connection_inbox_bytes, 4 * 1024 * 1024);
-        assert_eq!(config.limits.max_subscription_inbox_depth, 256);
+        // P0 #55 part 2: 4096, not the §5-era 256. The two caps that bound a
+        // subscription inbox are asserted TOGETHER here because the ruling is
+        // about their RATIO, not either number: the byte budget must be the one
+        // that binds for realistic records, which requires
+        // `max_connection_inbox_bytes / max_subscription_inbox_depth` to sit at or
+        // below the record sizes real traffic carries. Changing either constant
+        // without the other moves that crossover, so this pin fails on both.
+        assert_eq!(config.limits.max_subscription_inbox_depth, 4096);
+        assert_eq!(
+            config.limits.max_connection_inbox_bytes / config.limits.max_subscription_inbox_depth,
+            1024,
+            "the byte-vs-count crossover must stay at 1 KiB per record"
+        );
+        assert_eq!(config.limits.delivery_slice_budget, 32);
         validate(&mut config, None)?;
         Ok(())
     }
@@ -1005,7 +1018,7 @@ mod tests {
     #[test]
     fn zero_limits_are_typed_config_errors() -> Result<(), Box<dyn std::error::Error>> {
         type LimitMutator = (&'static str, fn(&mut ServerConfig));
-        let mutators: [LimitMutator; 8] = [
+        let mutators: [LimitMutator; 9] = [
             ("max_connections", |c| c.limits.max_connections = 0),
             ("max_subscriptions_per_connection", |c| {
                 c.limits.max_subscriptions_per_connection = 0;
@@ -1027,6 +1040,9 @@ mod tests {
             }),
             ("max_subscription_inbox_depth", |c| {
                 c.limits.max_subscription_inbox_depth = 0;
+            }),
+            ("delivery_slice_budget", |c| {
+                c.limits.delivery_slice_budget = 0;
             }),
         ];
         for (field, mutate) in mutators {

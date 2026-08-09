@@ -226,6 +226,80 @@ seed_nodes = ["127.0.0.1:9001"]
         Ok(())
     }
 
+    /// A minimal config that validates from ANY directory: no `schema_ref`, so
+    /// validation has no file to resolve relative to the temp dir the limits pins
+    /// write into. `valid_toml` deliberately carries a schema reference, which
+    /// makes it the wrong fixture for a pin about `[limits]`.
+    fn schema_free_toml() -> &'static str {
+        r#"
+listen_address = "127.0.0.1:8080"
+health_listen_address = "127.0.0.1:8081"
+drain_timeout_ms = 30000
+
+[[channels]]
+name = "orders"
+durable = false
+
+[[routing_rules]]
+source_channel = "orders"
+target_channel = "orders"
+"#
+    }
+
+    /// P0 #55 part 2: the two delivery caps are DEFAULTS, not constants, and the
+    /// operator's number must survive the WHOLE pipeline — file parse, environment
+    /// overrides, validation — not just `serde`.
+    ///
+    /// `load_config` is deliberately the entry point here rather than
+    /// `load_from_file`: the environment-override pass runs between parse and
+    /// validation, and a pin that stopped at the parse would go green on a loader
+    /// that silently reset limits afterwards.
+    ///
+    /// The section sets only TWO of the nine caps on purpose. A partial `[limits]`
+    /// table is the shape an operator actually writes, and it is the shape that
+    /// catches a `#[serde(default)]` regression on the whole struct: if the caps
+    /// ever stop defaulting per FIELD, the seven untouched ones collapse to zero
+    /// and validation refuses the file.
+    #[test]
+    fn operator_set_delivery_caps_survive_the_whole_load_pipeline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let operator_toml = format!(
+            "{}\n[limits]\nmax_subscription_inbox_depth = 9001\ndelivery_slice_budget = 7\n",
+            schema_free_toml()
+        );
+        let path = write_temp_config("operator-limits", &operator_toml)?;
+
+        let config = load_config(&path)?;
+
+        assert_eq!(config.limits.max_subscription_inbox_depth, 9001);
+        assert_eq!(config.limits.delivery_slice_budget, 7);
+        // The seven caps the operator did NOT name still carry their defaults —
+        // the per-field default survived a partially-populated section.
+        assert_eq!(config.limits.max_connections, 256);
+        assert_eq!(config.limits.max_connection_inbox_bytes, 4 * 1024 * 1024);
+
+        remove_temp_file(&path)?;
+        Ok(())
+    }
+
+    /// The other half of the pin above: an ABSENT `[limits]` section resolves both
+    /// delivery caps to the shipped defaults through the same pipeline. Without
+    /// this, the override pin alone could not tell a working default from a
+    /// coincidence — it only ever observes numbers the file supplied.
+    #[test]
+    fn absent_limits_section_resolves_the_shipped_delivery_defaults()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = write_temp_config("absent-limits", schema_free_toml())?;
+
+        let config = load_config(&path)?;
+
+        assert_eq!(config.limits.max_subscription_inbox_depth, 4096);
+        assert_eq!(config.limits.delivery_slice_budget, 32);
+
+        remove_temp_file(&path)?;
+        Ok(())
+    }
+
     #[test]
     fn missing_file_returns_config_load() {
         let path = temp_config_path("missing");
