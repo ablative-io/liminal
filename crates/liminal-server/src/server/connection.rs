@@ -26,6 +26,11 @@ mod participant_runtime_tests;
 mod pending_reply;
 #[path = "connection/process.rs"]
 mod process;
+#[path = "connection/refusal.rs"]
+pub(super) mod refusal;
+#[cfg(test)]
+#[path = "connection/refusal_tests.rs"]
+mod refusal_tests;
 #[path = "connection/services.rs"]
 pub mod services;
 #[path = "connection/services_cluster.rs"]

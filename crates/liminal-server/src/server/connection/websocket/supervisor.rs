@@ -21,6 +21,7 @@ use beamr::native::native_process::NativeHandlerFactory;
 use tungstenite::protocol::{Role, WebSocket};
 
 use super::super::ConnectionSupervisor;
+use super::super::refusal::{AdmissionRefusal, send_websocket_refusal};
 use super::process::WebSocketConnectionProcess;
 use super::{AcceptorSettings, HandshakeOutcome, perform_upgrade, pinned_protocol_config};
 
@@ -333,6 +334,11 @@ impl HandshakeShared {
             Some(pinned_protocol_config(self.settings.message_bound)),
         );
         let holder = Arc::new(Mutex::new(Some(socket)));
+        // A second handle on the same holder, kept for the refusal path. The
+        // build closure below takes ownership of the first one, so without this
+        // the upgraded socket would be unreachable at exactly the moment the
+        // server needs to say why it is not being used.
+        let refusal_holder = Arc::clone(&holder);
         let settings = Arc::clone(&self.settings);
         let build = move |runtime: Arc<super::super::supervisor::ConnectionRuntime>,
                           incarnation: Option<liminal_protocol::wire::ConnectionIncarnation>|
@@ -363,12 +369,50 @@ impl HandshakeShared {
                 );
             }
             Err(error) => {
-                // Admission refusal (§5 max_connections) or spawn failure: the
-                // refusal is loud and the socket is closed; the holder (and the
-                // upgraded socket inside it) drops here.
-                tracing::warn!(?peer_addr, %error, "websocket connection refused at spawn");
+                // Admission refusal (§5 max_connections, a held incarnation
+                // authority, a participant fatal) or spawn failure. The 101 has
+                // already been written and flushed, so the client has a live
+                // WebSocket: dropping the socket here would show it close 1006
+                // with zero frames, which reads as a transport fault rather
+                // than the deliberate decision it is. Tell it, then close.
+                let refusal = AdmissionRefusal::classify(&error);
+                tracing::warn!(
+                    ?peer_addr,
+                    %error,
+                    refusal = refusal.label(),
+                    close_code = refusal.close_code(),
+                    "websocket connection refused at spawn"
+                );
+                Self::refuse_upgraded(&refusal_holder, peer_addr, refusal);
             }
         }
+    }
+
+    /// Sends the typed refusal on the upgraded socket and closes it.
+    ///
+    /// Takes the socket OUT of the holder so the refusal owns it: the build
+    /// closure that also referenced it is dropped by now, and leaving it in
+    /// place would risk a second writer on a socket that is being closed.
+    fn refuse_upgraded(
+        holder: &Arc<Mutex<Option<WebSocket<TcpStream>>>>,
+        peer_addr: Option<SocketAddr>,
+        refusal: AdmissionRefusal,
+    ) {
+        let Ok(mut guard) = holder.lock() else {
+            tracing::warn!(?peer_addr, "refusal holder poisoned; socket dropped bare");
+            return;
+        };
+        let Some(mut socket) = guard.take() else {
+            tracing::warn!(?peer_addr, "refusal holder empty; socket dropped bare");
+            return;
+        };
+        if let Err(error) = send_websocket_refusal(&mut socket, refusal) {
+            // The peer is gone or stopped reading. Nothing further to do — the
+            // connection was already refused, and this is the notification, not
+            // the decision.
+            tracing::debug!(?peer_addr, %error, "websocket refusal write failed");
+        }
+        drop(socket);
     }
 
     fn remove_inflight(&self, handshake_id: u64) {

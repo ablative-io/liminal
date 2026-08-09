@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 
 use super::connection::ConnectionSupervisor;
+use super::connection::refusal::{AdmissionRefusal, send_tcp_refusal};
 use crate::ServerError;
 use crate::config::types::ServerConfig;
 
@@ -208,8 +209,30 @@ fn accept_loop(
                     drop(stream);
                     continue;
                 }
+                // The refusal handle is taken BEFORE the spawn, because
+                // `spawn_connection` consumes the stream by value and drops it
+                // on every failure path. The clone shares the same file
+                // description, so writing to it writes to the same socket the
+                // client is holding open — parity with the WebSocket route,
+                // which reaches its refused socket through the holder.
+                let refusal_socket = stream.try_clone().ok();
                 if let Err(error) = supervisor.spawn_connection(stream) {
-                    tracing::warn!(%peer_addr, %error, "failed to spawn connection process");
+                    let refusal = AdmissionRefusal::classify(&error);
+                    tracing::warn!(
+                        %peer_addr,
+                        %error,
+                        refusal = refusal.label(),
+                        "failed to spawn connection process"
+                    );
+                    if let Some(mut socket) = refusal_socket {
+                        if let Err(write_error) = send_tcp_refusal(&mut socket, refusal) {
+                            tracing::debug!(
+                                %peer_addr,
+                                %write_error,
+                                "tcp refusal write failed"
+                            );
+                        }
+                    }
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
