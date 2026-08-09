@@ -1,0 +1,20 @@
+########## SHED PIN RUN 1 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+Error: "metric family liminal_subscription_sheds_total is absent from the registry"
+test a_forced_shed_is_counted_and_logged ... FAILED
+Error: "liminal_transport_deliveries_total has no tcp sample"
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... FAILED
+
+failures:
+
+failures:
+    a_forced_shed_is_counted_and_logged
+    b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.28s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 1 TRUE EXIT=101
