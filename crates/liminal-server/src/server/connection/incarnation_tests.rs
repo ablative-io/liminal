@@ -1,3 +1,4 @@
+use std::io::Read as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -5,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use liminal::durability::{
     DurabilityError, DurableStore, StoredEntry, bridge::block_on, open_ephemeral,
 };
+use liminal::protocol::{Frame, decode};
 use liminal_protocol::wire::{ClientRequest, ServerValue};
 use liminal_protocol::{
     lifecycle::ConnectionIncarnationAllocatorRestore, wire::ConnectionIncarnation,
@@ -575,6 +577,55 @@ impl DurableStore for FailNthFlush {
         }
         self.inner.flush().await
     }
+}
+
+/// P0 #56 pin 3, end to end: a connection refused by the real accept loop is
+/// TOLD, on the wire, before the socket closes.
+///
+/// The unit-level flush proofs live in `refusal_tests`. This one exists because
+/// they cannot see the thing that actually broke in the field: the accept loop
+/// consumed the socket into `spawn_connection`, which dropped it on every
+/// failure path, so the refusal never had anything to be written on. A client
+/// saw a completed TCP connection and then an immediate FIN with zero bytes —
+/// indistinguishable from a crashed server.
+///
+/// A real listener, a real client socket, and `read_to_end` — so the assertion
+/// is over bytes the kernel delivered, not over anything the server merely
+/// intended.
+#[test]
+fn a_refused_connection_is_told_why_before_the_socket_closes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let inner = store()?;
+    let failing = Arc::new(FailNthFlush::new(Arc::clone(&inner), 2));
+    let config = config()?;
+    let supervisor =
+        ConnectionSupervisor::with_services(services(&config, Arc::clone(&failing) as _)?)?;
+    // Reads down as well as writes, so the resume replay cannot rescue this
+    // connection and the refusal is deterministic rather than a race.
+    failing.take_reads_down();
+    let listener = ServerListener::bind(&config, supervisor)?;
+    let address = listener.local_addr();
+
+    let mut client = TcpStream::connect(address)?;
+    let mut received = Vec::new();
+    client.read_to_end(&mut received)?;
+
+    assert!(
+        !received.is_empty(),
+        "a refused client must be told why, not handed a bare FIN"
+    );
+    let (frame, consumed) = decode(&received)?;
+    assert_eq!(consumed, received.len(), "the refusal is exactly one frame");
+    let Frame::ConnectError { message, .. } = frame else {
+        return Err(format!("expected ConnectError, got {frame:?}").into());
+    };
+    let message = message.ok_or("ConnectError carried no message")?;
+    assert!(
+        message.contains("admission refused"),
+        "the refusal must name its class, got: {message}"
+    );
+    listener.shutdown()?;
+    Ok(())
 }
 
 /// P0 #56 pin 2: an ambiguous durable write HOLDS admission, and the hold is
