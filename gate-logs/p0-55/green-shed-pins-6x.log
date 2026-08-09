@@ -1,0 +1,71 @@
+########## SHED PIN RUN 1 ##########
+   Compiling liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal-server)
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.58s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+
+SHED PIN RUN 1 TRUE EXIT=0
+########## SHED PIN RUN 2 ##########
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+
+SHED PIN RUN 2 TRUE EXIT=0
+########## SHED PIN RUN 3 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.16s
+
+SHED PIN RUN 3 TRUE EXIT=0
+########## SHED PIN RUN 4 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.18s
+
+SHED PIN RUN 4 TRUE EXIT=0
+########## SHED PIN RUN 5 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.11s
+
+SHED PIN RUN 5 TRUE EXIT=0
+########## SHED PIN RUN 6 ##########
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+test a_forced_shed_is_counted_and_logged ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+
+SHED PIN RUN 6 TRUE EXIT=0

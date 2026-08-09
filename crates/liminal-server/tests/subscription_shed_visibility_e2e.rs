@@ -70,6 +70,8 @@ static PIN_GATE: Mutex<()> = Mutex::new(());
 type CapturedLog = Arc<Mutex<Vec<u8>>>;
 
 static CAPTURED: OnceLock<CapturedLog> = OnceLock::new();
+/// Guards the one-shot global subscriber install.
+static SUBSCRIBER_INSTALLED: OnceLock<()> = OnceLock::new();
 
 #[derive(Clone)]
 struct CaptureWriter(CapturedLog);
@@ -78,6 +80,7 @@ impl Write for CaptureWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         guard.extend_from_slice(buf);
+        drop(guard);
         Ok(buf.len())
     }
 
@@ -90,8 +93,7 @@ impl Write for CaptureWriter {
 /// buffer. A second call is a no-op that returns the same buffer.
 fn captured_log() -> CapturedLog {
     let buffer = CAPTURED.get_or_init(|| Arc::new(Mutex::new(Vec::new())));
-    static INSTALLED: OnceLock<()> = OnceLock::new();
-    INSTALLED.get_or_init(|| {
+    SUBSCRIBER_INSTALLED.get_or_init(|| {
         let writer = CaptureWriter(Arc::clone(buffer));
         let _ = tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
@@ -104,7 +106,9 @@ fn captured_log() -> CapturedLog {
 
 fn captured_text(buffer: &CapturedLog) -> String {
     let guard = buffer.lock().unwrap_or_else(PoisonError::into_inner);
-    String::from_utf8_lossy(&guard).into_owned()
+    let text = String::from_utf8_lossy(&guard).into_owned();
+    drop(guard);
+    text
 }
 
 // ---------------------------------------------------------------------------

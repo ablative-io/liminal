@@ -70,6 +70,11 @@ pub trait SubscriptionResource: std::fmt::Debug + Send {
 #[derive(Debug)]
 pub struct ConnectionSubscription {
     id: u64,
+    /// Channel this subscription was opened on, carried for DIAGNOSTICS only —
+    /// the shed warning has to name the channel or an operator reading it learns
+    /// that something was shed without learning what. Empty when unset (the
+    /// scheduler-free unit fixtures, which construct through `new` and never log).
+    channel: String,
     /// Client-chosen application stream the server delivers this subscription's
     /// messages on (echoed on `SubscribeAck`, carried on every `Deliver`). Set by
     /// the connection process from the `Subscribe` frame before the subscription is
@@ -89,10 +94,25 @@ impl ConnectionSubscription {
     ) -> Self {
         Self {
             id,
+            channel: String::new(),
             stream_id: 0,
             selected_schema,
             resource,
         }
+    }
+
+    /// Records the channel this subscription was opened on (diagnostics).
+    ///
+    /// Additive setter rather than a fourth `new` parameter: `new` is public API
+    /// and its existing callers keep compiling byte-for-byte.
+    pub(super) fn set_channel(&mut self, channel: String) {
+        self.channel = channel;
+    }
+
+    /// The channel this subscription was opened on, or `""` when unset.
+    #[must_use]
+    pub(super) fn channel(&self) -> &str {
+        &self.channel
     }
 
     /// Returns the protocol subscription id.
@@ -1648,11 +1668,13 @@ impl ConnectionServices for LiminalConnectionServices {
                 message: format!("liminal subscribe failed for channel '{channel}': {error}"),
             })?;
         let id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
-        Ok(ConnectionSubscription::new(
+        let mut connection_subscription = ConnectionSubscription::new(
             id,
             selected_schema,
             Box::new(LiminalSubscriptionResource { subscription }),
-        ))
+        );
+        connection_subscription.set_channel(channel.to_owned());
+        Ok(connection_subscription)
     }
 
     fn unsubscribe(&self, subscription: ConnectionSubscription) -> Result<(), ServerError> {

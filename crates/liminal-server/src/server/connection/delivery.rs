@@ -114,9 +114,14 @@ pub(super) fn service_subscriptions<Sink: DeliverySink>(
         subscriptions,
         delivery_seqs,
         held_deliveries,
+        mount,
         ..
     } = state;
+    // The transport this connection was admitted on, already stamped by its spawn
+    // path — the pump does not need to be told which door it is behind.
+    let transport = *mount;
     let mut remaining = budget;
+    let mut delivered = 0_u64;
     // §5 shed: subscriptions whose inbox overflowed the connection byte budget or
     // the fairness trip. Each is sent a typed `SubscribeError` here and removed by
     // the caller after the loop (a subscription cannot be removed mid-iteration).
@@ -160,6 +165,24 @@ pub(super) fn service_subscriptions<Sink: DeliverySink>(
                 continue;
             }
             outbound.enqueue_frame(&frame)?;
+            // LOUD (P0 #55). A SUCCESSFUL shed used to say nothing: the only
+            // event on this path fired when RELEASING a shed subscription
+            // FAILED, which a shed that works never reaches. A subscriber
+            // therefore went permanently silent on an open socket whose
+            // publishes kept acking, and no instrument on the server named it.
+            // The counter is what an alert fires on; this line is what the alert
+            // is then read against, and it carries the three facts needed to act
+            // -- which channel, which subscription, which door.
+            tracing::warn!(
+                subscription_id = *subscription_id,
+                channel = subscription.channel(),
+                transport = transport.as_str(),
+                stream_id,
+                "subscription shed: inbox overflowed the connection byte budget or the \
+                 per-inbox fairness limit; the subscriber is released and will receive \
+                 nothing further on this subscription"
+            );
+            crate::metrics::subscription_shed();
             shed.push(*subscription_id);
             continue;
         }
@@ -188,12 +211,18 @@ pub(super) fn service_subscriptions<Sink: DeliverySink>(
             // spec-inherent single-frame bound).
             if needed <= outbound.capacity() && !outbound.has_room(needed) {
                 held_deliveries.insert(*subscription_id, frame);
+                // This slice ends here, so its deliveries are recorded here too:
+                // an early return that skipped the counter would under-report
+                // exactly the slices that ran under outbound pressure.
+                crate::metrics::transport_deliveries_recorded(transport, delivered);
                 return Ok(shed);
             }
             outbound.enqueue_frame(&frame)?;
             remaining -= 1;
+            delivered += 1;
         }
     }
+    crate::metrics::transport_deliveries_recorded(transport, delivered);
     Ok(shed)
 }
 
