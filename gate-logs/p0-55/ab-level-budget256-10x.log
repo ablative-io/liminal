@@ -1,0 +1,236 @@
+########## PIN RUN 1 ##########
+   Compiling liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal-server)
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.09s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+
+PIN RUN 1 TRUE EXIT=0
+########## PIN RUN 2 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+
+thread 'beamr-sched-0' (83145687) panicked at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/thread/unix.rs:127:9:
+failed to join thread: Resource deadlock avoided (os error 11)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+PIN RUN 2 TRUE EXIT=0
+########## PIN RUN 3 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
+
+PIN RUN 3 TRUE EXIT=0
+########## PIN RUN 4 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
+
+PIN RUN 4 TRUE EXIT=0
+########## PIN RUN 5 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.13s
+
+PIN RUN 5 TRUE EXIT=0
+########## PIN RUN 6 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s
+
+PIN RUN 6 TRUE EXIT=0
+########## PIN RUN 7 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.99s
+
+PIN RUN 7 TRUE EXIT=0
+########## PIN RUN 8 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+
+PIN RUN 8 TRUE EXIT=0
+########## PIN RUN 9 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
+
+PIN RUN 9 TRUE EXIT=0
+########## PIN RUN 10 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.99s
+
+PIN RUN 10 TRUE EXIT=0

@@ -34,7 +34,7 @@ use crate::error::LiminalError;
 /// on. See [`SubscriptionInbox`].
 pub(crate) type SubscriberInbox = Arc<SubscriptionInbox>;
 
-/// A wake callback fired on the inbox's empty→non-empty transition (R3, §1.2(2)).
+/// A wake callback fired on EVERY envelope admitted to the inbox (R3, §1.2(2)).
 ///
 /// The server installs one that fires the CONNECTION scheduler's `READY` marker,
 /// so a publish into a parked connection's inbox wakes it. It is called from the
@@ -129,7 +129,7 @@ pub struct InboxInstall {
     pub budget: Arc<ConnectionInboxBudget>,
     /// Per-inbox envelope-count fairness trip (§5).
     pub depth_cap: usize,
-    /// R3 wake notifier fired on the inbox's empty→non-empty transition. `None`
+    /// R3 wake notifier fired on every envelope admitted to the inbox. `None`
     /// when the caller has no waker (scheduler-free unit tests).
     pub notifier: Option<InboxNotifier>,
 }
@@ -173,9 +173,9 @@ struct InboxState {
 }
 
 /// The shared subscription inbox (R3 + §5). Replaces the bare
-/// `Arc<Mutex<VecDeque<Envelope>>>`: it fires a wake notifier on the
-/// empty→non-empty transition and enforces the connection-scoped byte budget plus
-/// the per-inbox fairness trip, shedding the offending subscription on overflow.
+/// `Arc<Mutex<VecDeque<Envelope>>>`: it fires a wake notifier on every admitted
+/// envelope and enforces the connection-scoped byte budget plus the per-inbox
+/// fairness trip, shedding the offending subscription on overflow.
 pub(crate) struct SubscriptionInbox {
     state: Mutex<InboxState>,
     /// Sticky overflow marker: set when an admission is refused by the byte budget
@@ -242,15 +242,14 @@ impl SubscriptionInbox {
         }
     }
 
-    /// Installs the wake notifier (R3), fired on the empty→non-empty transition,
+    /// Installs the wake notifier (R3), fired on every admitted envelope,
     /// capturing the connection scheduler's enqueue handle (§1.2(2)).
     ///
     /// Defensive invariant: the install RECHECKS non-emptiness under the lock and
     /// fires the notifier (outside the lock) when envelopes are already queued —
-    /// an install onto an already-non-empty inbox produces the wake whose edge was
-    /// consumed before the notifier existed, so a wake can never be lost to
-    /// install ordering. On the normal construction path the queue is empty and
-    /// this is a no-op.
+    /// those envelopes were admitted while there was no notifier to fire, so
+    /// without this recheck their wake would be lost to install ordering. On the
+    /// normal construction path the queue is empty and this is a no-op.
     pub(crate) fn install_notifier(&self, notifier: InboxNotifier) {
         let fire = {
             let Ok(mut state) = self.state.lock() else {
@@ -267,10 +266,12 @@ impl SubscriptionInbox {
     }
 
     /// Admits `envelope` under the byte budget and fairness trip, charging the
-    /// serialized bytes as admitted and firing the wake notifier on the
-    /// empty→non-empty transition. On budget/fairness refusal the sticky overflow
-    /// marker is set and the envelope dropped (memory never grows past the
-    /// bound); a closed inbox refuses without charging or marking.
+    /// serialized bytes as admitted and firing the wake notifier for EVERY
+    /// admitted envelope (level-triggered — see the fire site below for why the
+    /// edge-triggered form starved a subscriber that fell more than one delivery
+    /// slice behind). On budget/fairness refusal the sticky overflow marker is set
+    /// and the envelope dropped (memory never grows past the bound); a closed
+    /// inbox refuses without charging or marking.
     ///
     /// The notifier fires OUTSIDE the state lock so the publishing actor's slice
     /// never holds the inbox lock across the scheduler enqueue.
@@ -314,15 +315,34 @@ impl SubscriptionInbox {
                 }
                 None => 0,
             };
-            let was_empty = state.queue.is_empty();
             state.queue.push_back((envelope, charged));
-            // Fire only on the empty→non-empty edge: a parked connection needs one
-            // wake to drain the whole burst, and coalescing is harmless (R6).
-            if was_empty {
-                state.notifier.clone()
-            } else {
-                None
-            }
+            // LEVEL-TRIGGERED, not edge-triggered: EVERY successful enqueue fires.
+            //
+            // The consumer drains a BOUNDED slice (the server's delivery pump: 32
+            // envelopes per connection slice), so an inbox more than a slice deep
+            // does NOT empty when it is serviced. Under the edge rule a subscriber
+            // in exactly that state — the normal state of anyone who has fallen
+            // behind — earned one wake for an entire burst and none afterwards,
+            // and every later envelope arrived with no wake attached to it at all.
+            // That is a lost-wake hazard on its face, and it is removed here.
+            //
+            // HONEST SCOPE, measured — this is NOT what starves a subscriber at
+            // today's bytes, and it must not be cited as if it were. A/B over 120
+            // fresh-boot iterations per arm (gate-logs/p0-55/) found the edge and
+            // level forms indistinguishable: 51.7% vs 53.3% of boots lost a
+            // subscriber to the depth-cap shed. The reason is R6 coalescing
+            // itself. N fires collapse into one mailbox drain, so turning one wake
+            // into N cannot buy the connection a single extra SLICE, and slices —
+            // not wakes — are what drain the queue. The variable that does move it
+            // is the pump's per-slice budget (32 -> 256 took the same harness to
+            // 0/120), which is a cross-connection fairness knob and not this
+            // file's to turn. See the report accompanying this lane.
+            //
+            // What firing every time costs: one non-blocking `enqueue_atom_message`
+            // per admitted envelope, which R6 coalescing collapses to one slice.
+            // An idle inbox admits nothing and so still fires nothing — the
+            // zero-cost-at-rest property is unchanged.
+            state.notifier.clone()
         };
         if let Some(notifier) = notifier {
             notifier();
@@ -495,7 +515,7 @@ impl SubscriberRegistration {
             }
         }
         // R3 + §5: admission charges the connection byte budget, fires the wake
-        // notifier on the empty→non-empty edge, and — on overflow — marks the
+        // notifier for every admitted envelope, and — on overflow — marks the
         // subscription for shedding (the server pump sheds it with a typed error
         // frame). An overflowed envelope is NOT counted as a genuine delivery, so
         // the delivery-ack signal reflects only envelopes that entered the inbox.
@@ -781,8 +801,8 @@ mod cooperative_smoke {
     }
 }
 
-/// R3 (§1.2(2)) + §5 inbox-bounding library core: the notifier fires on the
-/// empty→non-empty edge; the shared byte budget is spent across ALL a
+/// R3 (§1.2(2)) + §5 inbox-bounding library core: the notifier fires on every
+/// admitted envelope; the shared byte budget is spent across ALL a
 /// connection's inboxes; overflow sheds the offending subscription; the per-inbox
 /// fairness trip stops one inbox starving its siblings; and charge/release is
 /// exact. These exercise [`SubscriptionInbox`]/[`ConnectionInboxBudget`] directly,
@@ -811,8 +831,14 @@ mod inbox_bounding {
         encode_envelope(env).len()
     }
 
+    /// The level-triggered wake contract (P0 #55). This test previously asserted
+    /// the edge-triggered form — that a second admit into a non-empty inbox does
+    /// NOT re-fire — which is precisely the starvation the fix removes: the
+    /// consumer drains a bounded slice, so a non-empty inbox is the normal state
+    /// of a subscriber that has fallen behind, and withholding its wake is what
+    /// ratchets it to the depth cap and a permanent shed.
     #[test]
-    fn notifier_fires_only_on_empty_to_non_empty_transition() {
+    fn notifier_fires_for_every_admitted_envelope() {
         let inbox = SubscriptionInbox::new();
         let fires = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&fires);
@@ -820,31 +846,28 @@ mod inbox_bounding {
             counter.fetch_add(1, Ordering::Relaxed);
         }));
 
-        // First admit into an empty inbox: the edge fires exactly once.
+        // First admit into an empty inbox fires.
         assert_eq!(inbox.admit(envelope(b"a")), InboxAdmission::Admitted);
-        assert_eq!(
-            fires.load(Ordering::Relaxed),
-            1,
-            "empty→non-empty fires once"
-        );
+        assert_eq!(fires.load(Ordering::Relaxed), 1, "the first admit fires");
 
-        // A second admit into a NON-empty inbox does not re-fire: one wake drains
-        // the whole burst (coalescing is R6-harmless).
+        // A second admit into a STILL-NON-EMPTY inbox fires again: the consumer
+        // may not have reached this envelope's slice, and R6 coalescing means a
+        // redundant marker costs one mailbox atom, never a second slice of work.
         assert_eq!(inbox.admit(envelope(b"b")), InboxAdmission::Admitted);
         assert_eq!(
             fires.load(Ordering::Relaxed),
-            1,
-            "no re-fire while the inbox stays non-empty"
+            2,
+            "an admit into a non-empty inbox still fires"
         );
 
-        // Drain to empty, then admit again: the edge fires a second time.
+        // Drain to empty, then admit again: still exactly one fire per admit.
         assert!(inbox.pop().is_some());
         assert!(inbox.pop().is_some());
         assert_eq!(inbox.admit(envelope(b"c")), InboxAdmission::Admitted);
         assert_eq!(
             fires.load(Ordering::Relaxed),
-            2,
-            "a fresh empty→non-empty edge fires again"
+            3,
+            "one fire per admitted envelope, whatever the queue depth was"
         );
     }
 
@@ -1076,11 +1099,11 @@ mod inbox_bounding {
     }
 
     /// Review round 1 item 5 (install recheck): installing a notifier onto an
-    /// ALREADY-NON-EMPTY inbox fires it exactly once — the wake whose
-    /// empty→non-empty edge was consumed before the notifier existed is
-    /// regenerated at install, so a wake can never be lost to install ordering.
-    /// (The production subscribe path installs at construction, when the queue is
-    /// guaranteed empty; this pins the defensive invariant.)
+    /// ALREADY-NON-EMPTY inbox fires it exactly once — those envelopes were
+    /// admitted while there was no notifier to fire, so the install regenerates
+    /// their wake and one can never be lost to install ordering. (The production
+    /// subscribe path installs at construction, when the queue is guaranteed
+    /// empty; this pins the defensive invariant.)
     #[test]
     fn notifier_install_onto_non_empty_inbox_fires_once() {
         let inbox = SubscriptionInbox::new();
@@ -1100,8 +1123,9 @@ mod inbox_bounding {
             "install onto a non-empty inbox regenerates exactly one wake"
         );
 
-        // A subsequent admit onto the still-non-empty inbox does not re-fire.
+        // The install is a ONE-OFF regeneration, not an extra fire per admit: a
+        // subsequent admit adds exactly its own one fire.
         assert_eq!(inbox.admit(envelope(b"second")), InboxAdmission::Admitted);
-        assert_eq!(fires.load(Ordering::Relaxed), 1);
+        assert_eq!(fires.load(Ordering::Relaxed), 2);
     }
 }

@@ -11,9 +11,25 @@
 //! in a subscriber inbox is picked up on the next poll. That every-slice assumption
 //! IS the permanent-runnable cost being removed. The R3 subscription-inbox notifier
 //! (installed at subscribe time — see `apply::subscribe_response`) already fires the
-//! connection's `READY` marker on the inbox's empty→non-empty edge; the park-flip
-//! commit DELETES this every-slice assumption and drives the pump from that marker.
-//! Until then the marker is redundant but harmless.
+//! connection's `READY` marker for every envelope admitted to the inbox; the
+//! park-flip commit DELETES this every-slice assumption and drives the pump from
+//! that marker. Until then the marker is redundant but harmless.
+//!
+//! The notifier is LEVEL-triggered because of a property this file owns: because
+//! this pump drains at most [`DELIVERY_SLICE_BUDGET`] envelopes per slice, a
+//! subscriber more than one slice behind never empties its inbox, so an
+//! edge-triggered notifier would attach a wake to the first envelope of a burst
+//! and to none of the rest.
+//!
+//! That is a lost-wake hazard, but measurement says it is NOT what sheds a
+//! subscriber at today's bytes, and this file is where the reason lives: R6
+//! coalescing collapses N wakes into one slice, so extra wakes cannot buy extra
+//! SLICES, and the number of slices is what [`DELIVERY_SLICE_BUDGET`] converts
+//! into drained envelopes. A burst that needs 13 slices at 32/slice is exposed to
+//! 13 scheduling round trips; the same burst needs 2 at 256/slice. Raising this
+//! constant took the P0 #55 harness from ~52% of boots losing a subscriber to
+//! 0/120 — but it is a cross-connection fairness knob (see its own doc), so
+//! trading it is a ruling, not a refactor. Left at 32 deliberately.
 //!
 //! # Envelope bridging
 //!
