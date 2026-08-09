@@ -927,15 +927,35 @@ fn ws_and_tcp_share_one_max_connections_bound() -> Result<(), Box<dyn Error>> {
     let _ack = read_one_frame_bytes(&mut tcp_client)?;
     server.wait_for_active(1)?;
 
-    // The WS upgrade completes at HTTP level but admission refuses the spawn:
-    // the socket closes without ever serving a liminal frame.
+    // The WS upgrade completes at HTTP level but admission refuses the spawn.
+    //
+    // P0 #56 R2 CHANGED WHAT THIS ASSERTS. It previously required that the
+    // socket close without ever serving a liminal frame, and that was the
+    // defect: the 101 has already been written and flushed by this point, so
+    // the browser has a live WebSocket and a bare drop shows it close 1006 with
+    // zero frames — a transport fault, indistinguishable from a crashed server,
+    // for a deliberate typed refusal. The connection is still refused; it is
+    // now TOLD.
+    //
+    // This is the strongest end-to-end evidence in the tree for the WebSocket
+    // half of R2: a real client, a real HTTP upgrade, and the ordinary §5
+    // capacity path rather than an injected fault.
     let mut refused = ws_connect(server.ws_addr, None)?;
     ws_send_frame(&mut refused, &connect_frame(&[]))?;
-    let outcome = ws_read_binary(&mut refused);
+    let bytes = ws_read_binary(&mut refused)?;
+    let (frame, consumed) = decode(&bytes)?;
+    assert_eq!(consumed, bytes.len(), "the refusal is exactly one frame");
+    let Frame::ConnectError { message, .. } = frame else {
+        return Err(
+            format!("an over-cap websocket connection must be told why, got {frame:?}").into(),
+        );
+    };
+    let message = message.ok_or("ConnectError carried no message")?;
     assert!(
-        outcome.is_err(),
-        "an over-cap websocket connection must not be served: {outcome:?}"
+        message.contains("max_connections"),
+        "the refusal must name saturation as its class, got: {message}"
     );
+    // Told, but still refused: the bound held and nothing was admitted.
     server.wait_for_active(1)?;
 
     // Freeing the TCP slot admits a fresh WS connection.

@@ -28,12 +28,14 @@ use super::incarnation::ConnectionIncarnationAuthority;
 use super::loopback::{LoopbackConnectionProcess, LoopbackServerEnd};
 use super::notifier::ConnectionNotifier;
 use super::process::ConnectionProcess;
+use super::refusal::AdmissionRefusal;
 use super::services::{
     ConnectionServices, LiminalConnectionServices, ProductionSubsystems, SubsystemFactory,
     build_connection_services_via,
 };
 use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig};
+use crate::health::AdmissionReadiness;
 use crate::server::mount::MountKind;
 use crate::server::participant::{
     ConnectionFateClass, InstalledParticipantService, ParticipantSemanticHandler,
@@ -206,12 +208,39 @@ impl ConnectionSupervisor {
         })
     }
 
+    /// A handle on whether this server can admit a connection, for the
+    /// readiness probe (P0 #56 R4).
+    ///
+    /// Handed to `SharedReadinessState::track_admission` once the supervisor
+    /// exists. The health endpoint binds BEFORE the supervisor is built —
+    /// liveness has to be answerable while the rest of the server is still
+    /// coming up — so this cannot be wired at readiness construction and is
+    /// installed afterwards instead.
+    #[must_use]
+    pub fn admission_readiness(&self) -> AdmissionReadiness {
+        self.inner.admission_readiness.clone()
+    }
+
+    /// Counts one refused admission, classified by reason.
+    ///
+    /// Hung on the THREE public admission doors — TCP accept, the sibling
+    /// transport spawn (WebSocket), and the in-process loopback — because those
+    /// are the three places a connection can be turned away, and each of them
+    /// reaches the shared inner body exactly once. Recording deeper would
+    /// double-count the loopback (which calls the inner body directly);
+    /// recording shallower would miss the doors that only log.
+    fn record_admission_refusal(error: &ServerError) {
+        crate::metrics::admission_refused(AdmissionRefusal::classify(error));
+    }
+
     /// Spawns one supervised beamr process that owns `stream`.
     ///
     /// # Errors
     /// Returns [`ServerError`] when stream configuration or beamr spawn fails.
     pub fn spawn_connection(&self, stream: TcpStream) -> Result<ConnectionHandle, ServerError> {
-        self.inner.spawn_connection(stream)
+        self.inner
+            .spawn_connection(stream)
+            .inspect_err(Self::record_admission_refusal)
     }
 
     /// Returns the underlying beamr scheduler.
@@ -533,6 +562,7 @@ impl ConnectionSupervisor {
     ) -> Result<ConnectionHandle, ServerError> {
         self.inner
             .spawn_transport_connection(peer_addr, fd_guard, mount, build_factory)
+            .inspect_err(Self::record_admission_refusal)
     }
 
     /// Admits one in-process connection over `server_end` (design §8 step 3).
@@ -584,6 +614,7 @@ impl ConnectionSupervisor {
         };
         self.inner
             .spawn_transport_connection(None, None, MountKind::Loopback, &build)
+            .inspect_err(Self::record_admission_refusal)
     }
 
     /// Stops the beamr scheduler used by connection processes.
@@ -1049,6 +1080,9 @@ pub(super) struct SupervisorInner {
     scheduler: Arc<Scheduler>,
     runtime: Arc<ConnectionRuntime>,
     incarnations: Option<Arc<ConnectionIncarnationAuthority>>,
+    /// P0 #56 R4: the readiness probe's view of whether this server can admit.
+    /// Shared with the incarnation authority when one is installed.
+    admission_readiness: AdmissionReadiness,
 }
 
 impl std::fmt::Debug for SupervisorInner {
@@ -1069,6 +1103,11 @@ impl SupervisorInner {
         fatal_shutdown: Option<ShutdownHandle>,
     ) -> Result<Self, ServerError> {
         let installed_services = ConnectionServiceInstallation::capture(services);
+        // P0 #56 R4. Owned by the supervisor so the readiness probe has a stable
+        // handle whether or not a participant service (and therefore an
+        // incarnation authority) is installed: a server with no authority has
+        // nothing that can hold admission, and reports available.
+        let admission_readiness = AdmissionReadiness::available();
         let incarnations = installed_services
             .participant_service
             .as_ref()
@@ -1079,6 +1118,7 @@ impl SupervisorInner {
                         limits.max_connections,
                         service.publication_conversation_limit(),
                         service,
+                        admission_readiness.clone(),
                     )
                     .map(Arc::new)
                 },
@@ -1155,6 +1195,7 @@ impl SupervisorInner {
             scheduler,
             runtime,
             incarnations,
+            admission_readiness,
         })
     }
 

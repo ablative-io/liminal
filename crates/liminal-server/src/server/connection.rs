@@ -26,6 +26,11 @@ mod participant_runtime_tests;
 mod pending_reply;
 #[path = "connection/process.rs"]
 mod process;
+#[path = "connection/refusal.rs"]
+pub(crate) mod refusal;
+#[cfg(test)]
+#[path = "connection/refusal_tests.rs"]
+mod refusal_tests;
 #[path = "connection/services.rs"]
 pub mod services;
 #[path = "connection/services_cluster.rs"]
@@ -42,7 +47,7 @@ mod supervisor;
 #[path = "connection/wake.rs"]
 pub(crate) mod wake;
 #[path = "connection/websocket.rs"]
-mod websocket;
+pub(crate) mod websocket;
 #[path = "connection/worker_front_door.rs"]
 mod worker_front_door;
 

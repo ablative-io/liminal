@@ -1,24 +1,29 @@
+use std::io::Read as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use liminal::durability::{
     DurabilityError, DurableStore, StoredEntry, bridge::block_on, open_ephemeral,
 };
+use liminal::protocol::{Frame, decode};
 use liminal_protocol::wire::{ClientRequest, ServerValue};
 use liminal_protocol::{
     lifecycle::ConnectionIncarnationAllocatorRestore, wire::ConnectionIncarnation,
 };
 
 use super::ConnectionSupervisor;
-use super::incarnation::ConnectionIncarnationAuthority;
+use super::incarnation::{AMBIGUOUS_DURABLE_WRITE_PHASE, ConnectionIncarnationAuthority};
 use super::services::{ConnectionServices, LiminalConnectionServices};
 use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
+use crate::health::{
+    AdmissionReadiness, ReadinessCondition, ReadinessState, SharedReadinessState, readiness_check,
+};
 use crate::server::listener::ServerListener;
 use crate::server::participant::incarnation_stream::{
-    ConnectionFateClass, IncarnationStream, encode_allocate_event_fixture,
+    ConnectionFateClass, IncarnationStartup, IncarnationStream, encode_allocate_event_fixture,
     encode_complete_connection_fate_event_fixture, encode_open_connection_fate_event_fixture,
     encode_startup_event_fixture,
 };
@@ -193,6 +198,62 @@ fn connection_ordinal_exhaustion_is_a_typed_admission_failure()
     Ok(())
 }
 
+/// Builds a live authority over `store` with no injected failure.
+fn started_authority(
+    store: &Arc<dyn DurableStore>,
+    maximum_references: usize,
+    maximum_conversations: usize,
+) -> Result<ConnectionIncarnationAuthority, Box<dyn std::error::Error>> {
+    let startup =
+        block_on(IncarnationStream::new(Arc::clone(store), maximum_references).startup())??;
+    let IncarnationStartup::Started(started) = startup else {
+        return Err("fresh stream unexpectedly required recovery or exhaustion".into());
+    };
+    Ok(ConnectionIncarnationAuthority::from_started_for_test(
+        started,
+        maximum_conversations,
+    ))
+}
+
+/// P0 #56 pin 1: a failure that CANNOT have written durable bytes must not
+/// disarm admission for the rest of the process.
+///
+/// `complete_connection_fate` validates the named Open against the unmatched set
+/// BEFORE it encodes or appends anything
+/// (`participant/incarnation_stream.rs::complete_connection_fate`), so a Complete
+/// for an absent Open is a pure pre-write refusal: the durable stream is
+/// byte-identical afterwards and nothing about it is ambiguous. Before this fix
+/// that refusal still left the shared authority `Failed`, and because the
+/// teardown path and the admission path share one authority, one bad Complete
+/// refused every subsequent connection for the process lifetime.
+#[test]
+fn a_pre_durable_write_failure_leaves_admission_working() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = store()?;
+    let authority = started_authority(&store, 4, 3)?;
+    let before = block_on(store.read_from(IncarnationStream::stream_key(), 0, 64))??;
+
+    // No Open has ever been appended, so this Complete cannot match one.
+    let refused = authority.complete_connection_fate(9_999);
+    assert!(
+        refused.is_err(),
+        "a Complete for an absent Open must be refused"
+    );
+
+    // The pre-write refusal wrote nothing: the durable stream is unchanged.
+    let after = block_on(store.read_from(IncarnationStream::stream_key(), 0, 64))??;
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "a pre-write refusal must not append to the durable stream"
+    );
+
+    // And the next connection is admitted normally.
+    let admitted = authority.allocate(&[])?;
+    assert_eq!(admitted, ConnectionIncarnation::new(1, 0));
+    Ok(())
+}
+
 #[test]
 fn production_connection_fate_authority_opens_and_completes_with_signed_bound()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -316,6 +377,7 @@ fn startup_completes_historical_opens_before_returning_authority()
         4,
         handler.publication_conversation_limit(),
         &handler,
+        AdmissionReadiness::available(),
     )?;
 
     let observed = handler
@@ -344,11 +406,115 @@ fn startup_completes_historical_opens_before_returning_authority()
     Ok(())
 }
 
+/// A handler that refuses every fate work item, standing in for a participant
+/// that cannot absorb its torn predecessor's unmatched Open.
+#[derive(Debug, Default)]
+struct RefusingFateHandler;
+
+impl ParticipantSemanticHandler for RefusingFateHandler {
+    fn handle(
+        &self,
+        _context: ParticipantConnectionContext,
+        _conversations: &mut ParticipantConnectionConversations,
+        _request: ClientRequest,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        Err(ParticipantSemanticError::Unavailable)
+    }
+
+    fn handle_connection_fate(
+        &self,
+        _work_item: ConnectionFateWorkItem,
+    ) -> Result<(), ParticipantSemanticError> {
+        Err(ParticipantSemanticError::Internal {
+            message: "injected recovery refusal".to_owned(),
+        })
+    }
+
+    fn publication_conversation_limit(&self) -> u64 {
+        3
+    }
+}
+
+/// P0 #56, coordinator question: can boot-time recovery of an unclean
+/// predecessor arm the admission hold?
+///
+/// CHARACTERIZATION, not red-first — this passes at f7efcc4 too. It is here to
+/// make a STRUCTURAL fact mechanically checked rather than argued from a
+/// reading, because the answer decides how much the rest of this lane matters.
+///
+/// The authority has exactly one production constructor,
+/// `ConnectionIncarnationAuthority::startup`, and the only place it builds a
+/// `Self` is `finish_startup`, whose state is `Ready` by construction. Every
+/// failure before that point — including every step of unclean-predecessor
+/// recovery: the handler fold, the Complete append, the post-recovery Startup —
+/// is a `return Err(ServerError)` out of `startup`, which `SupervisorInner::new`
+/// propagates with `?`. So a boot that cannot recover its predecessor FAILS TO
+/// BUILD A SERVER. It cannot produce a held authority, because it produces no
+/// authority at all.
+///
+/// That matters for reading the field evidence: the latched boots were serving
+/// refusals with their ports open and their health probe green, and a process
+/// that armed the hold during recovery would instead have exited during
+/// construction with no listener ever bound. Arming is runtime-only. On a
+/// deployment where every restart is unclean, "recovering from a torn
+/// predecessor" stays an ordinary handled path — pinned in the neighbouring
+/// `startup_completes_historical_opens_before_returning_authority`, which
+/// recovers a torn Open and then allocates normally.
+#[test]
+fn a_failed_recovery_of_a_torn_predecessor_fails_construction_rather_than_holding_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = store()?;
+    // A torn predecessor: Startup, an Allocate, and an Open with no Complete.
+    let payloads = [
+        encode_startup_event_fixture()?,
+        encode_allocate_event_fixture(4, &[])?,
+        encode_open_connection_fate_event_fixture(
+            ConnectionIncarnation::new(1, 0),
+            ConnectionFateClass::ConnectionLost,
+            3,
+            &[5, 8],
+        )?,
+    ];
+    for (sequence, payload) in payloads.into_iter().enumerate() {
+        let sequence = u64::try_from(sequence)?;
+        let assigned = block_on(store.append(IncarnationStream::stream_key(), payload, sequence))??;
+        assert_eq!(assigned, sequence);
+    }
+    block_on(store.flush())??;
+    let handler = RefusingFateHandler;
+
+    let outcome = ConnectionIncarnationAuthority::startup(
+        Arc::clone(&store),
+        4,
+        handler.publication_conversation_limit(),
+        &handler,
+        AdmissionReadiness::available(),
+    );
+
+    assert!(
+        matches!(
+            outcome,
+            Err(ServerError::ParticipantIncarnation {
+                phase: "connection-fate handler recovery",
+                ..
+            })
+        ),
+        "a refused recovery must fail construction outright, never yield an authority"
+    );
+    // No Complete was appended: the refusal happened before the durable fold.
+    let entries = block_on(store.read_from(IncarnationStream::stream_key(), 0, 8))??;
+    assert_eq!(entries.len(), 3);
+    Ok(())
+}
+
 #[derive(Debug)]
 struct FailNthFlush {
     inner: Arc<dyn DurableStore>,
     flush_count: AtomicUsize,
     fail_at: usize,
+    /// While set, `read_from` fails too — a store that is down for reads as
+    /// well as writes, so a resume replay cannot succeed either.
+    reads_down: AtomicBool,
 }
 
 impl FailNthFlush {
@@ -357,7 +523,16 @@ impl FailNthFlush {
             inner,
             flush_count: AtomicUsize::new(0),
             fail_at,
+            reads_down: AtomicBool::new(false),
         }
+    }
+
+    fn take_reads_down(&self) {
+        self.reads_down.store(true, Ordering::SeqCst);
+    }
+
+    fn bring_reads_up(&self) {
+        self.reads_down.store(false, Ordering::SeqCst);
     }
 }
 
@@ -378,6 +553,11 @@ impl DurableStore for FailNthFlush {
         offset: u64,
         limit: usize,
     ) -> Result<Vec<StoredEntry>, DurabilityError> {
+        if self.reads_down.load(Ordering::SeqCst) {
+            return Err(DurabilityError::ConfigError(
+                "injected incarnation read failure".to_owned(),
+            ));
+        }
         self.inner.read_from(stream_key, offset, limit).await
     }
 
@@ -404,15 +584,172 @@ impl DurableStore for FailNthFlush {
     }
 }
 
+/// P0 #56 pin 5: a server that cannot admit connections reports NOT READY.
+///
+/// `health_check` is deliberately a liveness probe and stays one — this pin does
+/// not touch it. But on the field estate liveness was what got read, and it
+/// stayed green through 82,166 consecutive refusals because the process was
+/// genuinely alive. The question actually being asked was "should traffic come
+/// here", and that is readiness's job. Readiness could not answer it either: its
+/// three conditions were all STARTUP gates, and this server had passed every one
+/// of them — config loaded, listener bound, no cluster configured — before the
+/// authority latched. `listener_bound` is the closest, and it was true and
+/// truthful: the port was listening and accepts were succeeding. What failed was
+/// everything after the accept.
+///
+/// So this pin asserts both directions against the SAME readiness handle a real
+/// deployment scrapes: healthy authority reports ready, held authority reports
+/// not-ready and names the condition, and recovery puts it back.
 #[test]
-fn allocation_flush_failure_refuses_connection_before_process_spawn()
+fn readiness_goes_false_while_admission_is_held_and_true_again_on_recovery()
 -> Result<(), Box<dyn std::error::Error>> {
     let inner = store()?;
-    let failing: Arc<dyn DurableStore> = Arc::new(FailNthFlush::new(Arc::clone(&inner), 2));
+    let failing = Arc::new(FailNthFlush::new(Arc::clone(&inner), 2));
     let config = config()?;
-    let supervisor = ConnectionSupervisor::with_services(services(&config, failing)?)?;
-    let (_client, server) = tcp_pair()?;
+    let supervisor =
+        ConnectionSupervisor::with_services(services(&config, Arc::clone(&failing) as _)?)?;
 
+    // Wired exactly as `server::run` wires it: the readiness owner exists before
+    // the supervisor, and the supervisor's admission source is installed onto it
+    // once the supervisor is built.
+    let readiness = SharedReadinessState::new(ReadinessState::ready_without_cluster());
+    readiness.track_admission(supervisor.admission_readiness());
+    assert!(
+        readiness_check(&readiness.snapshot()).ready,
+        "a freshly started server must report ready"
+    );
+
+    // Hold admission with an ambiguous durable write, store down for reads so
+    // the resume cannot immediately undo it.
+    failing.take_reads_down();
+    let (_client, server) = tcp_pair()?;
+    assert!(supervisor.spawn_connection(server).is_err());
+
+    let status = readiness_check(&readiness.snapshot());
+    assert!(
+        !status.ready,
+        "a server that cannot admit a connection must not report ready"
+    );
+    assert!(
+        status
+            .unmet_conditions
+            .contains(&ReadinessCondition::AdmissionAvailable),
+        "readiness must NAME admission as the unmet condition, got: {:?}",
+        status.unmet_conditions
+    );
+
+    // Recovery is visible on the same surface: nothing restarts, and readiness
+    // comes back on its own once the store does.
+    failing.bring_reads_up();
+    // The client ends are retained so the admitted connection is not torn down
+    // by an EOF before readiness is read back.
+    let mut sockets = Vec::new();
+    for _ in 0..8_u8 {
+        let (client, server) = tcp_pair()?;
+        sockets.push(client);
+        if supervisor.spawn_connection(server).is_ok() {
+            break;
+        }
+    }
+    assert!(
+        !sockets.is_empty(),
+        "at least one attempt must have been made"
+    );
+    assert!(
+        readiness_check(&readiness.snapshot()).ready,
+        "readiness must return once admission does"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// P0 #56 pin 3, end to end: a connection refused by the real accept loop is
+/// TOLD, on the wire, before the socket closes.
+///
+/// The unit-level flush proofs live in `refusal_tests`. This one exists because
+/// they cannot see the thing that actually broke in the field: the accept loop
+/// consumed the socket into `spawn_connection`, which dropped it on every
+/// failure path, so the refusal never had anything to be written on. A client
+/// saw a completed TCP connection and then an immediate FIN with zero bytes —
+/// indistinguishable from a crashed server.
+///
+/// A real listener, a real client socket, and `read_to_end` — so the assertion
+/// is over bytes the kernel delivered, not over anything the server merely
+/// intended.
+#[test]
+fn a_refused_connection_is_told_why_before_the_socket_closes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let inner = store()?;
+    let failing = Arc::new(FailNthFlush::new(Arc::clone(&inner), 2));
+    let config = config()?;
+    let supervisor =
+        ConnectionSupervisor::with_services(services(&config, Arc::clone(&failing) as _)?)?;
+    // Reads down as well as writes, so the resume replay cannot rescue this
+    // connection and the refusal is deterministic rather than a race.
+    failing.take_reads_down();
+    let listener = ServerListener::bind(&config, supervisor)?;
+    let address = listener.local_addr();
+
+    let mut client = TcpStream::connect(address)?;
+    let mut received = Vec::new();
+    client.read_to_end(&mut received)?;
+
+    assert!(
+        !received.is_empty(),
+        "a refused client must be told why, not handed a bare FIN"
+    );
+    let (frame, consumed) = decode(&received)?;
+    assert_eq!(consumed, received.len(), "the refusal is exactly one frame");
+    let Frame::ConnectError { message, .. } = frame else {
+        return Err(format!("expected ConnectError, got {frame:?}").into());
+    };
+    let message = message.ok_or("ConnectError carried no message")?;
+    assert!(
+        message.contains("admission refused"),
+        "the refusal must name its class, got: {message}"
+    );
+    listener.shutdown()?;
+    Ok(())
+}
+
+/// P0 #56 pin 2: an ambiguous durable write HOLDS admission, and the hold is
+/// released by re-reading the store rather than by restarting the process.
+///
+/// A failed fsync after a successful append is the one genuinely ambiguous
+/// outcome: the bytes may or may not be durable, so this process no longer knows
+/// the stream's head and must not append through that handle again. Holding is
+/// correct. Holding FOREVER is not — "process recovery is required" names a
+/// trigger nothing inside the process owns, and on the field estate that turned
+/// one bad fsync into 82,166 consecutive refusals on a server whose ports stayed
+/// open and whose health probe stayed green.
+///
+/// Both halves are asserted here against a store that is down for reads as well
+/// as writes, so the hold is observable before the recovery is:
+///   1. the fsync fails and the connection is refused (nothing spawned);
+///   2. while the store is still down, admission stays refused AND the resume
+///      replay cannot cheat — the refusal names the ambiguity;
+///   3. once the store is healthy, admission comes back on its own, within a
+///      bounded number of attempts, with no restart and no operator action.
+#[test]
+fn an_ambiguous_durable_write_holds_admission_and_then_recovers_by_reading()
+-> Result<(), Box<dyn std::error::Error>> {
+    /// Attempts allowed after the store recovers. Larger than the backoff
+    /// window the authority can reach from a single failed resume, so the pin
+    /// asserts "recovers within a bound" rather than a schedule it would have
+    /// to be edited alongside.
+    const RECOVERY_ATTEMPT_BUDGET: usize = 8;
+
+    let inner = store()?;
+    let failing = Arc::new(FailNthFlush::new(Arc::clone(&inner), 2));
+    let config = config()?;
+    // Startup replays the stream, so the store has to be readable to build the
+    // supervisor at all. It goes down immediately afterwards.
+    let supervisor =
+        ConnectionSupervisor::with_services(services(&config, Arc::clone(&failing) as _)?)?;
+    failing.take_reads_down();
+
+    // 1. The ambiguous fsync refuses this connection before anything is spawned.
+    let (_client, server) = tcp_pair()?;
     assert!(matches!(
         supervisor.spawn_connection(server),
         Err(ServerError::ParticipantIncarnation {
@@ -422,19 +759,50 @@ fn allocation_flush_failure_refuses_connection_before_process_spawn()
     ));
     assert_eq!(supervisor.active_connection_count(), 0);
 
+    // 2. The hold is real: with the store still down the resume cannot succeed,
+    //    and the refusal says so rather than pretending the stream is fine.
     let (_second_client, second_server) = tcp_pair()?;
     assert!(matches!(
         supervisor.spawn_connection(second_server),
         Err(ServerError::ParticipantIncarnation {
-            phase: "connection allocation unavailable",
+            phase: AMBIGUOUS_DURABLE_WRITE_PHASE,
             ..
         })
     ));
+    assert_eq!(supervisor.active_connection_count(), 0);
+
+    // 3. The store comes back. Nothing restarts; nothing is told. The next
+    //    connections simply arrive, and one of them is admitted.
+    failing.bring_reads_up();
+    // Retained so an admitted connection is not immediately closed by EOF.
+    let mut sockets = Vec::new();
+    let mut admitted = false;
+    for _ in 0..RECOVERY_ATTEMPT_BUDGET {
+        let (client, server) = tcp_pair()?;
+        sockets.push(client);
+        if supervisor.spawn_connection(server).is_ok() {
+            admitted = true;
+            break;
+        }
+    }
+    assert!(
+        !sockets.is_empty(),
+        "at least one attempt must have been made"
+    );
+    assert!(
+        admitted,
+        "admission must recover by re-reading the store, without a process restart"
+    );
+    assert_eq!(supervisor.active_connection_count(), 1);
+
+    // The resumed stream picked up the durable truth rather than this process's
+    // stale count: the ambiguous Allocate DID land (append succeeded, only the
+    // fsync failed), so the recovered allocation appends after it.
     let entries = block_on(inner.read_from(IncarnationStream::stream_key(), 0, 8))??;
     assert_eq!(
         entries.len(),
-        2,
-        "an ambiguous append must poison the live allocator instead of retrying"
+        3,
+        "startup, the ambiguous allocate that landed, and the resumed allocate"
     );
     supervisor.shutdown();
     Ok(())

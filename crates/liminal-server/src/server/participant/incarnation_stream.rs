@@ -288,10 +288,19 @@ pub(in crate::server) enum IncarnationStreamError {
         /// Durable position carrying the illegal event.
         stored_sequence: u64,
     },
-    /// Test-only replay was requested as started but its event history had no startup.
-    #[cfg(test)]
+    /// Replay was requested as started but its event history had no startup.
     #[error("incarnation event history has no startup")]
     MissingStartup,
+    /// A resume replay found the stream under a different server incarnation.
+    #[error(
+        "incarnation stream advanced from server incarnation {expected} to {actual}: another process owns it"
+    )]
+    ResumeServerIncarnationMoved {
+        /// Server incarnation this process durably started under.
+        expected: u64,
+        /// Server incarnation the durable stream currently replays to.
+        actual: u64,
+    },
     /// Test-only resume refuses to discard unmatched durable work.
     #[cfg(test)]
     #[error("incarnation event history retains {count} unmatched connection-fate Opens")]
@@ -302,6 +311,94 @@ pub(in crate::server) enum IncarnationStreamError {
     /// The protocol crate rejected an over-bound live complete reference set.
     #[error("protocol rejected durable incarnation references: {0:?}")]
     DurableReferences(DurableIncarnationReferencesError),
+}
+
+/// How far a failed incarnation-stream operation got toward durable bytes.
+///
+/// This is the discriminator the admission authority needs and could not
+/// previously see. Every operation on a [`StartedIncarnationStream`] is a
+/// validate-encode-decide prologue followed by exactly one
+/// [`append_and_flush`], so "did we reach the store?" is a property of WHERE the
+/// operation stopped, not of which error variant it produced — and only the
+/// stream itself knows where it stopped. Sniffing the variant at the call site
+/// would be a guess: [`IncarnationStreamError::StreamSequenceExhausted`], for
+/// one, is raised both by the pre-append `checked_add` in [`append_and_flush`]
+/// and by replay arithmetic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::server) enum DurableWriteReach {
+    /// No append was issued. Generation validation, reference bounding, event
+    /// encoding, allocator restore, unmatched-set validation, or the stream's
+    /// own sequence arithmetic failed first, so the durable stream is
+    /// byte-identical to what it was before the call and this handle's header,
+    /// sequence, generation and unmatched set are all still exact. The operation
+    /// failed; the AUTHORITY did not.
+    NotAttempted,
+    /// An append or a flush was issued and its durable outcome is UNKNOWN. The
+    /// bytes may or may not be on disk, so this handle's next sequence, header
+    /// and generation may all be stale and nothing may be appended through it
+    /// again until ground truth is re-established by reading the store back.
+    Ambiguous,
+}
+
+/// A failed incarnation-stream operation carrying its durable-write reach.
+///
+/// `Display` forwards to the underlying error verbatim so operator-facing
+/// messages — which are already in field logs — do not change shape.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub(in crate::server) struct IncarnationOperationError {
+    /// Whether durable bytes may have been written before the failure.
+    pub(in crate::server) reach: DurableWriteReach,
+    /// The typed underlying failure.
+    pub(in crate::server) error: IncarnationStreamError,
+}
+
+impl IncarnationOperationError {
+    /// Marks a failure raised before any append was issued.
+    const fn not_attempted(error: IncarnationStreamError) -> Self {
+        Self {
+            reach: DurableWriteReach::NotAttempted,
+            error,
+        }
+    }
+
+    /// Marks a failure raised after an append or flush was issued.
+    const fn ambiguous(error: IncarnationStreamError) -> Self {
+        Self {
+            reach: DurableWriteReach::Ambiguous,
+            error,
+        }
+    }
+}
+
+impl From<IncarnationStreamError> for IncarnationOperationError {
+    /// Every `?` in a prologue lands here, which is why the prologue is the
+    /// default: an operation that has not yet called [`append_and_flush`] cannot
+    /// have written anything, and [`append_and_flush`] never returns a bare
+    /// [`IncarnationStreamError`] for this conversion to capture.
+    fn from(error: IncarnationStreamError) -> Self {
+        Self::not_attempted(error)
+    }
+}
+
+impl From<ConnectionIncarnationAllocatorRestoreError> for IncarnationOperationError {
+    fn from(error: ConnectionIncarnationAllocatorRestoreError) -> Self {
+        Self::not_attempted(error.into())
+    }
+}
+
+impl From<DurableIncarnationReferencesError> for IncarnationOperationError {
+    fn from(error: DurableIncarnationReferencesError) -> Self {
+        Self::not_attempted(error.into())
+    }
+}
+
+impl From<IncarnationOperationError> for IncarnationStreamError {
+    /// Drops the reach for the startup-time callers, which have no authority to
+    /// keep alive: a failed startup fails server construction outright.
+    fn from(failure: IncarnationOperationError) -> Self {
+        failure.error
+    }
 }
 
 impl From<ConnectionIncarnationAllocatorRestoreError> for IncarnationStreamError {
@@ -680,11 +777,66 @@ impl IncarnationStream {
         Ok(ReplayedIncarnationState {
             allocator: replay.allocator,
             next_sequence,
-            #[cfg(test)]
             generation: replay.generation,
             unmatched: replay.unmatched,
-            #[cfg(test)]
             has_started: replay.has_started,
+        })
+    }
+
+    /// Re-establishes ground truth by READING, after an ambiguous durable write.
+    ///
+    /// An ambiguous append or flush leaves exactly one thing unknown — whether
+    /// the bytes landed — and that question has an answer sitting in the store.
+    /// This replays the stream and rebuilds a [`StartedIncarnationStream`] from
+    /// what is actually there, so a process that lost track of its own sequence
+    /// finds it again instead of demanding an operator restart it.
+    ///
+    /// It appends NOTHING. In particular it does not append a Startup, because
+    /// this process's Startup is already durable and a second one would burn a
+    /// server incarnation and re-frame every live allocation as historical.
+    ///
+    /// The replayed unmatched-Open set is carried through rather than discarded:
+    /// connections that were mid-teardown when the write went ambiguous still
+    /// have their Complete to append, and a resumed handle that had forgotten
+    /// their Opens would refuse those Completes as absent. An Open whose own
+    /// append was the ambiguous one stays unmatched here and is completed by the
+    /// ordinary `RecoveryRequired` path at the next process startup.
+    ///
+    /// `expected_server_incarnation` is the incarnation this process durably
+    /// started under. If replay shows a higher one, another process has started
+    /// over this stream and resuming would allocate under a foreign incarnation;
+    /// that is refused rather than papered over.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IncarnationStreamError`] when the store cannot be read, when the
+    /// replayed history is malformed, when it carries no Startup at all, or when
+    /// the server incarnation has moved.
+    pub(in crate::server) async fn resume_after_ambiguous_write(
+        self,
+        expected_server_incarnation: u64,
+    ) -> Result<StartedIncarnationStream, IncarnationStreamError> {
+        let replayed = self.replay().await?;
+        if !replayed.has_started {
+            return Err(IncarnationStreamError::MissingStartup);
+        }
+        let header = replayed.allocator.as_restore();
+        if header.server_incarnation != expected_server_incarnation {
+            return Err(IncarnationStreamError::ResumeServerIncarnationMoved {
+                expected: expected_server_incarnation,
+                actual: header.server_incarnation,
+            });
+        }
+        let generation = replayed
+            .generation
+            .ok_or(IncarnationStreamError::MissingStartup)?;
+        Ok(StartedIncarnationStream {
+            store: self.store,
+            maximum_references: self.maximum_references,
+            header,
+            next_sequence: replayed.next_sequence,
+            generation,
+            unmatched: replayed.unmatched,
         })
     }
 
@@ -814,6 +966,22 @@ impl StartedIncarnationStream {
         self.header.server_incarnation
     }
 
+    /// The durable store this stream is bound to.
+    ///
+    /// Handed out so an owner that has to discard this handle after an ambiguous
+    /// write still knows where to go and read ground truth back from. Nothing
+    /// else about the handle survives that discard, which is the point.
+    #[must_use]
+    pub(in crate::server) fn store(&self) -> Arc<dyn DurableStore> {
+        Arc::clone(&self.store)
+    }
+
+    /// The signed complete-reference bound this stream was constructed with.
+    #[must_use]
+    pub(in crate::server) const fn maximum_references(&self) -> usize {
+        self.maximum_references
+    }
+
     /// Returns the current protocol-derived scalar state for assertions only.
     #[must_use]
     #[cfg(test)]
@@ -830,13 +998,15 @@ impl StartedIncarnationStream {
     ///
     /// # Errors
     ///
-    /// Returns [`IncarnationStreamError`] for an over-bound reference set,
+    /// Returns an [`IncarnationOperationError`] for an over-bound reference set,
     /// invalid current state, event-length overflow, append conflict, inconsistent
-    /// assigned sequence, or failed flush.
+    /// assigned sequence, or failed flush. Its [`DurableWriteReach`] says whether
+    /// the caller may keep using this handle: only
+    /// [`DurableWriteReach::Ambiguous`] consumes it.
     pub(in crate::server) async fn allocate(
         &mut self,
         referenced_incarnations: &[ConnectionIncarnation],
-    ) -> Result<IncarnationAllocation, IncarnationStreamError> {
+    ) -> Result<IncarnationAllocation, IncarnationOperationError> {
         self.generation
             .establish_bound(self.next_sequence, self.maximum_references)?;
         let references = DurableIncarnationReferences::try_new(
@@ -896,16 +1066,16 @@ impl StartedIncarnationStream {
     ///
     /// # Errors
     ///
-    /// Returns a typed validation, encoding, append, or flush failure. Append or
-    /// flush ambiguity requires process recovery; callers must consume this
-    /// started authority rather than retrying it.
+    /// Returns a typed validation, encoding, append, or flush failure carrying
+    /// its [`DurableWriteReach`]. Only [`DurableWriteReach::Ambiguous`] consumes
+    /// this handle; a validation refusal leaves it exact and reusable.
     pub(in crate::server) async fn open_connection_fate(
         &mut self,
         connection_incarnation: ConnectionIncarnation,
         class: ConnectionFateClass,
         declared_conversation_bound: usize,
         conversations: &[u64],
-    ) -> Result<ConnectionFateIntent, IncarnationStreamError> {
+    ) -> Result<ConnectionFateIntent, IncarnationOperationError> {
         let event = IncarnationEvent::OpenConnectionFate {
             connection_incarnation,
             class,
@@ -932,12 +1102,13 @@ impl StartedIncarnationStream {
     ///
     /// # Errors
     ///
-    /// Returns a typed absent-Open, encoding, append, or flush failure. As with
-    /// Open, ambiguous durable results consume the outer authority.
+    /// Returns a typed absent-Open, encoding, append, or flush failure carrying
+    /// its [`DurableWriteReach`]. As with Open, only an ambiguous durable result
+    /// consumes the outer authority; an absent-Open refusal does not.
     pub(in crate::server) async fn complete_connection_fate(
         &mut self,
         open_sequence: u64,
-    ) -> Result<(), IncarnationStreamError> {
+    ) -> Result<(), IncarnationOperationError> {
         let payload = encode_event(&IncarnationEvent::CompleteConnectionFate {
             open_event_sequence: open_sequence,
         })?;
@@ -1093,10 +1264,8 @@ impl ReplayAccumulator {
 struct ReplayedIncarnationState {
     allocator: ConnectionIncarnationAllocator,
     next_sequence: u64,
-    #[cfg(test)]
     generation: Option<AllocationGeneration>,
     unmatched: UnmatchedConnectionFates,
-    #[cfg(test)]
     has_started: bool,
 }
 
@@ -1119,22 +1288,39 @@ fn retain_active_allocations(
     }
 }
 
+/// Appends one canonical event and fsyncs it, reporting how far it got.
+///
+/// This function IS the durable-write boundary, which is why it is the only
+/// place [`DurableWriteReach`] is decided. Everything before `store.append` is
+/// arithmetic on this process's own numbers; everything from `store.append`
+/// onward may have put bytes on disk that this process cannot see the fate of.
+/// The `AssignedSequence` mismatch is deliberately `Ambiguous` even though it is
+/// a logic failure rather than an I/O one: the append RETURNED, so it landed
+/// somewhere, and where it landed is exactly what is no longer known.
 async fn append_and_flush(
     store: &Arc<dyn DurableStore>,
     expected_sequence: u64,
     payload: Vec<u8>,
-) -> Result<u64, IncarnationStreamError> {
-    let next_sequence = expected_sequence
-        .checked_add(1)
-        .ok_or(IncarnationStreamError::StreamSequenceExhausted)?;
-    let assigned = store.append(STREAM_KEY, payload, expected_sequence).await?;
+) -> Result<u64, IncarnationOperationError> {
+    let next_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
+        IncarnationOperationError::not_attempted(IncarnationStreamError::StreamSequenceExhausted)
+    })?;
+    let assigned = store
+        .append(STREAM_KEY, payload, expected_sequence)
+        .await
+        .map_err(|error| IncarnationOperationError::ambiguous(error.into()))?;
     if assigned != expected_sequence {
-        return Err(IncarnationStreamError::AssignedSequence {
-            expected: expected_sequence,
-            actual: assigned,
-        });
+        return Err(IncarnationOperationError::ambiguous(
+            IncarnationStreamError::AssignedSequence {
+                expected: expected_sequence,
+                actual: assigned,
+            },
+        ));
     }
-    store.flush().await?;
+    store
+        .flush()
+        .await
+        .map_err(|error| IncarnationOperationError::ambiguous(error.into()))?;
     Ok(next_sequence)
 }
 
