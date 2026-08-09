@@ -12,10 +12,11 @@ use liminal_protocol::{
 };
 
 use super::incarnation_stream::{
-    ConnectionFateClass, IncarnationAllocation, IncarnationStartup, IncarnationStream,
-    IncarnationStreamError, StartedIncarnationStream, encode_allocate_event_fixture,
-    encode_complete_connection_fate_event_fixture, encode_frozen_v1_startup_event_fixture,
-    encode_open_connection_fate_event_fixture, encode_startup_event_fixture,
+    ConnectionFateClass, DurableWriteReach, IncarnationAllocation, IncarnationOperationError,
+    IncarnationStartup, IncarnationStream, IncarnationStreamError, StartedIncarnationStream,
+    encode_allocate_event_fixture, encode_complete_connection_fate_event_fixture,
+    encode_frozen_v1_startup_event_fixture, encode_open_connection_fate_event_fixture,
+    encode_startup_event_fixture,
 };
 
 #[derive(Debug)]
@@ -321,7 +322,13 @@ fn cold_start_replays_each_historical_allocation_under_its_stored_bound()
     ];
     assert!(matches!(
         liminal::durability::bridge::block_on(restarted.allocate(&too_many_live))?,
-        Err(IncarnationStreamError::DurableReferences(_))
+        // An over-bound reference set is rejected before a byte is encoded, let
+        // alone appended: NOT a durable ambiguity, and so not grounds to take
+        // the shared authority out of service (P0 #56 R1(a)).
+        Err(IncarnationOperationError {
+            reach: DurableWriteReach::NotAttempted,
+            error: IncarnationStreamError::DurableReferences(_),
+        })
     ));
     let entries = liminal::durability::bridge::block_on(store.read_from(
         IncarnationStream::stream_key(),
@@ -447,7 +454,13 @@ fn configured_reference_bound_refuses_before_any_append() -> Result<(), Box<dyn 
     let result = liminal::durability::bridge::block_on(stream.allocate(&references))?;
     assert!(matches!(
         result,
-        Err(IncarnationStreamError::DurableReferences(_))
+        // An over-bound reference set is rejected before a byte is encoded, let
+        // alone appended: NOT a durable ambiguity, and so not grounds to take
+        // the shared authority out of service (P0 #56 R1(a)).
+        Err(IncarnationOperationError {
+            reach: DurableWriteReach::NotAttempted,
+            error: IncarnationStreamError::DurableReferences(_),
+        })
     ));
     assert_eq!(stream.header().last_examined_connection_ordinal, None);
     let entries = liminal::durability::bridge::block_on(store.read_from(
@@ -806,7 +819,13 @@ fn historical_generation_completes_after_limit_reduction() -> Result<(), Box<dyn
         liminal::durability::bridge::block_on(
             resumed.allocate(&[first_connection, second_connection])
         )?,
-        Err(IncarnationStreamError::DurableReferences(_))
+        // An over-bound reference set is rejected before a byte is encoded, let
+        // alone appended: NOT a durable ambiguity, and so not grounds to take
+        // the shared authority out of service (P0 #56 R1(a)).
+        Err(IncarnationOperationError {
+            reach: DurableWriteReach::NotAttempted,
+            error: IncarnationStreamError::DurableReferences(_),
+        })
     ));
     assert_eq!(
         liminal::durability::bridge::block_on(resumed.allocate(&[]))??,

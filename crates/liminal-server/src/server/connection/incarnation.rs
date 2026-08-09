@@ -5,7 +5,7 @@
 //! accept seams to those async durable operations, serializes allocations, and
 //! maps terminal protocol decisions into truthful server admission failures.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use liminal::durability::{DurableStore, bridge::block_on};
 use liminal_protocol::{outcome::ConnectionIncarnationExhausted, wire::ConnectionIncarnation};
@@ -13,9 +13,18 @@ use liminal_protocol::{outcome::ConnectionIncarnationExhausted, wire::Connection
 use crate::ServerError;
 use crate::server::participant::ParticipantSemanticHandler;
 use crate::server::participant::incarnation_stream::{
-    ConnectionFateClass, ConnectionFateIntent, IncarnationAllocation, IncarnationStartup,
-    IncarnationStream, StartedIncarnationStream,
+    ConnectionFateClass, ConnectionFateIntent, DurableWriteReach, IncarnationAllocation,
+    IncarnationOperationError, IncarnationStartup, IncarnationStream, StartedIncarnationStream,
 };
+
+/// `ServerError::ParticipantIncarnation::phase` for a refusal caused by an
+/// unresolved ambiguous durable write.
+///
+/// Shared with the admission-refusal classifier
+/// ([`crate::server::connection::refusal`]) so the wire reason, the metric label
+/// and the message an operator reads are joined mechanically and cannot drift
+/// apart the way a duplicated string literal would.
+pub(super) const AMBIGUOUS_DURABLE_WRITE_PHASE: &str = "connection allocation unavailable";
 
 /// Started, fsynced, and serialized server-wide connection-incarnation source.
 #[derive(Debug)]
@@ -27,8 +36,16 @@ pub(super) struct ConnectionIncarnationAuthority {
 #[derive(Debug)]
 enum ConnectionIncarnationAuthorityState {
     Ready(StartedIncarnationStream),
-    ConnectionOrdinalExhausted { attempted_server_incarnation: u64 },
-    Failed,
+    ConnectionOrdinalExhausted {
+        attempted_server_incarnation: u64,
+    },
+    /// An append or flush had an unknown outcome, so this process no longer
+    /// knows the stream's true head and must not append through this handle.
+    AmbiguousDurableWrite {
+        /// Display of the failure that armed the hold, kept so every refusal
+        /// names its cause instead of a generic sentence.
+        armed_by: String,
+    },
 }
 
 impl ConnectionIncarnationAuthority {
@@ -184,53 +201,34 @@ impl ConnectionIncarnationAuthority {
         &self,
         referenced_incarnations: &[ConnectionIncarnation],
     ) -> Result<ConnectionIncarnation, ServerError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|error| ServerError::ParticipantIncarnation {
-                phase: "connection allocation lock",
-                message: error.to_string(),
-            })?;
-        let current = core::mem::replace(&mut *state, ConnectionIncarnationAuthorityState::Failed);
-        let result = match current {
-            ConnectionIncarnationAuthorityState::Ready(mut stream) => {
-                match block_on(stream.allocate(referenced_incarnations)) {
-                    Err(error) => Err(ServerError::ParticipantIncarnation {
-                        phase: "connection allocation bridge",
-                        message: error.to_string(),
-                    }),
-                    Ok(Err(error)) => Err(ServerError::ParticipantIncarnation {
-                        phase: "connection allocation persistence",
-                        message: error.to_string(),
-                    }),
-                    Ok(Ok(IncarnationAllocation::Allocated {
-                        connection_incarnation,
-                        skipped_collisions: _,
-                    })) => {
-                        *state = ConnectionIncarnationAuthorityState::Ready(stream);
-                        Ok(connection_incarnation)
-                    }
-                    Ok(Ok(IncarnationAllocation::Exhausted(
-                        ConnectionIncarnationExhausted::ConnectionOrdinal {
-                            attempted_server_incarnation,
-                        },
-                    ))) => {
-                        *state =
-                            ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
-                                attempted_server_incarnation,
-                            };
-                        Err(ServerError::ConnectionIncarnationExhausted {
-                            attempted_server_incarnation,
-                        })
-                    }
-                    Ok(Ok(IncarnationAllocation::Exhausted(
-                        ConnectionIncarnationExhausted::ServerIncarnation,
-                    ))) => Err(ServerError::ServerIncarnationExhausted),
-                }
-            }
-            ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
-                attempted_server_incarnation,
-            } => {
+        let mut state = Self::lock(&self.state, "connection allocation lock")?;
+        let ConnectionIncarnationAuthorityState::Ready(stream) = &mut *state else {
+            return Err(Self::not_ready_refusal(&state));
+        };
+        let outcome = block_on(stream.allocate(referenced_incarnations));
+        let result = match outcome {
+            // A bridge failure means the future did not run to completion, so
+            // whether its append was issued is exactly what is not known. R1(a)
+            // rules an indeterminate class ambiguous: latching is the safe side.
+            Err(error) => Err(Self::arm_hold(
+                &mut state,
+                "connection allocation bridge",
+                &error.to_string(),
+            )),
+            Ok(Err(failure)) => Err(Self::classify(
+                &mut state,
+                "connection allocation persistence",
+                failure,
+            )),
+            Ok(Ok(IncarnationAllocation::Allocated {
+                connection_incarnation,
+                skipped_collisions: _,
+            })) => Ok(connection_incarnation),
+            Ok(Ok(IncarnationAllocation::Exhausted(
+                ConnectionIncarnationExhausted::ConnectionOrdinal {
+                    attempted_server_incarnation,
+                },
+            ))) => {
                 *state = ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
                     attempted_server_incarnation,
                 };
@@ -238,13 +236,9 @@ impl ConnectionIncarnationAuthority {
                     attempted_server_incarnation,
                 })
             }
-            ConnectionIncarnationAuthorityState::Failed => {
-                Err(ServerError::ParticipantIncarnation {
-                    phase: "connection allocation unavailable",
-                    message: "a prior allocation had an ambiguous durable result; process recovery is required"
-                        .to_owned(),
-                })
-            }
+            Ok(Ok(IncarnationAllocation::Exhausted(
+                ConnectionIncarnationExhausted::ServerIncarnation,
+            ))) => Err(ServerError::ServerIncarnationExhausted),
         };
         drop(state);
         result
@@ -265,53 +259,28 @@ impl ConnectionIncarnationAuthority {
         class: ConnectionFateClass,
         conversations: &[u64],
     ) -> Result<ConnectionFateIntent, ServerError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|error| ServerError::ParticipantIncarnation {
-                phase: "connection-fate Open lock",
-                message: error.to_string(),
-            })?;
-        let current = core::mem::replace(&mut *state, ConnectionIncarnationAuthorityState::Failed);
-        let result = match current {
-            ConnectionIncarnationAuthorityState::Ready(mut stream) => {
-                match block_on(stream.open_connection_fate(
-                    connection_incarnation,
-                    class,
-                    self.maximum_conversations,
-                    conversations,
-                )) {
-                    Err(error) => Err(ServerError::ParticipantIncarnation {
-                        phase: "connection-fate Open bridge",
-                        message: error.to_string(),
-                    }),
-                    Ok(Err(error)) => Err(ServerError::ParticipantIncarnation {
-                        phase: "connection-fate Open persistence",
-                        message: error.to_string(),
-                    }),
-                    Ok(Ok(intent)) => {
-                        *state = ConnectionIncarnationAuthorityState::Ready(stream);
-                        Ok(intent)
-                    }
-                }
-            }
-            ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
-                attempted_server_incarnation,
-            } => {
-                *state = ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
-                    attempted_server_incarnation,
-                };
-                Err(ServerError::ConnectionIncarnationExhausted {
-                    attempted_server_incarnation,
-                })
-            }
-            ConnectionIncarnationAuthorityState::Failed => {
-                Err(ServerError::ParticipantIncarnation {
-                    phase: "connection-fate Open unavailable",
-                    message: "a prior incarnation-stream operation had an ambiguous durable result; process recovery is required"
-                        .to_owned(),
-                })
-            }
+        let mut state = Self::lock(&self.state, "connection-fate Open lock")?;
+        let ConnectionIncarnationAuthorityState::Ready(stream) = &mut *state else {
+            return Err(Self::not_ready_refusal(&state));
+        };
+        let outcome = block_on(stream.open_connection_fate(
+            connection_incarnation,
+            class,
+            self.maximum_conversations,
+            conversations,
+        ));
+        let result = match outcome {
+            Err(error) => Err(Self::arm_hold(
+                &mut state,
+                "connection-fate Open bridge",
+                &error.to_string(),
+            )),
+            Ok(Err(failure)) => Err(Self::classify(
+                &mut state,
+                "connection-fate Open persistence",
+                failure,
+            )),
+            Ok(Ok(intent)) => Ok(intent),
         };
         drop(state);
         result
@@ -324,50 +293,129 @@ impl ConnectionIncarnationAuthority {
     /// Returns a typed lock, absent-Open, append, or flush failure. Any ambiguous
     /// durable result permanently fails this process-local authority.
     pub(super) fn complete_connection_fate(&self, open_sequence: u64) -> Result<(), ServerError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|error| ServerError::ParticipantIncarnation {
-                phase: "connection-fate Complete lock",
-                message: error.to_string(),
-            })?;
-        let current = core::mem::replace(&mut *state, ConnectionIncarnationAuthorityState::Failed);
-        let result = match current {
-            ConnectionIncarnationAuthorityState::Ready(mut stream) => {
-                match block_on(stream.complete_connection_fate(open_sequence)) {
-                    Err(error) => Err(ServerError::ParticipantIncarnation {
-                        phase: "connection-fate Complete bridge",
-                        message: error.to_string(),
-                    }),
-                    Ok(Err(error)) => Err(ServerError::ParticipantIncarnation {
-                        phase: "connection-fate Complete persistence",
-                        message: error.to_string(),
-                    }),
-                    Ok(Ok(())) => {
-                        *state = ConnectionIncarnationAuthorityState::Ready(stream);
-                        Ok(())
-                    }
-                }
-            }
-            ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
-                attempted_server_incarnation,
-            } => {
-                *state = ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
-                    attempted_server_incarnation,
-                };
-                Err(ServerError::ConnectionIncarnationExhausted {
-                    attempted_server_incarnation,
-                })
-            }
-            ConnectionIncarnationAuthorityState::Failed => {
-                Err(ServerError::ParticipantIncarnation {
-                    phase: "connection-fate Complete unavailable",
-                    message: "a prior incarnation-stream operation had an ambiguous durable result; process recovery is required"
-                        .to_owned(),
-                })
-            }
+        let mut state = Self::lock(&self.state, "connection-fate Complete lock")?;
+        let ConnectionIncarnationAuthorityState::Ready(stream) = &mut *state else {
+            return Err(Self::not_ready_refusal(&state));
+        };
+        let outcome = block_on(stream.complete_connection_fate(open_sequence));
+        let result = match outcome {
+            Err(error) => Err(Self::arm_hold(
+                &mut state,
+                "connection-fate Complete bridge",
+                &error.to_string(),
+            )),
+            Ok(Err(failure)) => Err(Self::classify(
+                &mut state,
+                "connection-fate Complete persistence",
+                failure,
+            )),
+            Ok(Ok(())) => Ok(()),
         };
         drop(state);
         result
+    }
+
+    /// Locks the shared state, mapping poisoning to a typed phase failure.
+    fn lock<'guard>(
+        state: &'guard Mutex<ConnectionIncarnationAuthorityState>,
+        phase: &'static str,
+    ) -> Result<MutexGuard<'guard, ConnectionIncarnationAuthorityState>, ServerError> {
+        state.lock().map_err(|error| {
+            ServerError::ParticipantIncarnation {
+                phase,
+                message: error.to_string(),
+            }
+        })
+    }
+
+    /// Turns one failed operation into the right STATE transition.
+    ///
+    /// This is the whole of R1(a). The old code moved the authority to `Failed`
+    /// before every operation and restored it only on success, so a validation
+    /// refusal — a Complete for an absent Open, an over-bound reference set, an
+    /// encoding overflow — disarmed admission for the process just as surely as
+    /// a half-written fsync did. The stream now reports how far it got, and only
+    /// [`DurableWriteReach::Ambiguous`] takes the authority out of service. A
+    /// [`DurableWriteReach::NotAttempted`] failure leaves the handle exactly
+    /// where it was, because nothing about it became untrue: ONE operation
+    /// failed, and the next connection is unaffected.
+    fn classify(
+        state: &mut ConnectionIncarnationAuthorityState,
+        phase: &'static str,
+        failure: IncarnationOperationError,
+    ) -> ServerError {
+        match failure.reach {
+            DurableWriteReach::NotAttempted => {
+                tracing::warn!(
+                    phase,
+                    error = %failure.error,
+                    "incarnation-stream operation refused before any durable write; admission unaffected"
+                );
+                ServerError::ParticipantIncarnation {
+                    phase,
+                    message: failure.error.to_string(),
+                }
+            }
+            DurableWriteReach::Ambiguous => Self::arm_hold(state, phase, &failure.error.to_string()),
+        }
+    }
+
+    /// Takes the authority out of service pending a resume replay.
+    ///
+    /// Loud on purpose: this is the moment the server stops admitting, and the
+    /// field boot that refused 82,166 connections in a row logged nothing at all
+    /// at the moment it decided to.
+    fn arm_hold(
+        state: &mut ConnectionIncarnationAuthorityState,
+        phase: &'static str,
+        message: &str,
+    ) -> ServerError {
+        if !matches!(state, ConnectionIncarnationAuthorityState::Ready(_)) {
+            // Already held or exhausted; the existing refusal is the truthful one.
+            return Self::not_ready_refusal(state);
+        }
+        tracing::error!(
+            phase,
+            error = message,
+            "incarnation stream had an AMBIGUOUS durable result: admission is held"
+        );
+        *state = ConnectionIncarnationAuthorityState::AmbiguousDurableWrite {
+            armed_by: message.to_owned(),
+        };
+        ServerError::ParticipantIncarnation {
+            phase,
+            message: message.to_owned(),
+        }
+    }
+
+    /// The refusal an arriving connection receives while the hold is in force.
+    fn held_refusal(armed_by: &str) -> ServerError {
+        ServerError::ParticipantIncarnation {
+            phase: AMBIGUOUS_DURABLE_WRITE_PHASE,
+            message: format!(
+                "a prior incarnation-stream operation had an ambiguous durable result \
+                 ({armed_by}); process recovery is required"
+            ),
+        }
+    }
+
+    /// The refusal for a state that is not `Ready` and was not made ready.
+    fn not_ready_refusal(state: &ConnectionIncarnationAuthorityState) -> ServerError {
+        match state {
+            ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
+                attempted_server_incarnation,
+            } => ServerError::ConnectionIncarnationExhausted {
+                attempted_server_incarnation: *attempted_server_incarnation,
+            },
+            ConnectionIncarnationAuthorityState::AmbiguousDurableWrite { armed_by } => {
+                Self::held_refusal(armed_by)
+            }
+            ConnectionIncarnationAuthorityState::Ready(_) => {
+                ServerError::ParticipantIncarnation {
+                    phase: "connection allocation state",
+                    message: "authority reported not-ready while holding a ready stream".to_owned(),
+                }
+            }
+        }
     }
 }
