@@ -1,5 +1,5 @@
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use liminal::durability::{
@@ -11,7 +11,7 @@ use liminal_protocol::{
 };
 
 use super::ConnectionSupervisor;
-use super::incarnation::ConnectionIncarnationAuthority;
+use super::incarnation::{AMBIGUOUS_DURABLE_WRITE_PHASE, ConnectionIncarnationAuthority};
 use super::services::{ConnectionServices, LiminalConnectionServices};
 use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
@@ -405,6 +405,9 @@ struct FailNthFlush {
     inner: Arc<dyn DurableStore>,
     flush_count: AtomicUsize,
     fail_at: usize,
+    /// While set, `read_from` fails too — a store that is down for reads as
+    /// well as writes, so a resume replay cannot succeed either.
+    reads_down: AtomicBool,
 }
 
 impl FailNthFlush {
@@ -413,7 +416,16 @@ impl FailNthFlush {
             inner,
             flush_count: AtomicUsize::new(0),
             fail_at,
+            reads_down: AtomicBool::new(false),
         }
+    }
+
+    fn take_reads_down(&self) {
+        self.reads_down.store(true, Ordering::SeqCst);
+    }
+
+    fn bring_reads_up(&self) {
+        self.reads_down.store(false, Ordering::SeqCst);
     }
 }
 
@@ -434,6 +446,11 @@ impl DurableStore for FailNthFlush {
         offset: u64,
         limit: usize,
     ) -> Result<Vec<StoredEntry>, DurabilityError> {
+        if self.reads_down.load(Ordering::SeqCst) {
+            return Err(DurabilityError::ConfigError(
+                "injected incarnation read failure".to_owned(),
+            ));
+        }
         self.inner.read_from(stream_key, offset, limit).await
     }
 
@@ -460,15 +477,44 @@ impl DurableStore for FailNthFlush {
     }
 }
 
+/// P0 #56 pin 2: an ambiguous durable write HOLDS admission, and the hold is
+/// released by re-reading the store rather than by restarting the process.
+///
+/// A failed fsync after a successful append is the one genuinely ambiguous
+/// outcome: the bytes may or may not be durable, so this process no longer knows
+/// the stream's head and must not append through that handle again. Holding is
+/// correct. Holding FOREVER is not — "process recovery is required" names a
+/// trigger nothing inside the process owns, and on the field estate that turned
+/// one bad fsync into 82,166 consecutive refusals on a server whose ports stayed
+/// open and whose health probe stayed green.
+///
+/// Both halves are asserted here against a store that is down for reads as well
+/// as writes, so the hold is observable before the recovery is:
+///   1. the fsync fails and the connection is refused (nothing spawned);
+///   2. while the store is still down, admission stays refused AND the resume
+///      replay cannot cheat — the refusal names the ambiguity;
+///   3. once the store is healthy, admission comes back on its own, within a
+///      bounded number of attempts, with no restart and no operator action.
 #[test]
-fn allocation_flush_failure_refuses_connection_before_process_spawn()
+fn an_ambiguous_durable_write_holds_admission_and_then_recovers_by_reading()
 -> Result<(), Box<dyn std::error::Error>> {
-    let inner = store()?;
-    let failing: Arc<dyn DurableStore> = Arc::new(FailNthFlush::new(Arc::clone(&inner), 2));
-    let config = config()?;
-    let supervisor = ConnectionSupervisor::with_services(services(&config, failing)?)?;
-    let (_client, server) = tcp_pair()?;
+    /// Attempts allowed after the store recovers. Larger than the backoff
+    /// window the authority can reach from a single failed resume, so the pin
+    /// asserts "recovers within a bound" rather than a schedule it would have
+    /// to be edited alongside.
+    const RECOVERY_ATTEMPT_BUDGET: usize = 8;
 
+    let inner = store()?;
+    let failing = Arc::new(FailNthFlush::new(Arc::clone(&inner), 2));
+    let config = config()?;
+    // Startup replays the stream, so the store has to be readable to build the
+    // supervisor at all. It goes down immediately afterwards.
+    let supervisor =
+        ConnectionSupervisor::with_services(services(&config, Arc::clone(&failing) as _)?)?;
+    failing.take_reads_down();
+
+    // 1. The ambiguous fsync refuses this connection before anything is spawned.
+    let (_client, server) = tcp_pair()?;
     assert!(matches!(
         supervisor.spawn_connection(server),
         Err(ServerError::ParticipantIncarnation {
@@ -478,19 +524,45 @@ fn allocation_flush_failure_refuses_connection_before_process_spawn()
     ));
     assert_eq!(supervisor.active_connection_count(), 0);
 
+    // 2. The hold is real: with the store still down the resume cannot succeed,
+    //    and the refusal says so rather than pretending the stream is fine.
     let (_second_client, second_server) = tcp_pair()?;
     assert!(matches!(
         supervisor.spawn_connection(second_server),
         Err(ServerError::ParticipantIncarnation {
-            phase: "connection allocation unavailable",
+            phase: AMBIGUOUS_DURABLE_WRITE_PHASE,
             ..
         })
     ));
+    assert_eq!(supervisor.active_connection_count(), 0);
+
+    // 3. The store comes back. Nothing restarts; nothing is told. The next
+    //    connections simply arrive, and one of them is admitted.
+    failing.bring_reads_up();
+    let mut sockets = Vec::new();
+    let mut admitted = false;
+    for _ in 0..RECOVERY_ATTEMPT_BUDGET {
+        let (client, server) = tcp_pair()?;
+        sockets.push(client);
+        if supervisor.spawn_connection(server).is_ok() {
+            admitted = true;
+            break;
+        }
+    }
+    assert!(
+        admitted,
+        "admission must recover by re-reading the store, without a process restart"
+    );
+    assert_eq!(supervisor.active_connection_count(), 1);
+
+    // The resumed stream picked up the durable truth rather than this process's
+    // stale count: the ambiguous Allocate DID land (append succeeded, only the
+    // fsync failed), so the recovered allocation appends after it.
     let entries = block_on(inner.read_from(IncarnationStream::stream_key(), 0, 8))??;
     assert_eq!(
         entries.len(),
-        2,
-        "an ambiguous append must poison the live allocator instead of retrying"
+        3,
+        "startup, the ambiguous allocate that landed, and the resumed allocate"
     );
     supervisor.shutdown();
     Ok(())
