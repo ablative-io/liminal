@@ -99,8 +99,12 @@ pub struct SubscriptionStream {
     writer: TcpStream,
     /// Server-assigned subscription id, echoed on `Unsubscribe` at teardown.
     subscription_id: u64,
-    /// Delivered messages surfaced by the background reader.
-    inbound: Receiver<DeliveredMessage>,
+    /// Delivered messages surfaced by the background reader, or the one typed
+    /// terminal the server sent instead. A `SubscribeError` arriving mid-stream
+    /// is the ONLY explanation the consumer will ever get for deliveries
+    /// stopping, so it rides the same queue as the deliveries rather than being
+    /// dropped in the reader (P0 #55).
+    inbound: Receiver<Result<DeliveredMessage, SdkError>>,
     /// Background reader handle, joined on drop.
     reader: Option<JoinHandle<()>>,
 }
@@ -208,17 +212,20 @@ impl SubscriptionStream {
     /// Returns [`SdkError::Connection`] when no message arrives within `timeout`
     /// or the background reader has stopped (e.g. the server closed the stream).
     pub fn recv_timeout(&self, timeout: Duration) -> Result<DeliveredMessage, SdkError> {
-        self.inbound.recv_timeout(timeout).map_err(|error| {
-            let detail = match error {
-                RecvTimeoutError::Timeout => "no delivery arrived within the timeout",
-                RecvTimeoutError::Disconnected => {
-                    "the subscription reader stopped before a delivery arrived"
-                }
-            };
-            SdkError::Connection {
-                description: format!("subscription receive failed: {detail}"),
+        match self.inbound.recv_timeout(timeout) {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                let detail = match error {
+                    RecvTimeoutError::Timeout => "no delivery arrived within the timeout",
+                    RecvTimeoutError::Disconnected => {
+                        "the subscription reader stopped before a delivery arrived"
+                    }
+                };
+                Err(SdkError::Connection {
+                    description: format!("subscription receive failed: {detail}"),
+                })
             }
-        })
+        }
     }
 
     /// The server-assigned id for this subscription.
@@ -376,7 +383,11 @@ fn subscribe(
 /// `Deliver` bytes the synchronous subscribe read past the `SubscribeAck` are
 /// already here, so the loop decodes them first — before its next socket read —
 /// instead of losing them and starting mid-stream.
-fn run_reader(mut stream: TcpStream, mut buffer: Vec<u8>, sender: &Sender<DeliveredMessage>) {
+fn run_reader(
+    mut stream: TcpStream,
+    mut buffer: Vec<u8>,
+    sender: &Sender<Result<DeliveredMessage, SdkError>>,
+) {
     loop {
         // Connection closed or a fatal read/decode error: end the thread. The
         // dropped `sender` surfaces as a `Disconnected` on the receiver side.
@@ -394,7 +405,7 @@ fn run_reader(mut stream: TcpStream, mut buffer: Vec<u8>, sender: &Sender<Delive
                     schema_id: envelope.schema_id,
                     payload: envelope.payload,
                 };
-                if sender.send(message).is_err() {
+                if sender.send(Ok(message)).is_err() {
                     // The receiver was dropped; nothing will consume further
                     // deliveries, so stop reading.
                     return;
@@ -402,11 +413,44 @@ fn run_reader(mut stream: TcpStream, mut buffer: Vec<u8>, sender: &Sender<Delive
             }
             // A server `Disconnect` ends the subscription cleanly.
             Frame::Disconnect { .. } => return,
+            // A `SubscribeError` arriving AFTER setup is the server ending this
+            // subscription -- the overflow shed sends exactly this and then
+            // releases the subscription at the channel actor, so no further
+            // delivery can ever arrive. It is surfaced to the consumer and ends
+            // the reader (P0 #55).
+            //
+            // This is the one exception to the stray-frame rule below, and the
+            // distinction is deliveries: ignoring a stray frame protects the
+            // deliveries still to come, and here there are none. Dropping this
+            // frame is what left a shed subscriber unable to tell "the server
+            // dropped me" from "nothing was published".
+            Frame::SubscribeError {
+                reason_code,
+                message,
+                ..
+            } => {
+                let _sent = sender.send(Err(subscription_ended(reason_code, message)));
+                return;
+            }
             // Any other frame on a subscription connection is unexpected; ignore it
             // rather than tearing the reader down so a stray frame cannot silently
             // drop subsequent deliveries.
             _ => {}
         }
+    }
+}
+
+/// Builds the typed terminal for a `SubscribeError` the server sent mid-stream.
+///
+/// The server's own detail is carried VERBATIM: it is the only text that says
+/// which limit ended the subscription, and a client that paraphrased it would
+/// leave an operator correlating a client log against a server log by guesswork.
+fn subscription_ended(reason_code: u16, message: Option<alloc::string::String>) -> SdkError {
+    SdkError::Protocol {
+        description: format!(
+            "server ended the subscription (reason {reason_code}): {}",
+            message.unwrap_or_else(|| "no detail".to_string())
+        ),
     }
 }
 
