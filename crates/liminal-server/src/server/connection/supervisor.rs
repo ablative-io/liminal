@@ -25,6 +25,7 @@ use liminal::protocol::WorkerRegistration;
 use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::incarnation::ConnectionIncarnationAuthority;
+use super::refusal::AdmissionRefusal;
 use super::loopback::{LoopbackConnectionProcess, LoopbackServerEnd};
 use super::notifier::ConnectionNotifier;
 use super::process::ConnectionProcess;
@@ -210,8 +211,22 @@ impl ConnectionSupervisor {
     ///
     /// # Errors
     /// Returns [`ServerError`] when stream configuration or beamr spawn fails.
+    /// Counts one refused admission, classified by reason.
+    ///
+    /// Hung on the THREE public admission doors — TCP accept, the sibling
+    /// transport spawn (WebSocket), and the in-process loopback — because those
+    /// are the three places a connection can be turned away, and each of them
+    /// reaches the shared inner body exactly once. Recording deeper would
+    /// double-count the loopback (which calls the inner body directly);
+    /// recording shallower would miss the doors that only log.
+    fn record_admission_refusal(error: &ServerError) {
+        crate::metrics::admission_refused(AdmissionRefusal::classify(error));
+    }
+
     pub fn spawn_connection(&self, stream: TcpStream) -> Result<ConnectionHandle, ServerError> {
-        self.inner.spawn_connection(stream)
+        self.inner
+            .spawn_connection(stream)
+            .inspect_err(Self::record_admission_refusal)
     }
 
     /// Returns the underlying beamr scheduler.
@@ -533,6 +548,7 @@ impl ConnectionSupervisor {
     ) -> Result<ConnectionHandle, ServerError> {
         self.inner
             .spawn_transport_connection(peer_addr, fd_guard, mount, build_factory)
+            .inspect_err(Self::record_admission_refusal)
     }
 
     /// Admits one in-process connection over `server_end` (design §8 step 3).
@@ -584,6 +600,7 @@ impl ConnectionSupervisor {
         };
         self.inner
             .spawn_transport_connection(None, None, MountKind::Loopback, &build)
+            .inspect_err(Self::record_admission_refusal)
     }
 
     /// Stops the beamr scheduler used by connection processes.

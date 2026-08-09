@@ -12,6 +12,8 @@ use liminal::metrics::{
     CounterHandle, GaugeHandle, MetricsRegistry, global_registry, install_global_registry,
 };
 
+use crate::server::connection::refusal::AdmissionRefusal;
+use crate::server::connection::websocket::UpgradeRefusal;
 use crate::server::mount::MountKind;
 
 const CONNECTIONS_ACTIVE: &str = "liminal_connections_active";
@@ -38,6 +40,31 @@ const SHEDS_TOTAL: &str = "liminal_subscription_sheds_total";
 /// [`MountKind`]'s variants, which is why THIS split is affordable and a
 /// per-channel one is not.
 const TRANSPORT_LABEL: &str = "transport";
+/// P0 #56: connections turned away at the admission door, by reason class.
+///
+/// ADDITIVE, and it has to be, because no existing family can answer this.
+/// [`CONNECTIONS_ACTIVE`] is incremented in `register_record`
+/// (`server/connection/supervisor.rs:2822`), which is reached only AFTER
+/// admission has succeeded — a refusal is exactly the case where it never runs.
+/// On a server refusing every connection that gauge therefore reads a flat
+/// zero, indistinguishable from a healthy idle server, which is what the field
+/// estate's dashboards showed while 82,166 consecutive connections were turned
+/// away. This counter can only move when a connection was refused.
+const ADMISSION_REFUSALS_TOTAL: &str = "liminal_admission_refusals_total";
+/// P0 #56: WebSocket upgrades refused before admission was even attempted.
+///
+/// Separate from [`ADMISSION_REFUSALS_TOTAL`] because it counts a different
+/// event at a different door: these connections never reached the shared
+/// admission bound, the incarnation authority, or the registry. Folding them
+/// together would make an origin-policy rejection look like a capacity problem.
+const HANDSHAKE_REFUSALS_TOTAL: &str = "liminal_handshake_refusals_total";
+/// Label key carried by both refusal families.
+///
+/// Cardinality is bounded by the variant count of `AdmissionRefusal` and
+/// `UpgradeRefusal` respectively — fixed, enum-derived strings. A peer address,
+/// an origin value, or an error message here would be unbounded cardinality on
+/// a surface a scraper keeps forever.
+const REASON_LABEL: &str = "reason";
 
 static SERVER_METRICS: OnceLock<ServerMetrics> = OnceLock::new();
 
@@ -52,6 +79,12 @@ struct ServerMetrics {
     /// label string, or hashes a name mid-slice.
     transport_deliveries: [CounterHandle; MOUNT_KINDS.len()],
     sheds_total: CounterHandle,
+    /// One pre-registered handle per admission-refusal class, so the refusal
+    /// path looks a counter up by discriminant and never allocates a label
+    /// string while it is busy turning a connection away.
+    admission_refusals: [CounterHandle; AdmissionRefusal::LABELS.len()],
+    /// One pre-registered handle per WebSocket upgrade-refusal class.
+    handshake_refusals: [CounterHandle; UpgradeRefusal::LABELS.len()],
 }
 
 /// Every transport a delivery can ride, in the order their handles are stored.
@@ -132,6 +165,26 @@ pub fn transport_deliveries_recorded(transport: MountKind, count: u64) {
     }
 }
 
+/// Records one connection turned away at the admission door
+/// (`liminal_admission_refusals_total`, labelled by reason class).
+///
+/// Called at the three admission doors — TCP accept, WebSocket upgrade, and the
+/// in-process loopback — and nowhere else, so a refusal is counted exactly once
+/// no matter which mount knocked.
+pub(crate) fn admission_refused(refusal: AdmissionRefusal) {
+    if let Some(metrics) = SERVER_METRICS.get() {
+        metrics.admission_refusals[refusal.slot()].increment();
+    }
+}
+
+/// Records one WebSocket upgrade refused before admission was attempted
+/// (`liminal_handshake_refusals_total`, labelled by reason class).
+pub(crate) fn handshake_refused(refusal: &UpgradeRefusal) {
+    if let Some(metrics) = SERVER_METRICS.get() {
+        metrics.handshake_refusals[refusal.slot()].increment();
+    }
+}
+
 /// Records one subscription shed by an inbox overflow
 /// (`liminal_subscription_sheds_total`).
 ///
@@ -192,14 +245,39 @@ impl ServerMetrics {
         let transport_deliveries: [CounterHandle; MOUNT_KINDS.len()] =
             transport_deliveries.try_into().ok()?;
         let sheds_total = registry.register_counter(SHEDS_TOTAL, no_labels()).ok()?;
+        let admission_refusals =
+            register_labelled(registry, ADMISSION_REFUSALS_TOTAL, &AdmissionRefusal::LABELS)?;
+        let handshake_refusals =
+            register_labelled(registry, HANDSHAKE_REFUSALS_TOTAL, &UpgradeRefusal::LABELS)?;
         Some(Self {
             connections_active,
             publishes_total,
             deliveries_total,
             transport_deliveries,
             sheds_total,
+            admission_refusals,
+            handshake_refusals,
         })
     }
+}
+
+/// Pre-registers one counter per label value, in label order.
+///
+/// Every class is registered at `init`, not lazily on first refusal, so the
+/// exposition carries an explicit zero for classes that have not fired. A
+/// missing line and a zero line mean very different things to an operator: the
+/// first is "this server does not know about that failure mode", the second is
+/// "it has not happened".
+fn register_labelled<const N: usize>(
+    registry: &MetricsRegistry,
+    name: &'static str,
+    labels: &[&'static str; N],
+) -> Option<[CounterHandle; N]> {
+    let mut handles = Vec::with_capacity(N);
+    for label in labels {
+        handles.push(registry.register_counter(name, [(REASON_LABEL, *label)]).ok()?);
+    }
+    handles.try_into().ok()
 }
 
 const fn no_labels() -> std::iter::Empty<(&'static str, &'static str)> {

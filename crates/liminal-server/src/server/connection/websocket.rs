@@ -137,7 +137,7 @@ pub(super) struct AcceptorSettings {
 /// response carried by [`Self::status`] and the connection closes. Nothing on
 /// this enum enters connection supervision.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum UpgradeRefusal {
+pub(crate) enum UpgradeRefusal {
     /// The request head exceeded [`MAX_UPGRADE_REQUEST_BYTES`].
     OversizedRequestHead {
         /// Bytes received before the bound tripped.
@@ -179,6 +179,45 @@ pub(super) enum UpgradeRefusal {
 }
 
 impl UpgradeRefusal {
+    /// Every refusal's metric label, indexed by [`Self::slot`].
+    ///
+    /// P0 #56 R3. Bounded by this array's length by construction — note that
+    /// several variants carry a `String` (the refused origin, the requested
+    /// path, a parser diagnostic) and NONE of those values appear here. Putting
+    /// a client-supplied origin or path into a label would let any caller mint
+    /// unbounded time series on the operator's scrape target.
+    pub(crate) const LABELS: [&'static str; 9] = [
+        "oversized_request_head",
+        "malformed_request",
+        "junk_after_request",
+        "not_a_websocket_upgrade",
+        "wrong_path",
+        "duplicate_origin_header",
+        "malformed_origin_header",
+        "origin_not_allowed",
+        "subprotocol_offered",
+    ];
+
+    /// This refusal's index into [`Self::LABELS`] and the registered handles.
+    pub(crate) const fn slot(&self) -> usize {
+        match self {
+            Self::OversizedRequestHead { .. } => 0,
+            Self::MalformedRequest { .. } => 1,
+            Self::JunkAfterRequest => 2,
+            Self::NotAWebSocketUpgrade { .. } => 3,
+            Self::WrongPath { .. } => 4,
+            Self::DuplicateOriginHeader => 5,
+            Self::MalformedOriginHeader => 6,
+            Self::OriginNotAllowed { .. } => 7,
+            Self::SubprotocolOffered => 8,
+        }
+    }
+
+    /// The bounded metric label value for this refusal.
+    pub(crate) const fn label(&self) -> &'static str {
+        Self::LABELS[self.slot()]
+    }
+
     /// The fixed non-success status this refusal answers with.
     pub(super) const fn status(&self) -> StatusCode {
         match self {

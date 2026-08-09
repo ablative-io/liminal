@@ -301,10 +301,17 @@ impl HandshakeShared {
                 self.spawn_upgraded(stream, peer_addr);
             }
             HandshakeOutcome::Refused(refusal) => {
+                // Counted separately from admission refusals: this connection
+                // never reached the shared admission bound, the incarnation
+                // authority, or the registry, so folding the two families
+                // together would make an origin-policy rejection look like a
+                // capacity problem.
+                crate::metrics::handshake_refused(&refusal);
                 tracing::info!(
                     ?peer_addr,
                     status = %refusal.status(),
                     reason = %refusal,
+                    refusal_class = refusal.label(),
                     "websocket upgrade refused"
                 );
             }

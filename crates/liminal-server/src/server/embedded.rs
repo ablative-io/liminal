@@ -106,6 +106,14 @@ impl EmbeddedServer {
         auth_token: Option<Vec<u8>>,
         limits: LimitsConfig,
     ) -> Result<Self, ServerError> {
+        // P0 #56 R3. `server::run` was the only production caller of
+        // `metrics::init`, and an embedder never reaches `run` — so an embedded
+        // deployment had an entirely INERT metrics surface: every recording
+        // helper guards on the uninstalled registry and silently does nothing.
+        // That is how a field estate refused 82,166 consecutive connections
+        // with nothing to scrape. `init` is idempotent, so a host that also
+        // calls `run` (or calls this twice) pays nothing.
+        crate::metrics::init();
         Ok(Self {
             supervisor: ConnectionSupervisor::with_services_auth_and_limits(
                 services, auth_token, limits,

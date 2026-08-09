@@ -57,7 +57,7 @@ pub(in crate::server) const MAX_CLOSE_REASON_BYTES: usize = 123;
 /// consults the authority, so it is a pure function of the refusal that already
 /// happened. Adding a variant here is the only way to add a metric label value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::server) enum AdmissionRefusal {
+pub(crate) enum AdmissionRefusal {
     /// The incarnation authority is holding after an ambiguous durable write.
     AdmissionHeld,
     /// The incarnation authority surrendered the stream to another process.
@@ -100,20 +100,37 @@ impl AdmissionRefusal {
         }
     }
 
-    /// The bounded metric label value for this class.
+    /// Every class's metric label, indexed by [`Self::slot`].
     ///
-    /// Fixed strings only. Never a peer address, never an error message: this
-    /// value becomes a permanent time series on an operator's scrape target.
-    pub(in crate::server) const fn label(self) -> &'static str {
+    /// Fixed strings only. Never a peer address, never an error message: each
+    /// value becomes a permanent time series on an operator's scrape target,
+    /// and cardinality here is bounded by this array's length by construction.
+    pub(crate) const LABELS: [&'static str; 7] = [
+        "admission_held",
+        "authority_surrendered",
+        "connections_saturated",
+        "participant_service_fatal",
+        "incarnation_exhausted",
+        "allocation_failed",
+        "spawn_failed",
+    ];
+
+    /// This class's index into [`Self::LABELS`] and the pre-registered handles.
+    pub(crate) const fn slot(self) -> usize {
         match self {
-            Self::AdmissionHeld => "admission_held",
-            Self::AuthoritySurrendered => "authority_surrendered",
-            Self::ConnectionsSaturated => "connections_saturated",
-            Self::ParticipantServiceFatal => "participant_service_fatal",
-            Self::IncarnationExhausted => "incarnation_exhausted",
-            Self::AllocationFailed => "allocation_failed",
-            Self::SpawnFailed => "spawn_failed",
+            Self::AdmissionHeld => 0,
+            Self::AuthoritySurrendered => 1,
+            Self::ConnectionsSaturated => 2,
+            Self::ParticipantServiceFatal => 3,
+            Self::IncarnationExhausted => 4,
+            Self::AllocationFailed => 5,
+            Self::SpawnFailed => 6,
         }
+    }
+
+    /// The bounded metric label value for this class.
+    pub(crate) const fn label(self) -> &'static str {
+        Self::LABELS[self.slot()]
     }
 
     /// The reason string the refused client is told.
