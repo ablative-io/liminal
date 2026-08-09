@@ -26,6 +26,7 @@ use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::incarnation::ConnectionIncarnationAuthority;
 use super::refusal::AdmissionRefusal;
+use crate::health::AdmissionReadiness;
 use super::loopback::{LoopbackConnectionProcess, LoopbackServerEnd};
 use super::notifier::ConnectionNotifier;
 use super::process::ConnectionProcess;
@@ -211,6 +212,19 @@ impl ConnectionSupervisor {
     ///
     /// # Errors
     /// Returns [`ServerError`] when stream configuration or beamr spawn fails.
+    /// A handle on whether this server can admit a connection, for the
+    /// readiness probe (P0 #56 R4).
+    ///
+    /// Handed to `SharedReadinessState::track_admission` once the supervisor
+    /// exists. The health endpoint binds BEFORE the supervisor is built —
+    /// liveness has to be answerable while the rest of the server is still
+    /// coming up — so this cannot be wired at readiness construction and is
+    /// installed afterwards instead.
+    #[must_use]
+    pub fn admission_readiness(&self) -> AdmissionReadiness {
+        self.inner.admission_readiness.clone()
+    }
+
     /// Counts one refused admission, classified by reason.
     ///
     /// Hung on the THREE public admission doors — TCP accept, the sibling
@@ -1066,6 +1080,9 @@ pub(super) struct SupervisorInner {
     scheduler: Arc<Scheduler>,
     runtime: Arc<ConnectionRuntime>,
     incarnations: Option<Arc<ConnectionIncarnationAuthority>>,
+    /// P0 #56 R4: the readiness probe's view of whether this server can admit.
+    /// Shared with the incarnation authority when one is installed.
+    admission_readiness: AdmissionReadiness,
 }
 
 impl std::fmt::Debug for SupervisorInner {
@@ -1086,6 +1103,11 @@ impl SupervisorInner {
         fatal_shutdown: Option<ShutdownHandle>,
     ) -> Result<Self, ServerError> {
         let installed_services = ConnectionServiceInstallation::capture(services);
+        // P0 #56 R4. Owned by the supervisor so the readiness probe has a stable
+        // handle whether or not a participant service (and therefore an
+        // incarnation authority) is installed: a server with no authority has
+        // nothing that can hold admission, and reports available.
+        let admission_readiness = AdmissionReadiness::available();
         let incarnations = installed_services
             .participant_service
             .as_ref()
@@ -1096,6 +1118,7 @@ impl SupervisorInner {
                         limits.max_connections,
                         service.publication_conversation_limit(),
                         service,
+                        admission_readiness.clone(),
                     )
                     .map(Arc::new)
                 },
@@ -1172,6 +1195,7 @@ impl SupervisorInner {
             scheduler,
             runtime,
             incarnations,
+            admission_readiness,
         })
     }
 

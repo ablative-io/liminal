@@ -11,6 +11,7 @@ use liminal::durability::{DurableStore, bridge::block_on};
 use liminal_protocol::{outcome::ConnectionIncarnationExhausted, wire::ConnectionIncarnation};
 
 use crate::ServerError;
+use crate::health::AdmissionReadiness;
 use crate::server::participant::ParticipantSemanticHandler;
 use crate::server::participant::incarnation_stream::{
     ConnectionFateClass, ConnectionFateIntent, DurableWriteReach, IncarnationAllocation,
@@ -56,6 +57,14 @@ const RESUME_BACKOFF_CEILING: u32 = 1024;
 pub(super) struct ConnectionIncarnationAuthority {
     state: Mutex<ConnectionIncarnationAuthorityState>,
     maximum_conversations: usize,
+    /// The readiness probe's view of whether this authority can admit.
+    ///
+    /// Held here rather than derived on demand because the probe must be
+    /// answerable without taking the authority mutex — which is held across a
+    /// durable append and fsync on every ordinary allocation, and across a whole
+    /// replay during a resume. A readiness scrape that could block behind an
+    /// fsync would be its own outage.
+    admission: AdmissionReadiness,
 }
 
 #[derive(Debug)]
@@ -94,14 +103,21 @@ struct AmbiguousDurableWrite {
 impl ConnectionIncarnationAuthority {
     /// Wraps an already replayed stream for deterministic admission tests.
     #[cfg(test)]
-    pub(super) const fn from_started_for_test(
+    pub(super) fn from_started_for_test(
         stream: StartedIncarnationStream,
         maximum_conversations: usize,
     ) -> Self {
         Self {
             state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
             maximum_conversations,
+            admission: AdmissionReadiness::available(),
         }
+    }
+
+    /// A handle on this authority's admission availability, for the readiness
+    /// probe to read.
+    pub(super) fn admission_readiness(&self) -> AdmissionReadiness {
+        self.admission.clone()
     }
 
     /// Replays and fsyncs the server-incarnation transition before returning.
@@ -115,6 +131,7 @@ impl ConnectionIncarnationAuthority {
         maximum_references: usize,
         maximum_conversations: u64,
         handler: &dyn ParticipantSemanticHandler,
+        admission: AdmissionReadiness,
     ) -> Result<Self, ServerError> {
         let maximum_conversations = usize::try_from(maximum_conversations).map_err(|error| {
             ServerError::ParticipantIncarnation {
@@ -133,7 +150,7 @@ impl ConnectionIncarnationAuthority {
             })?;
         match startup {
             IncarnationStartup::Started(stream) => {
-                Self::finish_startup(stream, maximum_conversations, handler)
+                Self::finish_startup(stream, maximum_conversations, handler, admission)
             }
             IncarnationStartup::RecoveryRequired(mut recovery) => {
                 let intents = recovery.intents();
@@ -174,7 +191,7 @@ impl ConnectionIncarnationAuthority {
                     })?;
                 match resumed {
                     IncarnationStartup::Started(stream) => {
-                        Self::finish_startup(stream, maximum_conversations, handler)
+                        Self::finish_startup(stream, maximum_conversations, handler, admission)
                     }
                     IncarnationStartup::RecoveryRequired(_) => {
                         Err(ServerError::ParticipantIncarnation {
@@ -217,6 +234,7 @@ impl ConnectionIncarnationAuthority {
         stream: StartedIncarnationStream,
         maximum_conversations: usize,
         handler: &dyn ParticipantSemanticHandler,
+        admission: AdmissionReadiness,
     ) -> Result<Self, ServerError> {
         handler
             .repair_unclean_server_restart(stream.server_incarnation())
@@ -227,6 +245,7 @@ impl ConnectionIncarnationAuthority {
         Ok(Self {
             state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
             maximum_conversations,
+            admission,
         })
     }
 

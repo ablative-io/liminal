@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// Process liveness state returned by the liveness probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -43,10 +43,59 @@ impl HealthStatus {
 /// Returns the server process liveness status.
 ///
 /// This is deliberately a liveness probe, not a readiness probe: if the process
-/// can call this function, the process is alive and the result is healthy.
+/// can call this function, the process is alive and the result is healthy. That
+/// contract is intact and correct, and P0 #56 did NOT change it.
+///
+/// It does mean this function cannot answer "is the server serving?", and on the
+/// field estate it was read as if it could: a boot whose admission authority was
+/// latched refused 82,166 consecutive connections while this probe stayed green
+/// throughout, which it was right to do — the process was alive. The question
+/// that was actually being asked belongs to [`readiness_check`], which since
+/// P0 #56 reports [`ReadinessCondition::AdmissionAvailable`] unmet when the
+/// server cannot admit a connection. An orchestrator that wants traffic steered
+/// away from a server that cannot serve must read READINESS.
 #[must_use]
 pub const fn health_check() -> HealthStatus {
     HealthStatus::healthy()
+}
+
+/// Shared, lock-free view of whether the server can admit a connection.
+///
+/// Owned by the connection-incarnation authority (the thing that actually knows)
+/// and read by the readiness probe. A handle rather than a snapshot because the
+/// answer changes at runtime: the authority arms it false when a durable write
+/// goes ambiguous, and back to true when a resume replay re-establishes ground
+/// truth.
+#[derive(Clone, Debug)]
+pub struct AdmissionReadiness {
+    available: Arc<AtomicBool>,
+}
+
+impl AdmissionReadiness {
+    /// Creates a handle that starts available.
+    #[must_use]
+    pub fn available() -> Self {
+        Self {
+            available: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// Whether the server can currently admit a connection.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.available.load(Ordering::SeqCst)
+    }
+
+    /// Records whether the server can currently admit a connection.
+    pub fn set_available(&self, available: bool) {
+        self.available.store(available, Ordering::SeqCst);
+    }
+}
+
+impl Default for AdmissionReadiness {
+    fn default() -> Self {
+        Self::available()
+    }
 }
 
 /// Cluster readiness requirement for a startup snapshot.
@@ -63,25 +112,47 @@ pub enum ClusterReadiness {
 }
 
 /// Startup state evaluated by the readiness probe.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadinessState {
     /// Whether configuration has loaded, environment overrides applied, and
     /// validation completed successfully.
     pub config_loaded: bool,
     /// Whether the main wire protocol listener is bound and accepting traffic.
+    ///
+    /// A bound listener is not a serving one: a socket can be accepted and then
+    /// refused at the admission door, which is the P0 #56 failure. See
+    /// [`Self::admission_available`].
     pub listener_bound: bool,
     /// Conditional cluster startup state.
     pub cluster: ClusterReadiness,
+    /// Whether the server can admit a connection at all (P0 #56).
+    ///
+    /// Distinct from [`Self::listener_bound`] because the field defect sat
+    /// exactly between the two: ports listening, accepts succeeding, and every
+    /// connection refused a moment later by a latched incarnation authority.
+    pub admission_available: bool,
 }
 
 impl ReadinessState {
     /// Creates a startup readiness snapshot.
     #[must_use]
     pub const fn new(config_loaded: bool, listener_bound: bool, cluster: ClusterReadiness) -> Self {
+        Self::with_admission(config_loaded, listener_bound, cluster, true)
+    }
+
+    /// Creates a startup readiness snapshot including the admission gate.
+    #[must_use]
+    pub const fn with_admission(
+        config_loaded: bool,
+        listener_bound: bool,
+        cluster: ClusterReadiness,
+        admission_available: bool,
+    ) -> Self {
         Self {
             config_loaded,
             listener_bound,
             cluster,
+            admission_available,
         }
     }
 
@@ -104,6 +175,22 @@ impl ReadinessState {
     }
 }
 
+impl Default for ReadinessState {
+    /// The pre-startup snapshot: nothing loaded, nothing bound, and admission
+    /// ASSUMED AVAILABLE.
+    ///
+    /// Not a derive, because `bool::default()` is false and that would be a
+    /// different claim: it would report a brand-new server as unable to admit
+    /// connections, which is not something anything has observed yet. The
+    /// admission gate is the one condition here that reports a RUNTIME fact
+    /// rather than a startup step, so its honest default is "no evidence
+    /// against", matching what `SharedReadinessState::snapshot` reports before
+    /// an admission source is installed.
+    fn default() -> Self {
+        Self::with_admission(false, false, ClusterReadiness::NotConfigured, true)
+    }
+}
+
 /// Readiness conditions that can prevent a server from receiving traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +201,9 @@ pub enum ReadinessCondition {
     ListenerBound,
     /// Cluster configuration is present but membership is not established.
     ClusterMembershipEstablished,
+    /// The server cannot admit a connection (P0 #56). Ports may be listening
+    /// and accepts may be succeeding; what fails is everything after that.
+    AdmissionAvailable,
 }
 
 /// Result of the server readiness probe.
@@ -165,11 +255,24 @@ impl SharedReadinessState {
             ClusterReadiness::NotConfigured
         };
 
-        ReadinessState::new(
+        ReadinessState::with_admission(
             self.inner.config_loaded.load(Ordering::SeqCst),
             self.inner.listener_bound.load(Ordering::SeqCst),
             cluster,
+            self.inner
+                .admission
+                .get()
+                .is_none_or(AdmissionReadiness::is_available),
         )
+    }
+
+    /// Installs the admission-availability source readiness reports on.
+    ///
+    /// Called once, after the connection supervisor is built, because the
+    /// authority that owns the answer does not exist before then. A second call
+    /// is a no-op rather than a silent rebind.
+    pub fn track_admission(&self, admission: AdmissionReadiness) {
+        let _ = self.inner.admission.set(admission);
     }
 
     /// Updates whether configuration loading and validation completed.
@@ -212,6 +315,15 @@ struct ReadinessFlags {
     listener_bound: AtomicBool,
     cluster_configured: AtomicBool,
     cluster_membership_established: AtomicBool,
+    /// Installed once, after the connection supervisor exists (P0 #56).
+    ///
+    /// A `OnceLock` rather than an `AtomicBool` because the authoritative flag
+    /// is OWNED by the incarnation authority — readiness reads it, it does not
+    /// keep its own copy that something would have to remember to update. An
+    /// uninstalled source reads as available, which is correct for a server
+    /// whose supervisor is not built yet: the health endpoint binds before the
+    /// supervisor exists so that liveness is answerable during startup.
+    admission: OnceLock<AdmissionReadiness>,
 }
 
 impl ReadinessFlags {
@@ -228,6 +340,7 @@ impl ReadinessFlags {
             listener_bound: AtomicBool::new(state.listener_bound),
             cluster_configured: AtomicBool::new(cluster_configured),
             cluster_membership_established: AtomicBool::new(cluster_membership_established),
+            admission: OnceLock::new(),
         }
     }
 }
@@ -251,6 +364,13 @@ pub fn readiness_check(state: &ReadinessState) -> ReadinessStatus {
         })
     {
         unmet_conditions.push(ReadinessCondition::ClusterMembershipEstablished);
+    }
+
+    // P0 #56. Last in evaluation order because it is the only condition that can
+    // go unmet AFTER a successful startup: the other three are startup gates
+    // that, once met, stay met.
+    if !state.admission_available {
+        unmet_conditions.push(ReadinessCondition::AdmissionAvailable);
     }
 
     ReadinessStatus::from_unmet_conditions(unmet_conditions)

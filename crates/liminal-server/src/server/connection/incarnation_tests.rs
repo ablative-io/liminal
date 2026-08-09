@@ -18,6 +18,9 @@ use super::services::{ConnectionServices, LiminalConnectionServices};
 use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
+use crate::health::{
+    AdmissionReadiness, ReadinessCondition, ReadinessState, SharedReadinessState, readiness_check,
+};
 use crate::server::listener::ServerListener;
 use crate::server::participant::incarnation_stream::{
     ConnectionFateClass, IncarnationStartup, IncarnationStream, encode_allocate_event_fixture,
@@ -374,6 +377,7 @@ fn startup_completes_historical_opens_before_returning_authority()
         4,
         handler.publication_conversation_limit(),
         &handler,
+        AdmissionReadiness::available(),
     )?;
 
     let observed = handler
@@ -484,6 +488,7 @@ fn a_failed_recovery_of_a_torn_predecessor_fails_construction_rather_than_holdin
         4,
         handler.publication_conversation_limit(),
         &handler,
+        AdmissionReadiness::available(),
     );
 
     assert!(
@@ -577,6 +582,79 @@ impl DurableStore for FailNthFlush {
         }
         self.inner.flush().await
     }
+}
+
+/// P0 #56 pin 5: a server that cannot admit connections reports NOT READY.
+///
+/// `health_check` is deliberately a liveness probe and stays one — this pin does
+/// not touch it. But on the field estate liveness was what got read, and it
+/// stayed green through 82,166 consecutive refusals because the process was
+/// genuinely alive. The question actually being asked was "should traffic come
+/// here", and that is readiness's job. Readiness could not answer it either: its
+/// three conditions were all STARTUP gates, and this server had passed every one
+/// of them — config loaded, listener bound, no cluster configured — before the
+/// authority latched. `listener_bound` is the closest, and it was true and
+/// truthful: the port was listening and accepts were succeeding. What failed was
+/// everything after the accept.
+///
+/// So this pin asserts both directions against the SAME readiness handle a real
+/// deployment scrapes: healthy authority reports ready, held authority reports
+/// not-ready and names the condition, and recovery puts it back.
+#[test]
+fn readiness_goes_false_while_admission_is_held_and_true_again_on_recovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let inner = store()?;
+    let failing = Arc::new(FailNthFlush::new(Arc::clone(&inner), 2));
+    let config = config()?;
+    let supervisor =
+        ConnectionSupervisor::with_services(services(&config, Arc::clone(&failing) as _)?)?;
+
+    // Wired exactly as `server::run` wires it: the readiness owner exists before
+    // the supervisor, and the supervisor's admission source is installed onto it
+    // once the supervisor is built.
+    let readiness = SharedReadinessState::new(ReadinessState::ready_without_cluster());
+    readiness.track_admission(supervisor.admission_readiness());
+    assert!(
+        readiness_check(&readiness.snapshot()).ready,
+        "a freshly started server must report ready"
+    );
+
+    // Hold admission with an ambiguous durable write, store down for reads so
+    // the resume cannot immediately undo it.
+    failing.take_reads_down();
+    let (_client, server) = tcp_pair()?;
+    assert!(supervisor.spawn_connection(server).is_err());
+
+    let status = readiness_check(&readiness.snapshot());
+    assert!(
+        !status.ready,
+        "a server that cannot admit a connection must not report ready"
+    );
+    assert!(
+        status
+            .unmet_conditions
+            .contains(&ReadinessCondition::AdmissionAvailable),
+        "readiness must NAME admission as the unmet condition, got: {:?}",
+        status.unmet_conditions
+    );
+
+    // Recovery is visible on the same surface: nothing restarts, and readiness
+    // comes back on its own once the store does.
+    failing.bring_reads_up();
+    let mut sockets = Vec::new();
+    for _ in 0..8_u8 {
+        let (client, server) = tcp_pair()?;
+        sockets.push(client);
+        if supervisor.spawn_connection(server).is_ok() {
+            break;
+        }
+    }
+    assert!(
+        readiness_check(&readiness.snapshot()).ready,
+        "readiness must return once admission does"
+    );
+    supervisor.shutdown();
+    Ok(())
 }
 
 /// P0 #56 pin 3, end to end: a connection refused by the real accept loop is
