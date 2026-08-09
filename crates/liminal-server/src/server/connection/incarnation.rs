@@ -14,7 +14,8 @@ use crate::ServerError;
 use crate::server::participant::ParticipantSemanticHandler;
 use crate::server::participant::incarnation_stream::{
     ConnectionFateClass, ConnectionFateIntent, DurableWriteReach, IncarnationAllocation,
-    IncarnationOperationError, IncarnationStartup, IncarnationStream, StartedIncarnationStream,
+    IncarnationOperationError, IncarnationStartup, IncarnationStream, IncarnationStreamError,
+    StartedIncarnationStream,
 };
 
 /// `ServerError::ParticipantIncarnation::phase` for a refusal caused by an
@@ -25,6 +26,30 @@ use crate::server::participant::incarnation_stream::{
 /// and the message an operator reads are joined mechanically and cannot drift
 /// apart the way a duplicated string literal would.
 pub(super) const AMBIGUOUS_DURABLE_WRITE_PHASE: &str = "connection allocation unavailable";
+
+/// `ServerError::ParticipantIncarnation::phase` for a permanently surrendered
+/// authority — the stream moved to a server incarnation this process does not
+/// own, so no amount of re-reading will make it usable again.
+pub(super) const AUTHORITY_SURRENDERED_PHASE: &str = "connection allocation surrendered";
+
+/// Admission attempts refused before the FIRST resume replay is attempted.
+///
+/// Zero, deliberately: the connection that arrives immediately after an
+/// ambiguous write pays for the re-read, because the alternative is refusing a
+/// connection the server could have served while the store was already healthy.
+const RESUME_BACKOFF_INITIAL: u32 = 0;
+
+/// Ceiling on the number of admission attempts refused between resume replays.
+///
+/// A resume replay reads the whole incarnation stream while holding the
+/// authority mutex, so a store that is hard down must not be re-read once per
+/// arriving connection. The window doubles on each failed resume up to this
+/// bound and resets on success, so a transient store costs one replay and a
+/// dead one costs a replay roughly every thousand attempts — at the field rate
+/// of about one connection per second, roughly every seventeen minutes. It never
+/// stops trying: an unowned "process recovery is required" is an indefinite
+/// hold, which is the defect this bounds rather than a property to preserve.
+const RESUME_BACKOFF_CEILING: u32 = 1024;
 
 /// Started, fsynced, and serialized server-wide connection-incarnation source.
 #[derive(Debug)]
@@ -39,13 +64,31 @@ enum ConnectionIncarnationAuthorityState {
     ConnectionOrdinalExhausted {
         attempted_server_incarnation: u64,
     },
-    /// An append or flush had an unknown outcome, so this process no longer
-    /// knows the stream's true head and must not append through this handle.
-    AmbiguousDurableWrite {
-        /// Display of the failure that armed the hold, kept so every refusal
-        /// names its cause instead of a generic sentence.
-        armed_by: String,
+    /// An append or flush had an unknown outcome. Admission is refused until a
+    /// replay re-establishes ground truth — this is a HOLD, not a grave.
+    AmbiguousDurableWrite(AmbiguousDurableWrite),
+    /// The durable stream is owned by another server incarnation. Nothing this
+    /// process can read will change that, so this state is terminal on purpose.
+    Surrendered {
+        message: String,
     },
+}
+
+/// Everything needed to go back to the store and find out what really happened.
+#[derive(Debug)]
+struct AmbiguousDurableWrite {
+    store: Arc<dyn DurableStore>,
+    maximum_references: usize,
+    /// Server incarnation this process durably started under. A resume that
+    /// replays to a different one is refused rather than adopted.
+    server_incarnation: u64,
+    /// Display of the failure that armed the hold, kept so every refusal while
+    /// held names its cause instead of a generic sentence.
+    armed_by: String,
+    /// Admission attempts still to refuse before the next resume replay.
+    attempts_until_resume: u32,
+    /// Current backoff window, doubled on each failed resume.
+    resume_backoff: u32,
 }
 
 impl ConnectionIncarnationAuthority {
@@ -202,6 +245,7 @@ impl ConnectionIncarnationAuthority {
         referenced_incarnations: &[ConnectionIncarnation],
     ) -> Result<ConnectionIncarnation, ServerError> {
         let mut state = Self::lock(&self.state, "connection allocation lock")?;
+        Self::make_ready(&mut state)?;
         let ConnectionIncarnationAuthorityState::Ready(stream) = &mut *state else {
             return Err(Self::not_ready_refusal(&state));
         };
@@ -259,6 +303,15 @@ impl ConnectionIncarnationAuthority {
         class: ConnectionFateClass,
         conversations: &[u64],
     ) -> Result<ConnectionFateIntent, ServerError> {
+        // Deliberately NO resume attempt here. This is the TEARDOWN path, and
+        // teardown must not depend on the authority being healthy: a shutdown
+        // path that needs the thing that is broken is a shutdown path that
+        // cannot run when it is most needed. A held authority fast-fails here,
+        // the caller's `fail_fate` crashes that one connection, and its record
+        // removal wakes the drain — so a held authority makes teardown FASTER,
+        // which is the behaviour that must survive this lane. Admission pays
+        // for the replay (see `allocate`); a force-close of every live
+        // connection does not.
         let mut state = Self::lock(&self.state, "connection-fate Open lock")?;
         let ConnectionIncarnationAuthorityState::Ready(stream) = &mut *state else {
             return Err(Self::not_ready_refusal(&state));
@@ -293,6 +346,7 @@ impl ConnectionIncarnationAuthority {
     /// Returns a typed lock, absent-Open, append, or flush failure. Any ambiguous
     /// durable result permanently fails this process-local authority.
     pub(super) fn complete_connection_fate(&self, open_sequence: u64) -> Result<(), ServerError> {
+        // No resume attempt: teardown path, same reasoning as `open_connection_fate`.
         let mut state = Self::lock(&self.state, "connection-fate Complete lock")?;
         let ConnectionIncarnationAuthorityState::Ready(stream) = &mut *state else {
             return Err(Self::not_ready_refusal(&state));
@@ -370,31 +424,105 @@ impl ConnectionIncarnationAuthority {
         phase: &'static str,
         message: &str,
     ) -> ServerError {
-        if !matches!(state, ConnectionIncarnationAuthorityState::Ready(_)) {
+        let ConnectionIncarnationAuthorityState::Ready(stream) = state else {
             // Already held or exhausted; the existing refusal is the truthful one.
             return Self::not_ready_refusal(state);
-        }
+        };
         tracing::error!(
             phase,
             error = message,
-            "incarnation stream had an AMBIGUOUS durable result: admission is held"
+            "incarnation stream had an AMBIGUOUS durable result: admission is held until a replay \
+             re-establishes ground truth"
         );
-        *state = ConnectionIncarnationAuthorityState::AmbiguousDurableWrite {
-            armed_by: message.to_owned(),
-        };
+        *state =
+            ConnectionIncarnationAuthorityState::AmbiguousDurableWrite(AmbiguousDurableWrite {
+                store: stream.store(),
+                maximum_references: stream.maximum_references(),
+                server_incarnation: stream.server_incarnation(),
+                armed_by: message.to_owned(),
+                attempts_until_resume: RESUME_BACKOFF_INITIAL,
+                resume_backoff: 1,
+            });
         ServerError::ParticipantIncarnation {
             phase,
             message: message.to_owned(),
         }
     }
 
+    /// Resolves the ambiguity by LOOKING, when the backoff window allows it.
+    ///
+    /// R1(b). "Process recovery is required" names a trigger nothing inside the
+    /// process owns, which makes it an indefinite hold rather than a recovery
+    /// procedure. The ambiguity is a question about the durable stream, and the
+    /// durable stream can be read, so the resolution is a replay: whatever the
+    /// half-finished append did or did not do, the store now says which.
+    ///
+    /// The replay runs under the authority mutex, so it serialises against every
+    /// other admission — the same way an ordinary allocation's append and fsync
+    /// already do — and the backoff bounds how often a hard-down store pays for
+    /// it.
+    fn make_ready(state: &mut ConnectionIncarnationAuthorityState) -> Result<(), ServerError> {
+        let ConnectionIncarnationAuthorityState::AmbiguousDurableWrite(held) = state else {
+            // Ready, exhausted, or surrendered: nothing to resolve here. The
+            // callers' `else` arm turns the latter two into their own refusals.
+            return Ok(());
+        };
+        if held.attempts_until_resume > 0 {
+            held.attempts_until_resume -= 1;
+            return Err(Self::held_refusal(held));
+        }
+        let stream = IncarnationStream::new(Arc::clone(&held.store), held.maximum_references);
+        let resumed = block_on(stream.resume_after_ambiguous_write(held.server_incarnation));
+        match resumed {
+            Ok(Ok(started)) => {
+                tracing::warn!(
+                    server_incarnation = started.server_incarnation(),
+                    armed_by = held.armed_by,
+                    "incarnation stream RESUMED from durable ground truth; admission restored"
+                );
+                *state = ConnectionIncarnationAuthorityState::Ready(started);
+                Ok(())
+            }
+            Ok(Err(IncarnationStreamError::ResumeServerIncarnationMoved { expected, actual })) => {
+                let message = format!(
+                    "durable incarnation stream moved from server incarnation {expected} to \
+                     {actual}: another process owns it and this one must not allocate against it"
+                );
+                tracing::error!(message, "incarnation authority SURRENDERED");
+                *state = ConnectionIncarnationAuthorityState::Surrendered {
+                    message: message.clone(),
+                };
+                Err(ServerError::ParticipantIncarnation {
+                    phase: AUTHORITY_SURRENDERED_PHASE,
+                    message,
+                })
+            }
+            Ok(Err(error)) => Err(Self::back_off(held, &error.to_string())),
+            Err(error) => Err(Self::back_off(held, &error.to_string())),
+        }
+    }
+
+    /// Widens the resume window after a failed replay and refuses this attempt.
+    fn back_off(held: &mut AmbiguousDurableWrite, resume_error: &str) -> ServerError {
+        held.resume_backoff = held.resume_backoff.saturating_mul(2).min(RESUME_BACKOFF_CEILING);
+        held.attempts_until_resume = held.resume_backoff;
+        tracing::warn!(
+            resume_error,
+            armed_by = held.armed_by,
+            next_resume_after_attempts = held.attempts_until_resume,
+            "incarnation-stream resume replay failed; admission stays held"
+        );
+        Self::held_refusal(held)
+    }
+
     /// The refusal an arriving connection receives while the hold is in force.
-    fn held_refusal(armed_by: &str) -> ServerError {
+    fn held_refusal(held: &AmbiguousDurableWrite) -> ServerError {
         ServerError::ParticipantIncarnation {
             phase: AMBIGUOUS_DURABLE_WRITE_PHASE,
             message: format!(
                 "a prior incarnation-stream operation had an ambiguous durable result \
-                 ({armed_by}); process recovery is required"
+                 ({}); admission is held and a resume replay is retried on later attempts",
+                held.armed_by
             ),
         }
     }
@@ -407,8 +535,14 @@ impl ConnectionIncarnationAuthority {
             } => ServerError::ConnectionIncarnationExhausted {
                 attempted_server_incarnation: *attempted_server_incarnation,
             },
-            ConnectionIncarnationAuthorityState::AmbiguousDurableWrite { armed_by } => {
-                Self::held_refusal(armed_by)
+            ConnectionIncarnationAuthorityState::Surrendered { message } => {
+                ServerError::ParticipantIncarnation {
+                    phase: AUTHORITY_SURRENDERED_PHASE,
+                    message: message.clone(),
+                }
+            }
+            ConnectionIncarnationAuthorityState::AmbiguousDurableWrite(held) => {
+                Self::held_refusal(held)
             }
             ConnectionIncarnationAuthorityState::Ready(_) => {
                 ServerError::ParticipantIncarnation {

@@ -288,10 +288,19 @@ pub(in crate::server) enum IncarnationStreamError {
         /// Durable position carrying the illegal event.
         stored_sequence: u64,
     },
-    /// Test-only replay was requested as started but its event history had no startup.
-    #[cfg(test)]
+    /// Replay was requested as started but its event history had no startup.
     #[error("incarnation event history has no startup")]
     MissingStartup,
+    /// A resume replay found the stream under a different server incarnation.
+    #[error(
+        "incarnation stream advanced from server incarnation {expected} to {actual}: another process owns it"
+    )]
+    ResumeServerIncarnationMoved {
+        /// Server incarnation this process durably started under.
+        expected: u64,
+        /// Server incarnation the durable stream currently replays to.
+        actual: u64,
+    },
     /// Test-only resume refuses to discard unmatched durable work.
     #[cfg(test)]
     #[error("incarnation event history retains {count} unmatched connection-fate Opens")]
@@ -768,11 +777,66 @@ impl IncarnationStream {
         Ok(ReplayedIncarnationState {
             allocator: replay.allocator,
             next_sequence,
-            #[cfg(test)]
             generation: replay.generation,
             unmatched: replay.unmatched,
-            #[cfg(test)]
             has_started: replay.has_started,
+        })
+    }
+
+    /// Re-establishes ground truth by READING, after an ambiguous durable write.
+    ///
+    /// An ambiguous append or flush leaves exactly one thing unknown — whether
+    /// the bytes landed — and that question has an answer sitting in the store.
+    /// This replays the stream and rebuilds a [`StartedIncarnationStream`] from
+    /// what is actually there, so a process that lost track of its own sequence
+    /// finds it again instead of demanding an operator restart it.
+    ///
+    /// It appends NOTHING. In particular it does not append a Startup, because
+    /// this process's Startup is already durable and a second one would burn a
+    /// server incarnation and re-frame every live allocation as historical.
+    ///
+    /// The replayed unmatched-Open set is carried through rather than discarded:
+    /// connections that were mid-teardown when the write went ambiguous still
+    /// have their Complete to append, and a resumed handle that had forgotten
+    /// their Opens would refuse those Completes as absent. An Open whose own
+    /// append was the ambiguous one stays unmatched here and is completed by the
+    /// ordinary `RecoveryRequired` path at the next process startup.
+    ///
+    /// `expected_server_incarnation` is the incarnation this process durably
+    /// started under. If replay shows a higher one, another process has started
+    /// over this stream and resuming would allocate under a foreign incarnation;
+    /// that is refused rather than papered over.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IncarnationStreamError`] when the store cannot be read, when the
+    /// replayed history is malformed, when it carries no Startup at all, or when
+    /// the server incarnation has moved.
+    pub(in crate::server) async fn resume_after_ambiguous_write(
+        self,
+        expected_server_incarnation: u64,
+    ) -> Result<StartedIncarnationStream, IncarnationStreamError> {
+        let replayed = self.replay().await?;
+        if !replayed.has_started {
+            return Err(IncarnationStreamError::MissingStartup);
+        }
+        let header = replayed.allocator.as_restore();
+        if header.server_incarnation != expected_server_incarnation {
+            return Err(IncarnationStreamError::ResumeServerIncarnationMoved {
+                expected: expected_server_incarnation,
+                actual: header.server_incarnation,
+            });
+        }
+        let generation = replayed
+            .generation
+            .ok_or(IncarnationStreamError::MissingStartup)?;
+        Ok(StartedIncarnationStream {
+            store: self.store,
+            maximum_references: self.maximum_references,
+            header,
+            next_sequence: replayed.next_sequence,
+            generation,
+            unmatched: replayed.unmatched,
         })
     }
 
@@ -900,6 +964,22 @@ impl StartedIncarnationStream {
     #[must_use]
     pub(in crate::server) const fn server_incarnation(&self) -> u64 {
         self.header.server_incarnation
+    }
+
+    /// The durable store this stream is bound to.
+    ///
+    /// Handed out so an owner that has to discard this handle after an ambiguous
+    /// write still knows where to go and read ground truth back from. Nothing
+    /// else about the handle survives that discard, which is the point.
+    #[must_use]
+    pub(in crate::server) fn store(&self) -> Arc<dyn DurableStore> {
+        Arc::clone(&self.store)
+    }
+
+    /// The signed complete-reference bound this stream was constructed with.
+    #[must_use]
+    pub(in crate::server) const fn maximum_references(&self) -> usize {
+        self.maximum_references
     }
 
     /// Returns the current protocol-derived scalar state for assertions only.
@@ -1184,10 +1264,8 @@ impl ReplayAccumulator {
 struct ReplayedIncarnationState {
     allocator: ConnectionIncarnationAllocator,
     next_sequence: u64,
-    #[cfg(test)]
     generation: Option<AllocationGeneration>,
     unmatched: UnmatchedConnectionFates,
-    #[cfg(test)]
     has_started: bool,
 }
 

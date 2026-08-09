@@ -400,6 +400,106 @@ fn startup_completes_historical_opens_before_returning_authority()
     Ok(())
 }
 
+/// A handler that refuses every fate work item, standing in for a participant
+/// that cannot absorb its torn predecessor's unmatched Open.
+#[derive(Debug, Default)]
+struct RefusingFateHandler;
+
+impl ParticipantSemanticHandler for RefusingFateHandler {
+    fn handle(
+        &self,
+        _context: ParticipantConnectionContext,
+        _conversations: &mut ParticipantConnectionConversations,
+        _request: ClientRequest,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        Err(ParticipantSemanticError::Unavailable)
+    }
+
+    fn handle_connection_fate(
+        &self,
+        _work_item: ConnectionFateWorkItem,
+    ) -> Result<(), ParticipantSemanticError> {
+        Err(ParticipantSemanticError::Internal {
+            message: "injected recovery refusal".to_owned(),
+        })
+    }
+
+    fn publication_conversation_limit(&self) -> u64 {
+        3
+    }
+}
+
+/// P0 #56, coordinator question: can boot-time recovery of an unclean
+/// predecessor arm the admission hold?
+///
+/// CHARACTERIZATION, not red-first — this passes at f7efcc4 too. It is here to
+/// make a STRUCTURAL fact mechanically checked rather than argued from a
+/// reading, because the answer decides how much the rest of this lane matters.
+///
+/// The authority has exactly one production constructor,
+/// `ConnectionIncarnationAuthority::startup`, and the only place it builds a
+/// `Self` is `finish_startup`, whose state is `Ready` by construction. Every
+/// failure before that point — including every step of unclean-predecessor
+/// recovery: the handler fold, the Complete append, the post-recovery Startup —
+/// is a `return Err(ServerError)` out of `startup`, which `SupervisorInner::new`
+/// propagates with `?`. So a boot that cannot recover its predecessor FAILS TO
+/// BUILD A SERVER. It cannot produce a held authority, because it produces no
+/// authority at all.
+///
+/// That matters for reading the field evidence: the latched boots were serving
+/// refusals with their ports open and their health probe green, and a process
+/// that armed the hold during recovery would instead have exited during
+/// construction with no listener ever bound. Arming is runtime-only. On a
+/// deployment where every restart is unclean, "recovering from a torn
+/// predecessor" stays an ordinary handled path — pinned in the neighbouring
+/// `startup_completes_historical_opens_before_returning_authority`, which
+/// recovers a torn Open and then allocates normally.
+#[test]
+fn a_failed_recovery_of_a_torn_predecessor_fails_construction_rather_than_holding_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = store()?;
+    // A torn predecessor: Startup, an Allocate, and an Open with no Complete.
+    let payloads = [
+        encode_startup_event_fixture()?,
+        encode_allocate_event_fixture(4, &[])?,
+        encode_open_connection_fate_event_fixture(
+            ConnectionIncarnation::new(1, 0),
+            ConnectionFateClass::ConnectionLost,
+            3,
+            &[5, 8],
+        )?,
+    ];
+    for (sequence, payload) in payloads.into_iter().enumerate() {
+        let sequence = u64::try_from(sequence)?;
+        let assigned = block_on(store.append(IncarnationStream::stream_key(), payload, sequence))??;
+        assert_eq!(assigned, sequence);
+    }
+    block_on(store.flush())??;
+    let handler = RefusingFateHandler;
+
+    let outcome = ConnectionIncarnationAuthority::startup(
+        Arc::clone(&store),
+        4,
+        handler.publication_conversation_limit(),
+        &handler,
+    );
+
+    assert!(
+        matches!(
+            outcome,
+            Err(ServerError::ParticipantIncarnation {
+                phase: "connection-fate handler recovery",
+                ..
+            })
+        ),
+        "a refused recovery must fail construction outright, never yield an authority"
+    );
+    // No Complete was appended: the refusal happened before the durable fold.
+    let entries = block_on(store.read_from(IncarnationStream::stream_key(), 0, 8))??;
+    assert_eq!(entries.len(), 3);
+    Ok(())
+}
+
 #[derive(Debug)]
 struct FailNthFlush {
     inner: Arc<dyn DurableStore>,
