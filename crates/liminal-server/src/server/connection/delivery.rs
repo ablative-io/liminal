@@ -16,7 +16,7 @@
 //! that marker. Until then the marker is redundant but harmless.
 //!
 //! The notifier is LEVEL-triggered because of a property this file owns: because
-//! this pump drains at most [`DELIVERY_SLICE_BUDGET`] envelopes per slice, a
+//! this pump drains at most `limits.delivery_slice_budget` envelopes per slice, a
 //! subscriber more than one slice behind never empties its inbox, so an
 //! edge-triggered notifier would attach a wake to the first envelope of a burst
 //! and to none of the rest.
@@ -24,12 +24,23 @@
 //! That is a lost-wake hazard, but measurement says it is NOT what sheds a
 //! subscriber at today's bytes, and this file is where the reason lives: R6
 //! coalescing collapses N wakes into one slice, so extra wakes cannot buy extra
-//! SLICES, and the number of slices is what [`DELIVERY_SLICE_BUDGET`] converts
+//! SLICES, and the number of slices is what that budget converts
 //! into drained envelopes. A burst that needs 13 slices at 32/slice is exposed to
 //! 13 scheduling round trips; the same burst needs 2 at 256/slice. Raising this
 //! constant took the P0 #55 harness from ~52% of boots losing a subscriber to
 //! 0/120 — but it is a cross-connection fairness knob (see its own doc), so
-//! trading it is a ruling, not a refactor. Left at 32 deliberately.
+//! trading it is a ruling, not a refactor.
+//!
+//! P0 #55 part 2 made that ruling, and it did NOT raise this budget. The slice
+//! budget is how fast a behind subscriber CATCHES UP; what decides whether it is
+//! killed while behind is how deep its inbox may get first, and that cap
+//! (`LimitsConfig::max_subscription_inbox_depth`) was tripping at ~1% of the
+//! memory the connection was already permitted. Raising the depth default removes
+//! the kill without spending anyone else's scheduler time; raising this budget
+//! would have removed it by spending exactly that. So the DEFAULT stays 32 and
+//! the number became operator-configurable instead — the pump is now called with
+//! `limits.delivery_slice_budget`, whose default and full ruling live on
+//! [`crate::config::LimitsConfig::DEFAULT_DELIVERY_SLICE_BUDGET`].
 //!
 //! # Envelope bridging
 //!
@@ -49,11 +60,6 @@ use liminal::protocol::{
 
 use super::outbound::{OutboundError, OutboundWriter};
 use super::state::ConnectionProcessState;
-
-/// Per-slice cap on the total number of `Deliver` frames enqueued across all of a
-/// connection's subscriptions. Bounds the work one connection does per slice so a
-/// fast producer cannot starve other connections sharing the scheduler thread.
-pub(super) const DELIVERY_SLICE_BUDGET: usize = 32;
 
 /// Reason code carried on the `SubscribeError` frame that sheds an overflowed
 /// subscription (§5). Matches the server-error code the subscribe/pressure paths

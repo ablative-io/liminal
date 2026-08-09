@@ -1,8 +1,9 @@
 //! P0 #55 pins: a subscription that falls behind a burst must never be starved
 //! into a permanent shed.
 //!
-//! The OUTCOME these pin (measured at `4ed0562`): a burst outruns a subscription
-//! inbox to its 256-envelope depth cap (`liminal-server/src/config/types.rs`), the
+//! The OUTCOME these pin (measured at `4ed0562`, when the depth cap was 256): a
+//! burst outruns a subscription inbox to its envelope depth cap
+//! (`liminal-server/src/config/types.rs`), the
 //! sticky overflow marker trips, and the delivery pump SHEDS the subscription
 //! permanently — one `SubscribeError` frame, then removal at the connection AND
 //! release at the channel actor. The socket stays open and publishes keep acking,
@@ -29,15 +30,23 @@
 //! Diagnostics stay slice-level (counts and totals). Per-envelope probes perturb
 //! the very race under measurement.
 //!
-//! # Why both pins are `#[ignore]`
+//! # These pins were `#[ignore]`d, and are not any more
 //!
-//! They are honest measurements of a real P0 and they FAIL at these bytes. They
-//! are not gate tests, because at these bytes no code change inside this lane's
-//! authority makes them pass, and a gate test that fails half the time teaches a
-//! reader to ignore the gate.
+//! Part 1 landed them RED and ignored: they are honest measurements of a real P0,
+//! and no change inside part 1's authority made them pass. Part 2 made the ruling
+//! they were waiting on — `LimitsConfig::DEFAULT_MAX_SUBSCRIPTION_INBOX_DEPTH`
+//! 256 -> 4096 — and they now gate.
 //!
-//! The full 2x2, each cell a run of THIS binary under
-//! `gate-logs/p0-55/run-pins.sh`, iterations counted across the whole cell:
+//! Read the fix at the constant's doc, not here; the one-line version is that the
+//! subscription inbox is bounded by BYTES and by COUNT, and the count bound was
+//! tripping at roughly 1% of the bytes the connection was already permitted. A
+//! replay burst is thousands of SMALL records, so it hit the crude bound while the
+//! real one sat idle. Nothing about the scheduling changed. What changed is how far
+//! behind a subscriber is allowed to fall before the server kills it, and 256
+//! envelopes was never a memory decision.
+//!
+//! The full 2x2 that RULED OUT the other candidate, each cell a run of THIS binary
+//! under `gate-logs/p0-55/run-pins.sh`, iterations counted across the whole cell:
 //!
 //! | inbox wake        | pump slice budget | boots that lost a subscriber |
 //! |-------------------|-------------------|------------------------------|
@@ -56,14 +65,28 @@
 //! 6-24 ms on losing ones, with every one of ~750 wake fires per burst returning
 //! `true` from `enqueue_atom_message`. The wakes arrive; the slices do not.
 //!
-//! `DELIVERY_SLICE_BUDGET` is a cross-connection FAIRNESS bound — it exists so one
-//! fast producer cannot starve other connections sharing a scheduler thread — so
-//! raising it trades one starvation for another and is a ruling, not a refactor.
-//! Until that ruling, these two stay here, ignored, runnable on demand:
+//! The slice budget is a cross-connection FAIRNESS bound — it exists so one fast
+//! producer cannot starve other connections sharing a scheduler thread — so
+//! raising it trades one starvation for another. The ruling did NOT raise it: the
+//! 2x2 above ran two or three connections, so the peer starvation a raise would
+//! CAUSE was unobservable by construction. That table shows the knob MOVES the
+//! outcome; it does not show that moving it is safe. The budget became an operator
+//! knob (`limits.delivery_slice_budget`, default 32) and the depth cap took the
+//! fix.
+//!
+//! # Running a census
+//!
+//! Both pins run [`ITERATIONS`] fresh boots on the gate. To measure a loss RATE at
+//! some bytes, raise the boot count instead of running the binary repeatedly, so
+//! the denominator is the test's rather than a runner script's:
 //!
 //! ```text
-//! cargo test -p liminal-server --test subscription_starvation_e2e -- --ignored --nocapture
+//! LIMINAL_STARVATION_ITERS=40 cargo test -p liminal-server \
+//!   --test subscription_starvation_e2e -- --nocapture
 //! ```
+//!
+//! Every boot prints one `ok=` line, so losses are counted from the per-iteration
+//! lines, never from the summary.
 //!
 //! What this lane DID close is pinned elsewhere and does gate: a shed is now loud
 //! server-side (`liminal-server/src/server/connection/delivery.rs` warn +
@@ -91,12 +114,31 @@ use liminal_server::server::listener::ServerListener;
 const CHANNEL: &str = "events";
 /// WebSocket mount path.
 const PATH: &str = "/liminal";
-/// Envelopes per burst. Must comfortably exceed the 256-envelope inbox depth cap,
-/// or the pre-fix ratchet never reaches the shed it is being pinned against.
+/// Envelopes per burst.
+///
+/// Chosen to exceed the depth cap AS IT WAS (256) so these pins were genuinely red
+/// before the fix — a burst under that cap could never have reached the shed, and
+/// the pins would have been green against a broken server.
+///
+/// It stays 400 after the ruling raised the cap to 4096, and the gap is the point:
+/// the burst still comfortably outruns the 32-envelope slice budget, so the
+/// subscriber still falls far behind on every boot. What changed is that falling
+/// behind is no longer fatal. Raising BURST past 4096 would re-create the shed at
+/// the new cap and turn these back into reds — that is a DIFFERENT measurement
+/// (where is the new cliff), not this one (is a live subscriber killed by an
+/// ordinary burst).
 const BURST: usize = 400;
 /// Fresh server boots per pin. The pre-fix failure is per-boot and probabilistic;
 /// this is what turns it into a reliable red.
 const ITERATIONS: usize = 6;
+/// Environment key that raises [`ITERATIONS`] for a census run.
+///
+/// The gate always runs [`ITERATIONS`] boots. A census — "how many boots out of N
+/// lose a subscriber at these bytes" — wants far more, and running the binary
+/// seven times to accumulate 42 boots makes the denominator an artefact of the
+/// runner script rather than something the test states. This lets the census name
+/// its own N while the gate's N stays a constant in the source.
+const ITERATIONS_ENV: &str = "LIMINAL_STARVATION_ITERS";
 /// Per-message receive window while draining a burst.
 const RECV_WINDOW: Duration = Duration::from_secs(2);
 /// Bound on the synchronous listener warm-up retry loop.
@@ -125,7 +167,13 @@ struct RunningServer {
 }
 
 impl RunningServer {
+    /// Boots with the SHIPPED defaults — the configuration the field runs, which
+    /// is the only one the two starvation pins may measure.
     fn start() -> Result<Self, Box<dyn Error>> {
+        Self::start_with(LimitsConfig::default())
+    }
+
+    fn start_with(limits: LimitsConfig) -> Result<Self, Box<dyn Error>> {
         let health = std::net::TcpListener::bind("127.0.0.1:0")?;
         let health_listen_address = health.local_addr()?;
         drop(health);
@@ -144,7 +192,7 @@ impl RunningServer {
             cluster: None,
             auth: None,
             services: ServicesConfig::default(),
-            limits: LimitsConfig::default(),
+            limits,
             websocket: None,
             participant: None,
         };
@@ -322,6 +370,19 @@ fn drain_ws(stream: &WebSocketSubscriptionStream, wanted: usize) -> (usize, Opti
     (received, None)
 }
 
+/// Boots to run this invocation: [`ITERATIONS`], or the census override.
+///
+/// An unparseable or zero value falls back to [`ITERATIONS`] rather than failing:
+/// a typo in a census command must not be able to turn a gate test into a red that
+/// says nothing about the server.
+fn iterations() -> usize {
+    std::env::var(ITERATIONS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(ITERATIONS)
+}
+
 /// Drains a TCP subscriber until `wanted` messages have arrived or it goes quiet.
 fn drain_tcp(stream: &SubscriptionStream, wanted: usize) -> (usize, Option<String>) {
     let mut received = 0_usize;
@@ -359,12 +420,12 @@ fn burst_once() -> Result<(bool, String), Box<dyn Error>> {
 /// The burst pin. Every envelope the server ACCEPTED must reach both subscribers,
 /// on every boot.
 #[test]
-#[ignore = "measures a P0 no change in this lane's authority fixes: see the module note"]
 fn a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber()
 -> Result<(), Box<dyn Error>> {
     let _gate = PIN_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+    let boots = iterations();
     let mut failures = Vec::new();
-    for index in 0..ITERATIONS {
+    for index in 0..boots {
         let (ok, detail) = burst_once()?;
         eprintln!("BURST PIN iteration {index}: ok={ok} :: {detail}");
         if !ok {
@@ -373,9 +434,64 @@ fn a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber()
     }
     assert!(
         failures.is_empty(),
-        "the burst pin lost a subscriber on {}/{ITERATIONS} fresh boots:\n{}",
+        "the burst pin lost a subscriber on {}/{boots} fresh boots:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+    Ok(())
+}
+
+/// The floor of the new operator knob.
+///
+/// Part 2 turned the delivery slice budget into config, and validation forbids
+/// only ZERO. That makes 1 the smallest value an operator can now set, and 1 is
+/// the worst case for this pump: a burst needs one scheduler round trip PER
+/// ENVELOPE, so anything that made progress depend on draining more than one
+/// envelope per slice would stall here and nowhere else.
+///
+/// What this pin does and does not claim: it is a LIVENESS pin for the configured
+/// floor, not a proof that the connection reads the configured value. No
+/// deterministic functional discriminator exists for that — the slice budget's
+/// only observable effects are timing and shed PROBABILITY, so a test that
+/// distinguished a threaded value from a hardcoded 32 would have to be a race. The
+/// threading itself is covered structurally (neither pump call site can name a
+/// constant any more) and by the config pins in `config::file`.
+///
+/// The burst is deliberately smaller than [`BURST`]: at one envelope per slice the
+/// cost is scheduling round trips, and this pin is about whether progress happens
+/// at all, not how fast.
+#[test]
+fn c_the_smallest_configurable_slice_budget_still_delivers_everything()
+-> Result<(), Box<dyn Error>> {
+    const SMALL_BURST: usize = 120;
+
+    let _gate = PIN_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+    let limits = LimitsConfig {
+        delivery_slice_budget: 1,
+        ..LimitsConfig::default()
+    };
+    let server = RunningServer::start_with(limits)?;
+    let tcp_stream = open_tcp_subscription(&server)?;
+    let ws_stream = open_ws_subscription(&server)?;
+
+    let (accepted, publisher_frames) = publish_burst_raw_tcp(&server, SMALL_BURST)?;
+    assert_eq!(
+        accepted, SMALL_BURST,
+        "the publisher must be acked for every record before delivery is judged; \
+         otherwise a dead publisher scores 0 == 0 and this pin passes vacuously \
+         (publisher frames: {publisher_frames:?})"
+    );
+
+    let (tcp_received, tcp_error) = drain_tcp(&tcp_stream, accepted);
+    let (ws_received, ws_error) = drain_ws(&ws_stream, accepted);
+
+    assert_eq!(
+        tcp_received, accepted,
+        "a budget of 1 must still drain the TCP subscriber: {tcp_error:?}"
+    );
+    assert_eq!(
+        ws_received, accepted,
+        "a budget of 1 must still drain the WebSocket subscriber: {ws_error:?}"
     );
     Ok(())
 }
@@ -410,11 +526,11 @@ fn mixed_fate_once() -> Result<(bool, String), Box<dyn Error>> {
 /// both true reports of the same estate. After the fix BOTH must receive
 /// everything the server accepted.
 #[test]
-#[ignore = "measures a P0 no change in this lane's authority fixes: see the module note"]
 fn b_two_websocket_subscribers_on_one_boot_share_the_same_fate() -> Result<(), Box<dyn Error>> {
     let _gate = PIN_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+    let boots = iterations();
     let mut failures = Vec::new();
-    for index in 0..ITERATIONS {
+    for index in 0..boots {
         let (ok, detail) = mixed_fate_once()?;
         eprintln!("MIXED-FATE PIN iteration {index}: ok={ok} :: {detail}");
         if !ok {
@@ -423,7 +539,7 @@ fn b_two_websocket_subscribers_on_one_boot_share_the_same_fate() -> Result<(), B
     }
     assert!(
         failures.is_empty(),
-        "the mixed-fate pin lost a subscriber on {}/{ITERATIONS} fresh boots:\n{}",
+        "the mixed-fate pin lost a subscriber on {}/{boots} fresh boots:\n{}",
         failures.len(),
         failures.join("\n")
     );

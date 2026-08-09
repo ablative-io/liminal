@@ -34,7 +34,7 @@ use liminal::protocol::Frame;
 use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::super::apply::apply_frame;
-use super::super::delivery::{DELIVERY_SLICE_BUDGET, service_subscriptions};
+use super::super::delivery::service_subscriptions;
 use super::super::outbound::{DrainOutcome, OutboundError};
 use super::super::participant_delivery::{
     UNIT2_PUSH_SLICE_BUDGET, has_held_participant_head, service_participant_publications,
@@ -222,7 +222,8 @@ impl WebSocketConnectionProcess {
                 return self.stop_crashed(pid);
             }
         }
-        match service_subscriptions(&mut self.state, &mut self.outbound, DELIVERY_SLICE_BUDGET) {
+        let slice_budget = self.runtime.limits().delivery_slice_budget;
+        match service_subscriptions(&mut self.state, &mut self.outbound, slice_budget) {
             Ok(shed) => self.shed_subscriptions(shed),
             Err(error) => {
                 tracing::warn!(

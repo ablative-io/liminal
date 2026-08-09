@@ -116,7 +116,13 @@ target_channel = "orders-audit"
 # max_pending_conversation_replies_per_connection = 32
 # max_pending_replies_per_conversation = 8
 # max_connection_inbox_bytes = 4194304        # 4 MiB, shared across one connection's inboxes
-# max_subscription_inbox_depth = 256
+# max_subscription_inbox_depth = 4096         # count backstop BEHIND the byte budget (P0 #55):
+#                                             # 4194304/4096 = 1 KiB, so bytes bind for real records
+# delivery_slice_budget = 32                  # Deliver frames one connection may enqueue per
+#                                             # scheduler slice. Cross-connection FAIRNESS bound:
+#                                             # raising it speeds a burst subscriber's catch-up by
+#                                             # spending its peers' scheduler time. Raise only if
+#                                             # you know your connection count and burst shape.
 
 # Sibling WebSocket acceptor carrying the same wire protocol (one binary
 # message per frame). Absent, NO HTTP/WebSocket listener is started at all.

@@ -13,7 +13,7 @@ use liminal::protocol::{Frame, ProtocolError, decode};
 use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::apply::apply_frame;
-use super::delivery::{DELIVERY_SLICE_BUDGET, service_subscriptions};
+use super::delivery::service_subscriptions;
 use super::outbound::{DrainOutcome, OutboundWriter};
 use super::participant_delivery::{
     UNIT2_PUSH_SLICE_BUDGET, has_held_participant_head, service_participant_publications,
@@ -418,7 +418,8 @@ impl<T: ConnectionTransport> TransportConnectionProcess<T> {
         // Pump subscriptions into the outbound buffer. An overflow (or an encode
         // fault) is fatal: a dropped or truncated delivery would desync the stream,
         // so the connection is torn down rather than allowed to continue desynced.
-        match service_subscriptions(&mut self.state, &mut self.outbound, DELIVERY_SLICE_BUDGET) {
+        let slice_budget = self.runtime.limits().delivery_slice_budget;
+        match service_subscriptions(&mut self.state, &mut self.outbound, slice_budget) {
             Ok(shed) => self.shed_subscriptions(shed),
             Err(error) => {
                 tracing::warn!(
