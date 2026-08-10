@@ -23,8 +23,8 @@ authors = [
 # `cargo publish` ships to crates.io). `liminal` is published as `liminal-rs`
 # because the bare name is taken on crates.io, but is imported as `liminal`.
 [workspace.dependencies]
-liminal = { package = "liminal-rs", version = "0.5.3", path = "crates/liminal" }
-liminal-protocol = { version = "0.4.1", path = "crates/liminal-protocol" }
+liminal = { package = "liminal-rs", version = "0.5.4", path = "crates/liminal" }
+liminal-protocol = { version = "0.5.0", path = "crates/liminal-protocol" }
 # PATH-ONLY, deliberately: the sole consumer is `liminal-server`'s
 # dev-dependency (the loopback pins need the SDK client with `embedded` on),
 # and a version here would flow into server's GENERATED manifest at publish
@@ -38,7 +38,7 @@ liminal-sdk = { path = "crates/liminal-sdk" }
 # transport needs the server it connects to) and dev-consumed the other way, so
 # the pair is a cycle THROUGH A DEV-DEPENDENCY, which Cargo permits and the
 # build graph never contains.
-liminal-server = { version = "0.5.3", path = "crates/liminal-server" }
+liminal-server = { version = "0.6.0", path = "crates/liminal-server" }
 
 anyhow = "1"
 async-trait = "0.1"

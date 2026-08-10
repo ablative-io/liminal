@@ -1161,14 +1161,14 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "liminal-protocol"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "liminal-rs"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-trait",
  "beamr",
@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "liminal-sdk"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "futures-core",
  "js-sys",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "liminal-server"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
