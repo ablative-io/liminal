@@ -1,0 +1,5 @@
+    Checking liminal-rs v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal)
+    Checking liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Checking liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.91s
+CLIPPY TRUE EXIT=0

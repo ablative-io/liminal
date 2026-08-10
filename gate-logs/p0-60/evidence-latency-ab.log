@@ -1,0 +1,241 @@
+# p0-60 admission-latency A/B -- wall clock EVIDENCE, not a gate assertion.
+# BEFORE = 9c22b84 (lane base).  AFTER = this lane's tip.
+# Same probe source in both trees, release profile, real on-disk haematite,
+# 800 timed admissions in one conversation, one process at a time,
+# arms interleaved so machine drift hits both symmetrically.
+# host: MacBookPro18,2 loadavg: { 69.54 63.77 47.50 }
+# started_utc=2026-08-10T03:42:06Z
+
+===== arm=BEFORE rep=r1 tree=/private/tmp/claude-501/-Users-tom-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/wt-before started=03:42:06 loadavg={ 69.54 63.77 47.50 } =====
+    Finished `release` profile [optimized] target(s) in 0.37s
+     Running unittests src/lib.rs (target/release/deps/liminal_server-b55f451b2e80e08e)
+
+running 1 test
+test server::participant::production::p0_60_probe::p0_60_latency_probe ... PROBE_SAMPLE history=0 ms=63.7012
+PROBE_SAMPLE history=50 ms=81.8729
+PROBE_SAMPLE history=100 ms=87.0517
+PROBE_SAMPLE history=150 ms=101.1159
+PROBE_SAMPLE history=200 ms=110.8283
+PROBE_SAMPLE history=250 ms=144.4261
+PROBE_SAMPLE history=300 ms=173.0231
+PROBE_SAMPLE history=350 ms=250.0889
+PROBE_SAMPLE history=400 ms=227.3285
+PROBE_SAMPLE history=450 ms=275.5452
+PROBE_SAMPLE history=500 ms=482.0866
+PROBE_SAMPLE history=550 ms=380.3785
+PROBE_SAMPLE history=600 ms=479.5083
+PROBE_SAMPLE history=650 ms=540.1499
+PROBE_SAMPLE history=700 ms=631.6046
+PROBE_SAMPLE history=750 ms=711.7205
+PROBE_RESULT admissions=800 slope_ms_per_record=0.933199 intercept_ms=-36.9074 mean_last50_ms=680.4019
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 690 filtered out; finished in 269.54s
+
+TRUE_EXIT=0 finished=03:46:37
+
+===== arm=AFTER rep=r1 tree=/Users/tom/Developer/ablative/stack/liminal started=03:46:37 loadavg={ 20.29 38.42 40.32 } =====
+    Finished `release` profile [optimized] target(s) in 0.53s
+     Running unittests src/lib.rs (target/release/deps/liminal_server-b55f451b2e80e08e)
+
+running 1 test
+test server::participant::production::p0_60_probe::p0_60_latency_probe ... PROBE_SAMPLE history=0 ms=69.1815
+PROBE_SAMPLE history=50 ms=113.1315
+PROBE_SAMPLE history=100 ms=93.9104
+PROBE_SAMPLE history=150 ms=98.6737
+PROBE_SAMPLE history=200 ms=108.2104
+PROBE_SAMPLE history=250 ms=146.4484
+PROBE_SAMPLE history=300 ms=161.9781
+PROBE_SAMPLE history=350 ms=197.7243
+PROBE_SAMPLE history=400 ms=218.5843
+PROBE_SAMPLE history=450 ms=237.5921
+PROBE_SAMPLE history=500 ms=293.4072
+PROBE_SAMPLE history=550 ms=314.1606
+PROBE_SAMPLE history=600 ms=362.4346
+PROBE_SAMPLE history=650 ms=409.5278
+PROBE_SAMPLE history=700 ms=474.4502
+PROBE_SAMPLE history=750 ms=513.7095
+PROBE_RESULT admissions=800 slope_ms_per_record=0.604023 intercept_ms=8.9446 mean_last50_ms=547.9891
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 692 filtered out; finished in 200.83s
+
+TRUE_EXIT=0 finished=03:49:59
+
+===== arm=AFTER rep=r2 tree=/Users/tom/Developer/ablative/stack/liminal started=03:49:59 loadavg={ 9.97 24.25 33.82 } =====
+    Finished `release` profile [optimized] target(s) in 0.44s
+     Running unittests src/lib.rs (target/release/deps/liminal_server-b55f451b2e80e08e)
+
+running 1 test
+test server::participant::production::p0_60_probe::p0_60_latency_probe ... PROBE_SAMPLE history=0 ms=64.8492
+PROBE_SAMPLE history=50 ms=125.3722
+PROBE_SAMPLE history=100 ms=116.5655
+PROBE_SAMPLE history=150 ms=112.9848
+PROBE_SAMPLE history=200 ms=111.1698
+PROBE_SAMPLE history=250 ms=143.3740
+PROBE_SAMPLE history=300 ms=167.1711
+PROBE_SAMPLE history=350 ms=218.4425
+PROBE_SAMPLE history=400 ms=203.7219
+PROBE_SAMPLE history=450 ms=237.6144
+PROBE_SAMPLE history=500 ms=291.3540
+PROBE_SAMPLE history=550 ms=320.4220
+PROBE_SAMPLE history=600 ms=344.4213
+
+# NOTE: the r2 AFTER run above was cut off mid-stream by a harness timeout;
+# its partial samples are left in place and its PROBE_RESULT is absent.
+# The arms below complete the interleave, BEFORE last, on the cooled machine.
+
+===== arm=AFTER rep=r3 tree=/Users/tom/Developer/ablative/stack/liminal started=03:52:29 loadavg={ 10.21 19.42 30.34 } =====
+    Finished `release` profile [optimized] target(s) in 0.39s
+     Running unittests src/lib.rs (target/release/deps/liminal_server-b55f451b2e80e08e)
+
+running 1 test
+test server::participant::production::p0_60_probe::p0_60_latency_probe ... PROBE_SAMPLE history=0 ms=55.7891
+PROBE_SAMPLE history=50 ms=73.5765
+PROBE_SAMPLE history=100 ms=84.5956
+PROBE_SAMPLE history=150 ms=103.4099
+PROBE_SAMPLE history=200 ms=107.3956
+PROBE_SAMPLE history=250 ms=127.4489
+PROBE_SAMPLE history=300 ms=173.7581
+PROBE_SAMPLE history=350 ms=184.7459
+PROBE_SAMPLE history=400 ms=220.7826
+PROBE_SAMPLE history=450 ms=277.9456
+PROBE_SAMPLE history=500 ms=300.4859
+PROBE_SAMPLE history=550 ms=574.8677
+PROBE_SAMPLE history=600 ms=364.0747
+PROBE_SAMPLE history=650 ms=391.5358
+PROBE_SAMPLE history=700 ms=480.4796
+PROBE_SAMPLE history=750 ms=535.9522
+PROBE_RESULT admissions=800 slope_ms_per_record=0.663789 intercept_ms=-5.1543 mean_last50_ms=578.7370
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 692 filtered out; finished in 208.91s
+
+TRUE_EXIT=0 finished=03:55:58
+
+===== arm=BEFORE rep=r2 tree=/private/tmp/claude-501/-Users-tom-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/wt-before started=03:55:58 loadavg={ 13.22 15.92 26.45 } =====
+    Finished `release` profile [optimized] target(s) in 0.61s
+     Running unittests src/lib.rs (target/release/deps/liminal_server-b55f451b2e80e08e)
+
+running 1 test
+test server::participant::production::p0_60_probe::p0_60_latency_probe ... PROBE_SAMPLE history=0 ms=62.6046
+PROBE_SAMPLE history=50 ms=82.1982
+PROBE_SAMPLE history=100 ms=118.9370
+PROBE_SAMPLE history=150 ms=117.9741
+PROBE_SAMPLE history=200 ms=141.0610
+PROBE_SAMPLE history=250 ms=128.5030
+PROBE_SAMPLE history=300 ms=165.5646
+PROBE_SAMPLE history=350 ms=200.6466
+PROBE_SAMPLE history=400 ms=251.2853
+PROBE_SAMPLE history=450 ms=273.4389
+PROBE_SAMPLE history=500 ms=337.4469
+PROBE_SAMPLE history=550 ms=668.7746
+PROBE_SAMPLE history=600 ms=470.3007
+PROBE_SAMPLE history=650 ms=492.4646
+PROBE_SAMPLE history=700 ms=672.9588
+PROBE_SAMPLE history=750 ms=948.1235
+PROBE_RESULT admissions=800 slope_ms_per_record=0.953133 intercept_ms=-33.7511 mean_last50_ms=743.9744
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 690 filtered out; finished in 278.38s
+
+TRUE_EXIT=0 finished=04:00:37
+
+===== arm=BEFORE rep=r3 tree=/private/tmp/claude-501/-Users-tom-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/wt-before started=04:00:37 loadavg={ 26.93 24.66 27.57 } =====
+    Finished `release` profile [optimized] target(s) in 0.36s
+     Running unittests src/lib.rs (target/release/deps/liminal_server-b55f451b2e80e08e)
+
+running 1 test
+test server::participant::production::p0_60_probe::p0_60_latency_probe ... PROBE_SAMPLE history=0 ms=59.5073
+PROBE_SAMPLE history=50 ms=87.9786
+PROBE_SAMPLE history=100 ms=97.7613
+PROBE_SAMPLE history=150 ms=92.8768
+PROBE_SAMPLE history=200 ms=111.3906
+PROBE_SAMPLE history=250 ms=147.8522
+PROBE_SAMPLE history=300 ms=156.5413
+PROBE_SAMPLE history=350 ms=683.1672
+PROBE_SAMPLE history=400 ms=784.8333
+PROBE_SAMPLE history=450 ms=299.9303
+PROBE_SAMPLE history=500 ms=884.2080
+PROBE_SAMPLE history=550 ms=1400.5523
+PROBE_SAMPLE history=600 ms=453.2726
+PROBE_SAMPLE history=650 ms=578.8643
+PROBE_SAMPLE history=700 ms=583.4582
+PROBE_SAMPLE history=750 ms=1204.4135
+PROBE_RESULT admissions=800 slope_ms_per_record=1.311153 intercept_ms=-89.9543 mean_last50_ms=1244.1397
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 690 filtered out; finished in 376.58s
+
+TRUE_EXIT=0 finished=04:06:54
+
+===== arm=AFTER rep=r4 tree=/Users/tom/Developer/ablative/stack/liminal started=04:06:54 loadavg={ 18.07 26.13 27.91 } =====
+    Blocking waiting for file lock on package cache
+    Finished `release` profile [optimized] target(s) in 4.80s
+     Running unittests src/lib.rs (target/release/deps/liminal_server-b55f451b2e80e08e)
+
+running 1 test
+test server::participant::production::p0_60_probe::p0_60_latency_probe ... PROBE_SAMPLE history=0 ms=191.6203
+PROBE_SAMPLE history=50 ms=260.4315
+PROBE_SAMPLE history=100 ms=469.2313
+PROBE_SAMPLE history=150 ms=293.5755
+PROBE_SAMPLE history=200 ms=432.6727
+PROBE_SAMPLE history=250 ms=468.0888
+PROBE_SAMPLE history=300 ms=168.6737
+PROBE_SAMPLE history=350 ms=666.8058
+PROBE_SAMPLE history=400 ms=744.5217
+PROBE_SAMPLE history=450 ms=409.1650
+PROBE_SAMPLE history=500 ms=279.7524
+PROBE_SAMPLE history=550 ms=637.9787
+PROBE_SAMPLE history=600 ms=360.2152
+PROBE_SAMPLE history=650 ms=391.6123
+PROBE_SAMPLE history=700 ms=477.9549
+PROBE_SAMPLE history=750 ms=505.2141
+PROBE_RESULT admissions=800 slope_ms_per_record=0.301523 intercept_ms=290.4755 mean_last50_ms=554.2344
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 692 filtered out; finished in 330.02s
+
+TRUE_EXIT=0 finished=04:12:29
+
+# finished_utc=2026-08-10T04:12:29Z
+
+########################################################################
+# ANALYSIS  (evidence, not a gate assertion -- no wall-clock number is
+# asserted anywhere in the suite)
+#
+# slope, ms per record of history (least squares over all 800 samples):
+#   BEFORE  0.933199  0.953133  1.311153     range 0.933 - 1.311
+#   AFTER   0.604023  0.663789  0.301523     range 0.302 - 0.664
+#   -> RANGES DO NOT OVERLAP. Every AFTER rep is below every BEFORE rep.
+#
+# mean latency of the last 50 admissions (history ~750-800), ms:
+#   BEFORE   680.40   743.97  1244.14        range 680 - 1244
+#   AFTER    547.99   578.74   554.23        range 548 - 579
+#   -> RANGES DO NOT OVERLAP.
+#
+# Note the SPREAD, which is itself a finding: the AFTER arm's steady-state
+# latency varies by 5% across reps while the BEFORE arm varies by 83%.
+# A quadratic term is what makes a run sensitive to machine state, and the
+# arm that lost it also lost most of its variance. The BEFORE r3 and
+# AFTER r4 reps ran as load was rising (loadavg 26.9 and after), which is
+# where BEFORE's 1.311 and AFTER's odd 0.302-slope/290ms-intercept fit
+# come from -- AFTER r4's profile is a step, not a line, so its least
+# squares slope understates and its intercept overstates. Its last-50
+# mean (554.23) is in family with the other two AFTER reps, which is why
+# both statistics are reported rather than only the fit.
+#
+# WHAT THIS DOES AND DOES NOT SHOW. The slope is REDUCED, not removed.
+# Cost still grows with history, because the reconcile still replays the
+# conversation four times per commit (docs/design/p0-60-admission-cost.md
+# section 1a, pinned by tests_p0_60_admission_cost). What landed is the
+# removal of the O(N^2) engine scan inside each of those four passes.
+#
+# NOT COMPARABLE to the 1.153 ms/record field figure: that was measured
+# over TCP with 9,728-byte payloads at 8c8adec; this is in-process with
+# 512-byte payloads at 9c22b84 vs this lane's tip. Only BEFORE-vs-AFTER
+# within this file is a controlled comparison.
+#
+# Probe source: a throwaway #[test] added identically to both trees,
+# never committed, removed after the run. Release profile both arms.
+########################################################################

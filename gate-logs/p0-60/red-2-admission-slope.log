@@ -1,0 +1,31 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.36s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-e2f470e1e15520d8)
+
+running 2 tests
+test server::participant::production::tests_p0_60_admission_cost::one_admission_does_not_reread_the_conversation ... FAILED
+test server::participant::production::tests_p0_60_admission_cost::one_admission_reads_the_same_at_any_history ... FAILED
+
+failures:
+
+---- server::participant::production::tests_p0_60_admission_cost::one_admission_does_not_reread_the_conversation stdout ----
+
+thread 'server::participant::production::tests_p0_60_admission_cost::one_admission_does_not_reread_the_conversation' (101529045) panicked at crates/liminal-server/src/server/participant/production/tests_p0_60_admission_cost.rs:247:5:
+one admission read 396 durable rows into a 96-row conversation: the commit is replaying its own history
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- server::participant::production::tests_p0_60_admission_cost::one_admission_reads_the_same_at_any_history stdout ----
+
+thread 'server::participant::production::tests_p0_60_admission_cost::one_admission_reads_the_same_at_any_history' (101529046) panicked at crates/liminal-server/src/server/participant/production/tests_p0_60_admission_cost.rs:224:5:
+assertion `left == right` failed: one admission read 396 durable rows at history 96 but 140 at history 32: admission cost grows with the conversation
+  left: 396
+ right: 140
+
+
+failures:
+    server::participant::production::tests_p0_60_admission_cost::one_admission_does_not_reread_the_conversation
+    server::participant::production::tests_p0_60_admission_cost::one_admission_reads_the_same_at_any_history
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 690 filtered out; finished in 25.11s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT=101
