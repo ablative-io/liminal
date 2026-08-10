@@ -546,6 +546,8 @@ mod detach_authority_settlement_tests;
 #[cfg(test)]
 mod gen_skip_supersession_tests;
 #[cfg(test)]
+mod p0_62_stranded_handle_tests;
+#[cfg(test)]
 mod r2_tests;
 #[cfg(test)]
 mod resume_tests;
