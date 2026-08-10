@@ -1,0 +1,11 @@
+   Compiling liminal-rs v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.03s
+     Running unittests src/lib.rs (target/debug/deps/liminal-74af4cd07912af3f)
+
+running 2 tests
+test durability::store::paged_read_shape_tests::page_size_never_changes_the_answer ... ok
+test durability::store::paged_read_shape_tests::a_bounded_read_never_scans_beyond_its_page ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 344 filtered out; finished in 36.78s
+
+TRUE EXIT=0

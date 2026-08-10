@@ -87,6 +87,92 @@ impl HaematiteStore {
     pub const fn new(event_store: Arc<EventStore>) -> Self {
         Self { event_store }
     }
+
+    /// Reads the half-open key window `[offset, offset + limit)` from one
+    /// stream, or `None` when the window did not fill.
+    ///
+    /// `None` is not "empty": it is "this window cannot answer on its own",
+    /// and the caller must fall through to the unbounded engine read. A window
+    /// short by even one row may be short because the stream ended, because
+    /// history was compacted, or because an entry inside it expired, and only
+    /// the engine's own read distinguishes those.
+    ///
+    /// `limit` must be nonzero; a zero limit has no window to fill and is the
+    /// caller's fall-through case.
+    fn bounded_page(
+        &self,
+        stream_key: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Option<Vec<StoredEntry>>, DurabilityError> {
+        const TIMESTAMP_WIDTH: usize = std::mem::size_of::<u64>();
+
+        // Engine keys are 1-based; the public API is 0-based.
+        let Some(engine_from) = offset.checked_add(1) else {
+            return Ok(None);
+        };
+        let Some(engine_end) = u64::try_from(limit)
+            .ok()
+            .and_then(|limit| engine_from.checked_add(limit))
+        else {
+            return Ok(None);
+        };
+        let key = stream_key.as_bytes();
+        let from = haematite::encode_stream_key(key, engine_from);
+        let to = haematite::encode_stream_key(key, engine_end);
+        let entries = self
+            .event_store
+            .database()
+            .range_routed(key, &from, &to)
+            .map_err(ApiError::from)
+            .map_err(DurabilityError::from)?;
+        if entries.len() != limit {
+            return Ok(None);
+        }
+
+        let mut page = Vec::with_capacity(entries.len());
+        for (encoded_key, value) in entries {
+            let Some((decoded_key, engine_sequence)) = haematite::decode_stream_key(&encoded_key)
+            else {
+                return Err(DurabilityError::StoreError(ApiError::CorruptEvent(
+                    format!("paged read key does not encode an event for stream {stream_key}"),
+                )));
+            };
+            if decoded_key != key {
+                return Err(DurabilityError::StoreError(ApiError::CorruptEvent(
+                    format!("paged read key does not encode stream {stream_key}"),
+                )));
+            }
+            let sequence = engine_sequence.checked_sub(1).ok_or_else(|| {
+                DurabilityError::StoreError(ApiError::CorruptEvent(format!(
+                    "paged read event key has zero seq for stream {stream_key}"
+                )))
+            })?;
+            let Some(timestamp_bytes) = value.get(..TIMESTAMP_WIDTH) else {
+                return Err(DurabilityError::StoreError(ApiError::CorruptEvent(
+                    format!(
+                        "paged read event value is shorter than its timestamp for stream {stream_key}"
+                    ),
+                )));
+            };
+            let timestamp = u64::from_be_bytes(timestamp_bytes.try_into().map_err(|_| {
+                DurabilityError::StoreError(ApiError::CorruptEvent(format!(
+                    "paged read event timestamp has the wrong width for stream {stream_key}"
+                )))
+            })?);
+            let Some(payload) = value.get(TIMESTAMP_WIDTH..) else {
+                return Err(DurabilityError::StoreError(ApiError::CorruptEvent(
+                    format!("paged read event has no payload boundary for stream {stream_key}"),
+                )));
+            };
+            page.push(StoredEntry {
+                payload: payload.to_vec(),
+                sequence,
+                timestamp,
+            });
+        }
+        Ok(Some(page))
+    }
 }
 
 #[async_trait::async_trait]
@@ -121,8 +207,34 @@ impl DurableStore for HaematiteStore {
         offset: u64,
         limit: usize,
     ) -> Result<Vec<StoredEntry>, DurabilityError> {
-        // The real `read_from` returns every event with seq >= offset and applies
-        // no limit; truncate to `limit` entries to honour the trait contract.
+        // `EventStore::read_from` applies no limit: it materialises every event
+        // with seq >= offset, key and value copied across the shard-actor
+        // boundary, and truncating afterwards throws that work away. Paged
+        // replay therefore costs O(N^2) engine rows to deliver N (#60).
+        //
+        // Ask the engine for the page instead. Event keys are
+        // `stream_key || 0x00 || seq.to_be_bytes()` (haematite 0.8.1
+        // `api/event_store.rs:375`), so byte order is sequence order and a
+        // half-open key window names exactly one page. `range_routed` routes on
+        // the stream key — the same co-location `EventStore` uses for its own
+        // reads — and merges committed tree with WAL buffer, which is the
+        // identical mechanism behind the unbounded read (`db.rs:212`).
+        //
+        // A FULL window is the same answer the unbounded read gave: it holds
+        // `limit` live events, and key order makes those exactly the first
+        // `limit` events at or after `offset`. Anything SHORT falls through to
+        // the unbounded read, so the two answers the window cannot settle by
+        // itself stay the engine's own: the `HistoryCompacted` verdict at
+        // `offset == 0`, and the case where expiry or compaction leaves a hole
+        // inside the window. The fall-through costs a suffix scan only where
+        // the suffix is already shorter than a page — the end-of-stream read
+        // that terminates every walk.
+        if limit > 0 {
+            if let Some(page) = self.bounded_page(stream_key, offset, limit)? {
+                account_engine_read(page.len(), false);
+                return Ok(page);
+            }
+        }
         let mut events = self
             .event_store
             .read_from(stream_key.as_bytes(), offset)
@@ -541,6 +653,7 @@ impl EngineReadAccountingGuard {
         }
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn snapshot(&self) -> EngineReadAccounting {
         ENGINE_READ_ACCOUNTING
             .with(|accounting| accounting.borrow().as_ref().copied().unwrap_or_default())
@@ -1174,14 +1287,19 @@ mod paged_read_shape_tests {
         let seen = read_whole_stream(&store, PAGE)?;
         let walk = accounting.snapshot();
         drop(accounting);
-        assert_eq!(seen, ROWS as usize, "the walk must deliver every row");
+        assert_eq!(
+            u64::try_from(seen)?,
+            ROWS,
+            "the walk must deliver every row"
+        );
         assert!(
             !walk.counter_overflow_observed,
             "a saturated counter is not a measurement"
         );
         assert!(walk.calls > 0, "the walk must have reached the store");
         assert_eq!(
-            walk.engine_entries, ROWS as usize,
+            u64::try_from(walk.engine_entries)?,
+            ROWS,
             "a full stream read must scan each row exactly once instead of \
              re-scanning every suffix once per page"
         );
@@ -1236,7 +1354,7 @@ mod paged_read_shape_tests {
     fn page_size_never_changes_the_answer() -> Result<(), Box<dyn std::error::Error>> {
         let store = seeded()?;
         let whole = block_on(store.read_from(STREAM, 0, usize::MAX))??;
-        assert_eq!(whole.len(), ROWS as usize);
+        assert_eq!(u64::try_from(whole.len())?, ROWS);
 
         for page in [1_usize, 7, 64, 255, 256, 257] {
             let mut offset = 0_u64;
