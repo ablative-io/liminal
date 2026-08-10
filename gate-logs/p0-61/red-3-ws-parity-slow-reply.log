@@ -1,0 +1,20 @@
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.28s
+     Running tests/ws_transport_parity.rs (target/debug/deps/ws_transport_parity-79ffb8ffa5358903)
+
+running 2 tests
+Error: "Ws participant receive under a slow reply failed: participant transport failed: connection error: timed out waiting for a participant websocket frame"
+Error: "Ws publish under a slow ack failed: connection error: timed out waiting for the correlated websocket response"
+test a_slow_participant_reply_survives_the_receive_window_on_both_transports ... FAILED
+test a_correlated_reply_slower_than_the_receive_window_survives_on_both_transports ... FAILED
+
+failures:
+
+failures:
+    a_correlated_reply_slower_than_the_receive_window_survives_on_both_transports
+    a_slow_participant_reply_survives_the_receive_window_on_both_transports
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 20 filtered out; finished in 10.51s
+
+error: test failed, to rerun pass `-p liminal-sdk --test ws_transport_parity`
+TRUE_EXIT=101
