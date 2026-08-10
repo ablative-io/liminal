@@ -20,6 +20,9 @@
 //! candidate shape and this design document, so an operator can tell them
 //! from the deadlock they replace.
 
+use std::cell::Cell;
+use std::sync::Arc;
+
 use liminal_protocol::lifecycle::ImmutableSequenceCandidate;
 use liminal_protocol::wire::ConversationId;
 
@@ -29,6 +32,7 @@ use crate::server::participant::{
 
 use super::handler::{LogAppender, ProductionParticipantHandler};
 use super::log::OperationLog;
+use super::outbox_log::OutboxLog;
 use super::state::ConversationAuthority;
 
 /// Named outcome of one restored conversation's boot drain attempt (§6.2
@@ -163,10 +167,18 @@ impl ProductionParticipantHandler {
         replayed: &mut ConversationAuthority,
         log: &OperationLog,
     ) -> BootDrainVerdict {
+        // Board #60 §3c: the boot drain's marker sources complete their own
+        // Unit 2 extension rows here, exactly as a live commit does. Boot is
+        // the one place that appends base rows with no reconcile behind it, so
+        // an appender without an extension log would leave the drain's
+        // projection for the NEXT touch's replay to repair.
+        let outbox_log = OutboxLog::new(Arc::clone(&self.store), conversation_id);
         let appender = LogAppender {
             log,
             registry: &self.registry,
             conversation_id,
+            outbox_log: &outbox_log,
+            outstanding_extension_rows: Cell::new(0),
         };
         let mut impact = DispatchImpactAccumulator::new();
         let mut drains: usize = 0;

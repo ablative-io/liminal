@@ -118,6 +118,8 @@ mod tests_f8_marker_poison;
 #[cfg(test)]
 mod tests_p0_60_admission_cost;
 #[cfg(test)]
+mod tests_p0_64_live_extension;
+#[cfg(test)]
 mod tests_f8b_boot_drain;
 #[cfg(test)]
 mod tests_f8b_seal;

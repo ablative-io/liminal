@@ -45,7 +45,7 @@ pub(super) fn plan_observer_progress_reconcile(
         let progress = witness.progress();
         if progress > running_maximum {
             running_maximum = progress;
-            running_maxima.push((witness.merged_ordinal(), progress));
+            running_maxima.push((witness.merged_position(), progress));
         }
     }
     if running_maximum != authoritative_maximum {

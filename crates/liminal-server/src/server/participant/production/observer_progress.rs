@@ -73,6 +73,57 @@ enum ObserverProgressSourceIdentity {
     },
 }
 
+/// Which of the two merged streams a source belongs to.
+///
+/// The variant ORDER is load-bearing and matches the merge: extension rows
+/// tied at base head `h` are applied by `apply_boundary(h)`, which runs after
+/// base row `h - 1` and before base row `h`. So at equal `base_log_head` the
+/// extension side sorts first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MergedSourceClass {
+    Extension,
+    Base,
+}
+
+/// Position of one source in merged base/extension replay order, DERIVED from
+/// the source's own durable coordinates rather than counted by a visitor.
+///
+/// This is what makes a live commit-completion and a from-zero replay agree
+/// exactly. A visit counter numbers the sources a particular traversal walked
+/// — and the live path walks only the sources that record, while the replay
+/// walks every row — so two traversals of the same durable bytes produced
+/// different ordinals for the same witness. Derived from `(base_log_head,
+/// stream, extension_sequence)` the position is a property of the LOG, so both
+/// producers mint the same one and the strict-ascent check below becomes a
+/// real merged-order check instead of a monotone-counter check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct MergedSourcePosition {
+    base_log_head: u64,
+    class: MergedSourceClass,
+    extension_sequence: u64,
+}
+
+impl ObserverProgressSourceIdentity {
+    const fn merged_position(self) -> MergedSourcePosition {
+        match self {
+            Self::Base { sequence, .. } => MergedSourcePosition {
+                base_log_head: sequence,
+                class: MergedSourceClass::Base,
+                extension_sequence: 0,
+            },
+            Self::Extension {
+                base_log_head,
+                extension_sequence,
+                ..
+            } => MergedSourcePosition {
+                base_log_head,
+                class: MergedSourceClass::Extension,
+                extension_sequence,
+            },
+        }
+    }
+}
+
 /// Exact typed source occurrence represented by a projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ObserverProgressOccurrence {
@@ -389,7 +440,7 @@ impl ObserverProgressSourceMetadata {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ObserverProgressSourceWitness {
     projection: ObserverProgressProjection,
-    merged_ordinal: u64,
+    merged_position: MergedSourcePosition,
     metadata: ObserverProgressSourceMetadata,
 }
 
@@ -398,8 +449,8 @@ impl ObserverProgressSourceWitness {
         self.projection.new_observer_progress()
     }
 
-    pub(super) const fn merged_ordinal(&self) -> u64 {
-        self.merged_ordinal
+    pub(super) const fn merged_position(&self) -> MergedSourcePosition {
+        self.merged_position
     }
 }
 
@@ -407,8 +458,7 @@ impl ObserverProgressSourceWitness {
 #[derive(Debug, Default)]
 pub(super) struct ObserverProgressWitnessState {
     witnesses: Vec<ObserverProgressSourceWitness>,
-    next_merged_ordinal: u64,
-    active_merged_ordinal: Option<u64>,
+    active_visit: bool,
     occurrences: BTreeSet<ObserverProgressOccurrence>,
     lineage_progress: BTreeMap<ObserverProgressLineage, DeliverySeq>,
 }
@@ -417,8 +467,7 @@ impl ObserverProgressWitnessState {
     pub(super) const fn new() -> Self {
         Self {
             witnesses: Vec::new(),
-            next_merged_ordinal: 0,
-            active_merged_ordinal: None,
+            active_visit: false,
             occurrences: BTreeSet::new(),
             lineage_progress: BTreeMap::new(),
         }
@@ -430,38 +479,38 @@ impl ObserverProgressWitnessState {
         projection: ObserverProgressProjection,
         metadata: ObserverProgressSourceMetadata,
     ) -> Result<(), ObserverProgressConformanceError> {
-        let owns_visit = self.active_merged_ordinal.is_none();
+        let owns_visit = !self.active_visit;
         if owns_visit {
             self.begin_source()?;
         }
-        let ordinal = self
-            .active_merged_ordinal
-            .ok_or(ObserverProgressConformanceError::SourceOrder)?;
-        let result = self.record_at(conversation_id, projection, metadata, ordinal);
+        let result = self.record_at(conversation_id, projection, metadata);
         if owns_visit {
-            self.active_merged_ordinal = None;
+            self.active_visit = false;
         }
         result
     }
 
     /// Begins one base or extension source visit in actual merged replay order.
-    pub(super) fn begin_source(&mut self) -> Result<(), ObserverProgressConformanceError> {
-        if self.active_merged_ordinal.is_some() {
+    ///
+    /// The visit no longer mints the witness position — that is derived from
+    /// the source's durable coordinates — but it still enforces that a single
+    /// source surrenders at most one projection: a second `record` inside one
+    /// visit reaches `record_at` with the SAME derived position as the first
+    /// and is refused by the strict-ascent check.
+    pub(super) const fn begin_source(&mut self) -> Result<(), ObserverProgressConformanceError> {
+        if self.active_visit {
             return Err(ObserverProgressConformanceError::SourceOrder);
         }
-        let ordinal = self.next_merged_ordinal;
-        self.next_merged_ordinal = ordinal
-            .checked_add(1)
-            .ok_or(ObserverProgressConformanceError::SourceOrder)?;
-        self.active_merged_ordinal = Some(ordinal);
+        self.active_visit = true;
         Ok(())
     }
 
     /// Completes the current source visit after its typed transition succeeds.
     pub(super) const fn end_source(&mut self) -> Result<(), ObserverProgressConformanceError> {
-        if self.active_merged_ordinal.take().is_none() {
+        if !self.active_visit {
             return Err(ObserverProgressConformanceError::SourceOrder);
         }
+        self.active_visit = false;
         Ok(())
     }
 
@@ -470,17 +519,17 @@ impl ObserverProgressWitnessState {
         conversation_id: ConversationId,
         projection: ObserverProgressProjection,
         metadata: ObserverProgressSourceMetadata,
-        merged_ordinal: u64,
     ) -> Result<(), ObserverProgressConformanceError> {
         if projection.conversation_id() != conversation_id
             || metadata.occurrence.conversation_id() != conversation_id
         {
             return Err(ObserverProgressConformanceError::ConversationMismatch);
         }
+        let merged_position = metadata.source.merged_position();
         if self
             .witnesses
             .last()
-            .is_some_and(|previous| previous.merged_ordinal >= merged_ordinal)
+            .is_some_and(|previous| previous.merged_position >= merged_position)
         {
             return Err(ObserverProgressConformanceError::SourceOrder);
         }
@@ -500,14 +549,19 @@ impl ObserverProgressWitnessState {
             .insert(metadata.lineage, projection.new_observer_progress());
         self.witnesses.push(ObserverProgressSourceWitness {
             projection,
-            merged_ordinal,
+            merged_position,
             metadata,
         });
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn take(&mut self) -> Vec<ObserverProgressSourceWitness> {
         std::mem::take(&mut self.witnesses)
+    }
+
+    pub(super) fn witnesses(&self) -> &[ObserverProgressSourceWitness] {
+        &self.witnesses
     }
 
     #[cfg(test)]
