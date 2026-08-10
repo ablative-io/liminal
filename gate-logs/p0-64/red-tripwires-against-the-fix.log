@@ -1,0 +1,25 @@
+   Compiling liminal-server v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.73s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-23a10dd99411e45d)
+
+running 2 tests
+
+thread 'server::participant::production::tests_p0_60_admission_cost::one_admission_rereads_the_whole_conversation' (103250058) panicked at crates/liminal-server/src/server/participant/production/tests_p0_60_admission_cost.rs:284:5:
+one admission read 0 durable rows into a 96-row conversation. Fewer than the history means the commit stopped replaying it — the fix landed, and this pin must be inverted
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test server::participant::production::tests_p0_60_admission_cost::one_admission_rereads_the_whole_conversation ... FAILED
+
+thread 'server::participant::production::tests_p0_60_admission_cost::admission_cost_still_grows_by_one_pass_per_history_record' (103250057) panicked at crates/liminal-server/src/server/participant/production/tests_p0_60_admission_cost.rs:246:5:
+the admission path must have reached the store
+test server::participant::production::tests_p0_60_admission_cost::admission_cost_still_grows_by_one_pass_per_history_record ... FAILED
+
+failures:
+
+failures:
+    server::participant::production::tests_p0_60_admission_cost::admission_cost_still_grows_by_one_pass_per_history_record
+    server::participant::production::tests_p0_60_admission_cost::one_admission_rereads_the_whole_conversation
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 690 filtered out; finished in 22.05s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
