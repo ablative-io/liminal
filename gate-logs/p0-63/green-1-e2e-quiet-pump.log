@@ -1,0 +1,15 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running tests/participant_quiet_pump_e2e.rs (target/debug/deps/participant_quiet_pump_e2e-3c4d385f17aea9dc)
+
+running 4 tests
+test the_pump_window_fits_inside_the_boot_budget ... ok
+[tcp] drained 0 frames, quiet after 5.001s
+[websocket] drained 0 frames, quiet after 5.000s
+[loopback] drained 0 frames, quiet after 5.001s
+test a_seat_boots_within_its_gate_after_draining_a_quiet_loopback_connection ... ok
+test a_seat_boots_within_its_gate_after_draining_a_quiet_tcp_connection ... ok
+test a_seat_boots_within_its_gate_after_draining_a_quiet_websocket_connection ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.50s
+
+TRUE EXIT=0

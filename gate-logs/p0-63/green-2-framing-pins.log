@@ -1,0 +1,17 @@
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-63/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.75s
+     Running unittests src/lib.rs (target/debug/deps/liminal_sdk-141d97a61593d9b6)
+
+running 8 tests
+test remote::framing::tests::the_pump_window_is_shorter_than_the_reply_owed_deadline ... ok
+test remote::framing::tests::the_response_deadline_outlives_a_single_receive_window ... ok
+test remote::framing::tests::a_zero_budget_polls_without_arming_a_read ... ok
+test remote::framing::tests::a_closed_receive_window_is_a_wait_not_a_lost_connection ... ok
+test remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno ... ok
+test remote::framing::tests::a_quiet_pump_read_reports_silence_within_the_callers_budget ... ok
+test remote::framing::tests::a_pump_read_spends_the_callers_budget_not_one_receive_window ... ok
+test remote::framing::tests::a_real_socket_survives_a_reply_slower_than_its_receive_window ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 11.01s
+
+TRUE EXIT=0
