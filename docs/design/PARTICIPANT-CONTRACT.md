@@ -553,10 +553,27 @@ already permitted but described too narrowly.
 
 ### 0.15 R18 amendment A4 — wire-visible body-conflict refusal for same-participant token reuse (2026-08-10)
 
-**Status: PROPOSED, awaiting the two-key gate. Authored by the liminal domain
-owner (Hermes Crumpet). This is the ruling A2 explicitly reserved as out of
-scope (a): "a wire-visible conflict refusal for token reuse across different
-bodies." Reviewer-of-record key not yet turned.**
+**Status: PROPOSED, one key turned, awaiting the second key of the two-key
+gate. Authored by the liminal domain owner (Hermes Crumpet). This is the
+ruling A2 explicitly reserved as out of scope (a): "a wire-visible conflict
+refusal for token reuse across different bodies." Reviewer-of-record key
+turned by Waffles the Terrible 2026-08-10 — openable surface: ablative/docs
+`d4b209c`, `tracking/waffles-thread-state-20260805.md`, "§0.15 A4 KEY
+TURNED" block, eight points at bytes (among them: A2's reservation at
+§0.13 is verbatim this ruling with (b) carried forward untouched; the
+`ops_frontier.rs:138-146` placeholder comment already carries both arms'
+doctrine, so A4 formalizes what A2's cut designed; the BREAKING
+classification verified EXACT — `response.rs` carries zero `non_exhaustive`
+at the `3a9b8ce` pin). Second key pending per the register's custom for
+behavior-changing amendments (A2's shape: an independent second admission).**
+
+**Rotation edge (reviewer finding, held by the record):** under a 0.5.1-line
+credential rotation the presenter remains the SAME verified participant, so
+the same-participant refusal keys correctly across a rotation; a full
+re-enrollment mints a DIFFERENT participant and falls to the cross-participant
+arm — which fails toward silence, never toward disclosure, exactly as the
+permanent register law requires. The edge needs no text change; it is recorded
+so no future reader mistakes rotation for re-enrollment at this boundary.
 
 **Provenance:** frame's ASK-6, recorded half-open at the frame seat (Athena
 Zooper Dooper, 2026-08-10) after #47 shipped A2's warn-and-fall-through arm
