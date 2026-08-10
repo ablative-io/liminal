@@ -1201,3 +1201,148 @@ fn participant_reconnect_provenance_parity() -> TestResult {
     }
     Ok(())
 }
+
+/// A stall longer than either transport's 5 s receive window, so the window
+/// closes at least once before the reply lands. This is the regime server
+/// admission actually reaches: it is O(N) in conversation history at a measured
+/// 1.153 ms/record, so one window covers only ~4,300 records.
+const STALL_PAST_THE_WINDOW: Duration = Duration::from_millis(5_500);
+
+/// RED PIN (p0-61, WebSocket parity) — a slow correlated reply must not kill
+/// the link, on EITHER transport.
+///
+/// The TCP leg passes because `Connection::fill_buffer` now weighs a closed
+/// receive window against `RESPONSE_DEADLINE` instead of throwing it. The
+/// WebSocket leg fails: `receive_correlated`'s `LinkRead::TimedOut` arm feeds
+/// `SocketEvent::Failed(SocketFailure::Transport)` to the driver and terminates
+/// the link on the FIRST closed window, so a reply slower than 5 s is read as a
+/// broken socket. Same defect, second transport — and running both legs is what
+/// makes that a measurement rather than a claim.
+#[test]
+fn a_correlated_reply_slower_than_the_receive_window_survives_on_both_transports() -> TestResult {
+    for kind in [TransportKind::Tcp, TransportKind::Ws] {
+        let (address, handle) = spawn_script(
+            kind,
+            Box::new(|link| {
+                script_handshake(link, AUTH_TOKEN)?;
+                let frame = link.read_frame()?;
+                let Frame::Publish { stream_id, .. } = frame else {
+                    return Err(format!("expected Publish, got {frame:?}"));
+                };
+                std::thread::sleep(STALL_PAST_THE_WINDOW);
+                link.write_frame(&Frame::PublishAck {
+                    flags: 0,
+                    stream_id,
+                    message_id: 42,
+                })?;
+                Ok(link.captured_frames().to_vec())
+            }),
+        )?;
+        let config = connect(kind, &address).map_err(|error| format!("connect: {error}"))?;
+        let handle_channel = liminal_sdk::RemoteChannelHandle::new(&config)
+            .map_err(|error| format!("handle: {error}"))?;
+        let response = handle_channel
+            .publish(ParityMessage { value: 7 })
+            .map_err(|error| format!("{kind:?} publish under a slow ack failed: {error}"))?;
+        assert_eq!(response, PressureResponse::Accept, "{kind:?}");
+        join_script(handle)?;
+    }
+    Ok(())
+}
+
+/// RED PIN (p0-61, WebSocket parity) — the participant receive path, same
+/// stall, same requirement.
+///
+/// `receive_participant_frame` returns a typed `SdkError::Connection` on the
+/// first closed window rather than terminating the link, so this leg loses the
+/// answer instead of the connection. That is a smaller blast radius and the
+/// same bug: a participant whose admission takes longer than one window never
+/// learns its own outcome.
+#[test]
+fn a_slow_participant_reply_survives_the_receive_window_on_both_transports() -> TestResult {
+    for kind in [TransportKind::Tcp, TransportKind::Ws] {
+        let (address, handle) = spawn_script(
+            kind,
+            Box::new(|link| {
+                script_handshake(link, AUTH_TOKEN)?;
+                let frame = link.read_frame()?;
+                let Frame::Unknown {
+                    type_id, payload, ..
+                } = frame
+                else {
+                    return Err(format!("expected a participant frame, got {frame:?}"));
+                };
+                if type_id != PARTICIPANT_FRAME_TYPE {
+                    return Err(format!("expected participant type 0x1A, got {type_id:#x}"));
+                }
+                let response = slow_enrollment_response(&payload)?;
+                std::thread::sleep(STALL_PAST_THE_WINDOW);
+                link.write_raw_message(&response)?;
+                Ok(link.captured_frames().to_vec())
+            }),
+        )?;
+        let config = connect(kind, &address).map_err(|error| format!("connect: {error}"))?;
+        let participant = RemoteParticipantHandle::new(&config, MemoryResumeStore::default())
+            .map_err(|error| format!("participant handle failed: {error}"))?;
+
+        let request = ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: PARTICIPANT_CONVERSATION,
+            enrollment_token: EnrollmentToken::new([7; 16]),
+        });
+        let RemoteOperationRecordOutcome::Recorded(operation) = participant
+            .record_operation(request)
+            .map_err(|error| format!("record failed: {error}"))?
+        else {
+            return Err(format!("{kind:?} enrollment must be recorded"));
+        };
+        let RemoteParticipantSendOutcome::Sent { .. } = participant
+            .send_operation(operation)
+            .map_err(|error| format!("send failed: {error}"))?
+        else {
+            return Err(format!("{kind:?} participant send must succeed"));
+        };
+
+        let inbound = participant.receive().map_err(|error| {
+            format!("{kind:?} participant receive under a slow reply failed: {error}")
+        })?;
+        let RemoteParticipantInbound::Applied { value, .. } = inbound else {
+            return Err(format!(
+                "{kind:?} correlated enroll bound must apply: {inbound:?}"
+            ));
+        };
+        assert!(matches!(value, ServerValue::EnrollBound(_)), "{kind:?}");
+        join_script(handle)?;
+    }
+    Ok(())
+}
+
+/// Builds the canonical `EnrollBound` answer to the enrollment request carried
+/// in `payload`, so the slow-reply scripts differ from
+/// [`participant_enrollment_script`] only in when they write it.
+fn slow_enrollment_response(payload: &[u8]) -> TestResult<Vec<u8>> {
+    let mut complete = vec![PARTICIPANT_FRAME_TYPE, 0];
+    complete.extend_from_slice(&0_u32.to_be_bytes());
+    let length = u32::try_from(payload.len()).map_err(|_| "payload length".to_string())?;
+    complete.extend_from_slice(&length.to_be_bytes());
+    complete.extend_from_slice(payload);
+    let decoded = liminal_protocol::wire::decode(&complete, ReceiverDirection::Server)
+        .map_err(|error| format!("participant request decode failed: {error:?}"))?;
+    let ParticipantFrame::ClientRequest(ClientRequest::Enrollment(request)) = decoded else {
+        return Err(format!("expected an enrollment request, got {decoded:?}"));
+    };
+    let generation = Generation::new(1).ok_or("generation 1 must construct")?;
+    let epoch = BindingEpoch::new(ConnectionIncarnation::new(3, 4), generation);
+    let bound = EnrollBound::new(
+        request.conversation_id,
+        request.enrollment_token,
+        PARTICIPANT_ID,
+        AttachSecret::new([9; 32]),
+        epoch,
+        100,
+        200,
+    )
+    .ok_or("generation-1 enroll bound must construct")?;
+    participant_frame_bytes(&ParticipantFrame::ServerValue(ServerValue::EnrollBound(
+        bound,
+    )))
+}

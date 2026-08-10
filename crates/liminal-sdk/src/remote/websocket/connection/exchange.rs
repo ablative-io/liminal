@@ -15,6 +15,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use std::time::Instant;
+
 use liminal::protocol::{Frame, FrameType, ProtocolVersion, decode};
 
 use crate::SdkError;
@@ -25,6 +27,7 @@ use super::super::core::{
 };
 use super::super::encode_frame;
 use super::super::std_socket::{IO_TIMEOUT, SocketRead, WsSocket};
+use crate::remote::framing::RESPONSE_DEADLINE;
 
 /// Minimum protocol version this client advertises during the handshake.
 const CLIENT_MIN_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
@@ -153,7 +156,13 @@ fn dispatch_send(
 
 /// Blocks for the frame that resolves the outstanding correlated exchange,
 /// draining unsolicited deliveries exactly like the TCP transport does.
+///
+/// A closed read window is a wait, not a broken correlation. `read_step` runs
+/// under the socket's `IO_TIMEOUT`, which bounds one window and nothing else;
+/// only [`RESPONSE_DEADLINE`] ends the wait, and it is the TCP path's constant
+/// so both transports answer a slow peer with the same patience.
 fn receive_correlated(link: &mut WsLink) -> Result<Frame, ExchangeError> {
+    let started = Instant::now();
     loop {
         match read_step(link, None)? {
             LinkRead::Frame { bytes, correlation } => match correlation {
@@ -169,9 +178,13 @@ fn receive_correlated(link: &mut WsLink) -> Result<Frame, ExchangeError> {
                 }
             },
             LinkRead::TimedOut => {
-                // The correlation window is broken: the positional contract
-                // cannot recover, so the link terminates typed (the TCP
-                // transport's timeout equally poisons its byte stream).
+                let elapsed = started.elapsed();
+                if elapsed < RESPONSE_DEADLINE {
+                    continue;
+                }
+                // The deadline is spent: the correlation window is now genuinely
+                // broken, the positional contract cannot recover, and the link
+                // terminates typed.
                 let step = link
                     .driver
                     .handle_event(SocketEvent::Failed(SocketFailure::Transport));
@@ -180,7 +193,7 @@ fn receive_correlated(link: &mut WsLink) -> Result<Frame, ExchangeError> {
                 }
                 return Err(ExchangeError::loss(
                     TransportTerminal::SocketFailed(SocketFailure::Transport),
-                    "timed out waiting for the correlated websocket response".to_string(),
+                    deadline_detail("the correlated websocket response", elapsed),
                 ));
             }
         }
@@ -189,15 +202,20 @@ fn receive_correlated(link: &mut WsLink) -> Result<Frame, ExchangeError> {
 
 /// Blocks for the next non-delivery frame with no exchange outstanding: the
 /// participant receive path. Unsolicited deliveries are drained exactly like
-/// the TCP transport's receive loop; a read-window expiry is a typed error
-/// with the link retained (TCP parity: a participant receive timeout does not
-/// poison the message-framed connection).
+/// the TCP transport's receive loop; a spent [`RESPONSE_DEADLINE`] is a typed
+/// error with the link retained (TCP parity: a participant receive timeout does
+/// not poison the message-framed connection).
 pub(super) fn receive_participant_frame(link: &mut WsLink) -> Result<Frame, ExchangeError> {
+    let started = Instant::now();
     loop {
         match read_step(link, None)? {
             LinkRead::TimedOut => {
+                let elapsed = started.elapsed();
+                if elapsed < RESPONSE_DEADLINE {
+                    continue;
+                }
                 return Err(ExchangeError::Local(SdkError::Connection {
-                    description: "timed out waiting for a participant websocket frame".to_string(),
+                    description: deadline_detail("a participant websocket frame", elapsed),
                 }));
             }
             LinkRead::Frame { bytes, correlation } => match correlation {
@@ -208,6 +226,16 @@ pub(super) fn receive_participant_frame(link: &mut WsLink) -> Result<Frame, Exch
             },
         }
     }
+}
+
+/// Describes a spent [`RESPONSE_DEADLINE`] in seconds waited and seconds
+/// budgeted, naming the timeout rather than the window that reported it.
+fn deadline_detail(awaited: &str, elapsed: Duration) -> String {
+    format!(
+        "timed out after {:.3}s waiting for {awaited} (deadline {:.3}s)",
+        elapsed.as_secs_f64(),
+        RESPONSE_DEADLINE.as_secs_f64()
+    )
 }
 
 /// One validated read outcome surfaced to the exchange loops.

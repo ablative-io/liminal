@@ -35,6 +35,7 @@ use core::time::Duration;
 use std::io;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::time::Instant;
 
 use liminal::protocol::{
     CONVERSATION_REPLY_REQUESTED_FLAG, Frame, FrameType, MessageEnvelope, ProtocolError,
@@ -49,7 +50,21 @@ const CLIENT_MIN_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 /// Maximum protocol version this client advertises during the handshake.
 const CLIENT_MAX_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 /// Maximum time spent waiting on a single stream read or write.
+///
+/// This bounds ONE read window, not one response. A window that closes with no
+/// bytes is a wait, not a failure — see [`RESPONSE_DEADLINE`], which is what
+/// actually ends a wait.
 pub(in crate::remote) const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Total wall-clock budget for one server response, spanning as many closed
+/// read windows as it takes.
+///
+/// Derivation: server admission is O(N) in conversation history at a measured
+/// 1.153 ms/record (2026-08-10), so a single [`IO_TIMEOUT`] window reaches only
+/// ~4,300 records — inside real session sizes, which is how a slow-but-answering
+/// server came to be read as a dead one. 60 s reaches ~52,000 records at that
+/// rate while still ending the wait on a genuinely silent peer within a minute.
+/// It is the bound; [`IO_TIMEOUT`] is only the polling grain beneath it.
+pub(in crate::remote) const RESPONSE_DEADLINE: Duration = Duration::from_secs(60);
 /// Brief window used to detect an error reply for an otherwise-silent
 /// conversation send. The server replies synchronously on the connection thread,
 /// so this only needs to cover that one round of processing; on success the
@@ -76,7 +91,7 @@ pub(in crate::remote) trait FrameStream {
     ///
     /// `Ok(0)` means end of file. A window that closes with no bytes must
     /// report `WouldBlock` or `TimedOut`; the two are read identically by
-    /// [`Connection::fill_buffer_nonfatal`], mirroring the socket contract
+    /// [`Connection::fill_buffer_once`], mirroring the socket contract
     /// where the platform picks between them.
     ///
     /// # Errors
@@ -244,6 +259,14 @@ impl<S: FrameStream> Connection<S> {
     }
 
     fn receive(&mut self) -> Result<Frame, SdkError> {
+        self.receive_within(RESPONSE_DEADLINE)
+    }
+
+    /// Reads one frame, spending at most `budget` in total across however many
+    /// read windows it takes. The budget runs from entry, so a stream of
+    /// unsolicited `Deliver` frames cannot extend it indefinitely.
+    fn receive_within(&mut self, budget: Duration) -> Result<Frame, SdkError> {
+        let started = Instant::now();
         loop {
             match decode(&self.buffer) {
                 Ok((frame, consumed)) => {
@@ -264,40 +287,48 @@ impl<S: FrameStream> Connection<S> {
                 }
                 Err(
                     ProtocolError::IncompleteHeader { .. } | ProtocolError::TruncatedPayload { .. },
-                ) => self.fill_buffer()?,
+                ) => self.fill_buffer(started, budget)?,
                 Err(error) => return Err(protocol_error(&error)),
             }
         }
     }
 
-    fn fill_buffer(&mut self) -> Result<(), SdkError> {
-        if self.buffer.len() > MAX_RESPONSE_BYTES {
-            return Err(SdkError::Protocol {
-                description: format!(
-                    "server response exceeded {MAX_RESPONSE_BYTES} bytes without a complete frame"
-                ),
-            });
+    /// Reads until at least one byte lands, ending only when `budget` from
+    /// `started` is spent.
+    ///
+    /// A closed read window is a wait, not a failure. The socket carries
+    /// `SO_RCVTIMEO = IO_TIMEOUT`, so one window closing means only that the
+    /// reply is slower than 5 s — which server admission, being O(N) in
+    /// conversation history, routinely is. Ending the connection there abandons
+    /// a socket whose answer may still be in flight; that is the 2026-08-10
+    /// outage's client-side mechanism. Only [`RESPONSE_DEADLINE`] ends the wait,
+    /// and it says so in its own words rather than surfacing the raw `EAGAIN`
+    /// the window reports.
+    ///
+    /// This is the same shape the push and subscription setup readers already
+    /// carry (`tcp/push_client.rs`, `tcp/subscription.rs`), and it is what makes
+    /// this path and [`fill_buffer_once`](Self::fill_buffer_once) one read path
+    /// under two policies rather than two read paths — the asymmetry that let
+    /// only one of them absorb a closed window.
+    fn fill_buffer(&mut self, started: Instant, budget: Duration) -> Result<(), SdkError> {
+        loop {
+            match self.fill_buffer_once()? {
+                FillOutcome::Read => return Ok(()),
+                FillOutcome::TimedOut => {
+                    let elapsed = started.elapsed();
+                    if elapsed >= budget {
+                        return Err(SdkError::Connection {
+                            description: format!(
+                                "timed out after {:.3}s waiting for a server response \
+                                 (deadline {:.3}s): no complete frame arrived",
+                                elapsed.as_secs_f64(),
+                                budget.as_secs_f64()
+                            ),
+                        });
+                    }
+                }
+            }
         }
-        let mut chunk = [0_u8; READ_CHUNK_BYTES];
-        let read = self
-            .stream
-            .read_bytes(&mut chunk)
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to read frame from server: {source}"),
-            })?;
-        if read == 0 {
-            return Err(SdkError::Connection {
-                description: "server closed the connection before a full frame arrived".to_string(),
-            });
-        }
-        let Some(received) = chunk.get(..read) else {
-            return Err(SdkError::Protocol {
-                description: "socket read reported more bytes than the read buffer holds"
-                    .to_string(),
-            });
-        };
-        self.buffer.extend_from_slice(received);
-        Ok(())
     }
 
     /// Sends a conversation message, opening the conversation first if needed, and
@@ -463,7 +494,7 @@ impl<S: FrameStream> Connection<S> {
                 }
                 Err(
                     ProtocolError::IncompleteHeader { .. } | ProtocolError::TruncatedPayload { .. },
-                ) => match self.fill_buffer_nonfatal()? {
+                ) => match self.fill_buffer_once()? {
                     FillOutcome::Read => {}
                     FillOutcome::TimedOut => return Ok(None),
                 },
@@ -472,10 +503,17 @@ impl<S: FrameStream> Connection<S> {
         }
     }
 
-    /// Like [`fill_buffer`](Self::fill_buffer) but treats a read timeout as a
-    /// non-fatal [`FillOutcome::TimedOut`] rather than an error, so an absent
-    /// (silent-success) reply can be distinguished from a real I/O failure.
-    fn fill_buffer_nonfatal(&mut self) -> Result<FillOutcome, SdkError> {
+    /// One read attempt: appends whatever arrives, and reports a closed read
+    /// window as [`FillOutcome::TimedOut`] rather than throwing it.
+    ///
+    /// The only read primitive on this connection. Both callers reach the
+    /// socket through it and differ only in what they do with a closed window:
+    /// [`fill_buffer`](Self::fill_buffer) weighs it against
+    /// [`RESPONSE_DEADLINE`] and keeps waiting, while
+    /// [`try_receive_once`](Self::try_receive_once) reads it as the silence that
+    /// means a conversation send was accepted. Neither treats it as an I/O
+    /// failure; a genuine one still lands on the fatal arm below.
+    fn fill_buffer_once(&mut self) -> Result<FillOutcome, SdkError> {
         if self.buffer.len() > MAX_RESPONSE_BYTES {
             return Err(SdkError::Protocol {
                 description: format!(
@@ -521,6 +559,10 @@ enum FillOutcome {
     /// The read timed out with no bytes available.
     TimedOut,
 }
+
+#[cfg(test)]
+#[path = "framing_tests.rs"]
+mod tests;
 
 /// Maps a low-level wire codec error into the SDK error taxonomy.
 pub(in crate::remote) fn protocol_error(error: &ProtocolError) -> SdkError {

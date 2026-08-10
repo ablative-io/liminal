@@ -1,0 +1,20 @@
+   Compiling liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.48s
+     Running tests/participant_churn_convergence_e2e.rs (target/debug/deps/participant_churn_convergence_e2e-a14f00752b9079f3)
+
+running 1 test
+
+thread 'a_conversation_converges_after_attach_exchanges_torn_mid_flight' (100574214) panicked at crates/liminal-server/tests/participant_churn_convergence_e2e.rs:482:5:
+the pre-churn credential is still current, so no torn attach reached the server far enough to bind — the churn proved nothing: AttachBound(AttachBound { conversation_id: 49175, token: AttachAttemptToken([197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197]), participant_id: 0, request_generation: Generation(1), attach_secret: AttachSecret([120, 107, 240, 158, 43, 52, 171, 221, 160, 79, 61, 117, 181, 193, 234, 88, 216, 213, 199, 23, 136, 12, 237, 42, 207, 101, 195, 69, 254, 227, 133, 155]), origin_binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(2) }, persisted_cursor: 0, accepted_marker_delivery_seq: None, receipt_expires_at: 1786328695377, provenance_expires_at: 1786329235377 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_conversation_converges_after_attach_exchanges_torn_mid_flight ... FAILED
+
+failures:
+
+failures:
+    a_conversation_converges_after_attach_exchanges_torn_mid_flight
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+error: test failed, to rerun pass `-p liminal-server --test participant_churn_convergence_e2e`
+TRUE_EXIT=101
