@@ -553,19 +553,23 @@ already permitted but described too narrowly.
 
 ### 0.15 R18 amendment A4 — wire-visible body-conflict refusal for same-participant token reuse (2026-08-10)
 
-**Status: PROPOSED, one key turned, awaiting the second key of the two-key
-gate. Authored by the liminal domain owner (Hermes Crumpet). This is the
-ruling A2 explicitly reserved as out of scope (a): "a wire-visible conflict
-refusal for token reuse across different bodies." Reviewer-of-record key
-turned by Waffles the Terrible 2026-08-10 — openable surface: ablative/docs
-`d4b209c`, `tracking/waffles-thread-state-20260805.md`, "§0.15 A4 KEY
-TURNED" block, eight points at bytes (among them: A2's reservation at
-§0.13 is verbatim this ruling with (b) carried forward untouched; the
-`ops_frontier.rs:138-146` placeholder comment already carries both arms'
-doctrine, so A4 formalizes what A2's cut designed; the BREAKING
-classification verified EXACT — `response.rs` carries zero `non_exhaustive`
-at the `3a9b8ce` pin). Second key pending per the register's custom for
-behavior-changing amendments (A2's shape: an independent second admission).**
+**Status: amendment to R18, authored by the liminal domain owner (Hermes
+Crumpet); RATIFIED 2026-08-10 under the two-key gate. This is the ruling A2
+explicitly reserved as out of scope (a): "a wire-visible conflict refusal
+for token reuse across different bodies." Reviewer-of-record key turned by
+Waffles the Terrible — openable surface: ablative/docs `d4b209c`,
+`tracking/waffles-thread-state-20260805.md`, "§0.15 A4 KEY TURNED" block,
+eight points at bytes (among them: A2's reservation at §0.13 is verbatim
+this ruling with (b) carried forward untouched; the `ops_frontier.rs:138-146`
+placeholder comment already carries both arms' doctrine, so A4 formalizes
+what A2's cut designed; the BREAKING classification verified EXACT —
+`wire/response.rs` carries zero `non_exhaustive` at the `3a9b8ce` pin).
+Second key turned by Cally Ray — openable surface: ablative/docs `cdb6435`,
+`tracking/verification-a4-second-key-cally-20260810.md`: independent
+re-verification at her hands, including the `b817028..5f93d35` diff proving
+every normative byte identical between the two keys (two keys on ONE
+document, checked rather than assumed); her A2-identity-triple row is
+self-disclosed as non-independent and discounted.**
 
 **Rotation edge (reviewer finding, held by the record):** under a 0.5.1-line
 credential rotation the presenter remains the SAME verified participant, so
@@ -574,6 +578,29 @@ re-enrollment mints a DIFFERENT participant and falls to the cross-participant
 arm — which fails toward silence, never toward disclosure, exactly as the
 permanent register law requires. The edge needs no text change; it is recorded
 so no future reader mistakes rotation for re-enrollment at this boundary.
+
+**Build obligations (second-key findings — consequences of the ratified law,
+not new law; binding on the build at the breaking window):**
+
+1. **Two ranges, not one widened arm.** The dedup branch this refusal
+   resolves is entered on a range spanning EVERY participant
+   (`(token, [0x00;32], ParticipantId::MIN) ..= (token, [0xFF;32],
+   ParticipantId::MAX)`), and the "separate register decision" marker sits
+   inside it — so the natural implementation hangs the refusal on that
+   branch and refuses on cross-participant hits, building precisely the
+   probe channel this amendment permanently outlaws. The refusal takes its
+   OWN presenter-scoped range (`(token, [0x00;32], presenter) ..=
+   (token, [0xFF;32], presenter)`); the wide range remains the
+   warn-and-fall-through cross-participant condition. An implementation
+   with one widened arm violates the cross-participant clause of this
+   amendment regardless of its test results.
+2. **Latency is named as a channel and measured nowhere yet.** A
+   presenter-scoped lookup that is faster than the wide one is a timing
+   signal in principle. The build must measure the differential and bound
+   or unify it; this line is the named-not-measured marker until then.
+3. **The window has no hook.** "The next planned protocol breaking window"
+   is an event nothing fires at (a #168-class obligation). The liminal
+   seat owns arming it; this text records the duty and is not the arming.
 
 **Provenance:** frame's ASK-6, recorded half-open at the frame seat (Athena
 Zooper Dooper, 2026-08-10) after #47 shipped A2's warn-and-fall-through arm
