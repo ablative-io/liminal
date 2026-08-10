@@ -551,6 +551,75 @@ amendments read as one law.
 server behavior — it records measured, mount-independent behavior the contract
 already permitted but described too narrowly.
 
+### 0.15 R18 amendment A4 — wire-visible body-conflict refusal for same-participant token reuse (2026-08-10)
+
+**Status: PROPOSED, awaiting the two-key gate. Authored by the liminal domain
+owner (Hermes Crumpet). This is the ruling A2 explicitly reserved as out of
+scope (a): "a wire-visible conflict refusal for token reuse across different
+bodies." Reviewer-of-record key not yet turned.**
+
+**Provenance:** frame's ASK-6, recorded half-open at the frame seat (Athena
+Zooper Dooper, 2026-08-10) after #47 shipped A2's warn-and-fall-through arm
+and deliberately deferred this half. The in-code marker is the conflict arm's
+own comment in `answer_committed_record_admission` ("the conflict arm is a
+separate register decision"), left there by A2's implementation as the
+placeholder this amendment resolves.
+
+**The change — the SAME-PARTICIPANT conflict arm only.** Under A2, a
+presentation matching a committed identity's (`record_admission_attempt_token`,
+verified `participant_id`) but differing in payload bytes is a DISTINCT
+identity: it bypasses dedup, commits as a NEW record, and draws a server-side
+warning. This amendment converts exactly that arm — same token, same verified
+participant, different payload bytes, committed match inside the retained
+op-log window — into a typed wire refusal that commits NOTHING. The
+`AttemptTokenBodyConflict` refusal row, which today admits only
+`CredentialAttachRequest|LeaveRequest`, gains `RecordAdmission` in its
+admitted-request set. The refusal consumes no `transaction_order` major and
+runs at the same site and ordering A2 fixed: after authority verification,
+before order allocation.
+
+**Why refusal beats the warn:** a conforming client (mint-once at staging,
+R-C0's discipline one layer up, now documented on the wire field itself)
+NEVER sees this refusal — the only presentations that can reach it are a
+client bug (an edit re-sent under a spent token) or a replay-with-mutation.
+Both deserve a loud typed answer at the presenter, not a silent second commit
+plus a server-side log line the presenter cannot read. The refusal discloses
+nothing: the presenter IS the committed identity's own verified participant,
+so "you already committed different bytes under this token" reveals only the
+presenter's own history.
+
+**The CROSS-PARTICIPANT arm is silent FOREVER, and this amendment closes the
+question rather than deferring it:** a presentation matching some other
+participant's (token, any bytes) is structurally a dedup miss (entries are
+keyed to the presenter) and commits as a new record with no refusal and no
+warning naming the collision. Any token-correlated response across
+participants — refusal, warning, even latency — is a probe channel that lets
+one participant test whether another has used a token. ASK-6's cross-
+participant leg is REFUSED as a matter of register law, not deferred.
+
+**Retention honesty (A2's window, same boundary):** the conflict lookup sees
+only the retained op-log window. A same-participant conflicting re-present
+arriving after its witness row is compacted commits a second record exactly
+as today. The window is named, not silent; it inherits A2's
+pin-when-compaction-exists obligation.
+
+**Wire honesty and sequencing:** unlike A2, this amendment DOES add a wire-
+visible refusal to a door that had none. Extending the refusal enum is a
+BREAKING protocol change under the standing ruling that these enums carry no
+`#[non_exhaustive]` (priced at the cut, `channel_registry.rs:19-25@3a9b8ce`).
+Implementation therefore lands at the next PLANNED protocol breaking window,
+alongside the deferred `StateUnavailable { source }` SDK shape (#62 leg B
+seat ruling) — ratification of this amendment authorizes the register text
+now and the build then; it does not trigger a breaking release by itself.
+
+**Out of scope, still neither granted nor foreclosed:** (b) any legalisation
+of automatic resend.
+
+**Honesty line:** this amendment changes NO bytes anywhere until its build
+lands at a breaking window — it converts one documented warn-and-commit arm
+into a documented refuse-and-commit-nothing arm, and rules the cross-
+participant silence permanent.
+
 ## 1. The verified gap
 
 The evidence base was re-verified rather than copied:
