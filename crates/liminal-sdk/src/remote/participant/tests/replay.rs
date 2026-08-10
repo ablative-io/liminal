@@ -183,6 +183,88 @@ fn failed_checkpoint_withholds_successor_authority() -> TestResult {
     Ok(())
 }
 
+/// RED AT 3a9b8ce (P0 #62, leg B): the FALSE HOLD. A store-originated
+/// unavailability was indistinguishable from any other unavailability, because
+/// the only thing that ever named the cause was an error returned exactly once,
+/// to whichever caller happened to make the failing call.
+///
+/// The pin above stops one call short of the problem: it proves the second call
+/// reports `StateUnavailable`, and that variant is a unit — it names the
+/// CONDITION and carries no cause. Every caller after the first is left holding
+/// an unattributable hold, and the only available discrimination was matching
+/// the rendered text of an error nobody still has.
+///
+/// The claim here is that the cause survives the call that produced it, as a
+/// TYPED value: the caller's own `SdkError`, comparable by value, not a string.
+#[test]
+fn a_store_originated_unavailability_names_its_typed_cause() -> TestResult {
+    let config = RemoteConfig::new(
+        "participant-checkpoint.invalid:1",
+        "participant-tests",
+        "participant-tests",
+        ConnectionPoolConfig::new(1, 1, 1),
+    )?;
+    let handle = RemoteParticipantHandle::new(&config, FailSecondWrite::default())?;
+    assert_eq!(
+        handle.unavailability_cause(),
+        None,
+        "a live handle must report no unavailability cause, or a Some proves nothing later"
+    );
+
+    assert!(matches!(
+        handle.record_explicit_reconnect(),
+        Err(super::RemoteParticipantError::Storage(_))
+    ));
+    assert!(matches!(
+        handle.record_explicit_reconnect(),
+        Err(super::RemoteParticipantError::StateUnavailable)
+    ));
+
+    let Some(cause) = handle.unavailability_cause() else {
+        return Err(
+            "#62 REPRODUCED: the handle is bricked by a store failure and cannot say so -- the \
+             cause was returned once and lost, leaving StateUnavailable indistinguishable from \
+             every other hold"
+                .into(),
+        );
+    };
+    assert_eq!(
+        cause,
+        SdkError::Store {
+            description: "injected checkpoint failure".to_string(),
+        },
+        "the retained cause must be the caller's own store error, by value"
+    );
+    Ok(())
+}
+
+/// RED AT 3a9b8ce (P0 #62, leg B): `Storage` and `Transport` wrap an `SdkError`
+/// but did not declare it as their `source`, so `Error::source()` returned
+/// `None` and a caller walking the chain fell off it immediately -- leaving the
+/// rendered string as the only route to the typed failure underneath.
+#[test]
+fn a_storage_error_exposes_its_store_failure_as_a_typed_source() -> TestResult {
+    let inner = SdkError::Store {
+        description: "injected checkpoint failure".to_string(),
+    };
+    let error = super::RemoteParticipantError::Storage(inner.clone());
+
+    let source = std::error::Error::source(&error).ok_or(
+        "#62 REPRODUCED: Storage declares no source, so the typed store error is \
+                reachable only by parsing rendered text",
+    )?;
+    let downcast = source
+        .downcast_ref::<SdkError>()
+        .ok_or("the source must be the SdkError itself, not a re-wrapped copy")?;
+    assert_eq!(*downcast, inner);
+
+    let transport = super::RemoteParticipantError::Transport(inner.clone());
+    let source = std::error::Error::source(&transport)
+        .ok_or("#62 REPRODUCED: Transport declares no source either")?;
+    assert_eq!(source.downcast_ref::<SdkError>(), Some(&inner));
+    Ok(())
+}
+
 /// RED AT 8c8adec (P0 #59, leg 2): a PURE-FUNCTION encode refusal destroyed live
 /// participant state.
 ///

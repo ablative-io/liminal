@@ -5,7 +5,15 @@ use alloc::string::String;
 /// The SDK keeps application code independent from transport, protocol framing,
 /// and core implementation error types. Concrete embedded and remote adapters
 /// map their internal failures into these variants.
-#[derive(Debug, thiserror::Error)]
+///
+/// `Clone` is derived so a failure can be both RETAINED and RETURNED at the same
+/// seam. A store failure that bricks a participant handle is exactly that shape:
+/// the error travels to the caller of the failing operation, while a copy stays
+/// behind as the reason every later call reports
+/// `RemoteParticipantError::StateUnavailable`. Without it the cause is
+/// observable exactly once and only by whoever happened to make the failing
+/// call.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SdkError {
     /// Establishing, keeping, or recovering a client connection failed.
     #[error("connection error: {description}")]
