@@ -11,6 +11,7 @@
 //! exists, and refused probes of unknown conversation ids leave neither
 //! durable nor in-memory residue.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +37,7 @@ use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
 use super::outbox::ConversationOutboxLimits;
 use super::outbox_log::{OutboxLog, OutboxLogError};
+use super::outbox_projection::owes_extension_row;
 use super::outbox_replay::RestoreError;
 use super::registry::ConversationRegistry;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
@@ -499,6 +501,7 @@ impl ProductionParticipantHandler {
                     ),
                 })?;
         let log = OperationLog::new(Arc::clone(&self.store), conversation_id);
+        let outbox_log = OutboxLog::new(Arc::clone(&self.store), conversation_id);
         if owner.is_none() {
             // The request-side half of containment. A conversation the node
             // cannot load refuses HERE, by name, instead of surfacing a bare
@@ -518,6 +521,8 @@ impl ProductionParticipantHandler {
             log: &log,
             registry: &self.registry,
             conversation_id,
+            outbox_log: &outbox_log,
+            outstanding_extension_rows: Cell::new(0),
         };
         let starting_log_sequence = authority.next_log_sequence;
         let operation_result = operation(authority, &appender, impact.as_deref_mut());
@@ -526,16 +531,23 @@ impl ProductionParticipantHandler {
                 if reconcile_appended_source
                     && authority.next_log_sequence > starting_log_sequence =>
             {
-                // The v2 source barrier crossed. Reconcile its exact Unit 2
+                // The v2 source barrier crossed. Complete its exact Unit 2
                 // projection under this same conversation lock before the
                 // caller can publish the correlated terminal response.
-                match self.replay_and_repair(conversation_id, &log) {
-                    Ok(reconciled) => {
+                match self.complete_appended_source(conversation_id, &log, authority, &appender) {
+                    Ok(Some(reconciled)) => {
                         let durably_empty = reconciled.next_log_sequence == 0;
                         if let Some(impact) = impact.as_deref_mut() {
                             impact.install_staged();
                         }
                         *owner = Some(reconciled);
+                        (Ok(value), durably_empty)
+                    }
+                    Ok(None) => {
+                        if let Some(impact) = impact.as_deref_mut() {
+                            impact.install_staged();
+                        }
+                        let durably_empty = authority.next_log_sequence == 0;
                         (Ok(value), durably_empty)
                     }
                     Err(error) => {
@@ -584,6 +596,93 @@ impl ProductionParticipantHandler {
         result
     }
 
+    /// Completes the sources this operation appended, and says whether the
+    /// owner was replaced.
+    ///
+    /// Board #60 §3c. `Ok(None)` means every appended source ALREADY wrote its
+    /// own Unit 2 extension row and applied it to the live outbox owner
+    /// (`record_produced_source`), so the from-zero replay is no longer the
+    /// writer of anything: the commit owed only the load-end reconciles the
+    /// replay used to carry along with it, and the live owner stands.
+    /// `Ok(Some(owner))` is the replay's answer, taken whenever that is not
+    /// PROVABLY true — a nonzero owed-row count means some appended source's
+    /// row is still missing, which is exactly the shape the repair branch
+    /// answers. The gate is an outcome, not a prediction: it reads what the
+    /// operation actually did.
+    fn complete_appended_source(
+        &self,
+        conversation_id: ConversationId,
+        log: &OperationLog,
+        authority: &mut ConversationAuthority,
+        appender: &LogAppender<'_>,
+    ) -> Result<Option<ConversationAuthority>, ParticipantSemanticError> {
+        if appender.outstanding_extension_rows() == 0 {
+            self.complete_live_commit(conversation_id, authority, appender)?;
+            return Ok(None);
+        }
+        self.replay_and_repair(conversation_id, log).map(Some)
+    }
+
+    /// Completes one in-process commit without re-deriving the prefix.
+    ///
+    /// Board #60 §3c. This is the tail of [`Self::replay_and_repair`] applied
+    /// to the live owner — the same calls, in the same order, minus the three
+    /// passes whose only job was to rebuild a prefix this owner never lost:
+    ///
+    /// - `repair_pending_specific_fates` is KEPT. It is not a load-time repair
+    ///   in disguise: a live Died/Detached commit can leave a pending specific
+    ///   fate whose finalizer must be appended before the response publishes,
+    ///   and today's post-append replay is what performs it.
+    /// - `reconcile_observer_progress` is KEPT, over the owner's OWN witness
+    ///   vector, which is now retained rather than drained. The planner reads
+    ///   the whole source history (it validates the durable observer prefix
+    ///   against it), and the retained vector is that history — the same
+    ///   vector, source for source, that a from-zero replay would rebuild.
+    /// - `prune_expired_provenance` and the capacity fold are KEPT: both are
+    ///   per-touch clock work over the current owner, not prefix derivation.
+    ///
+    /// Deliberately NOT carried over: `validate_operation_schema`, the base-log
+    /// replay, the extension merge, `validate_replayed_seal` and
+    /// `reconcile_load_end_marker_anchors`. The first three re-derive a prefix
+    /// the live owner already holds; the last two are load-end repairs of crash
+    /// residue, and a source committed in-process under this lock has no crash
+    /// residue to repair.
+    fn complete_live_commit(
+        &self,
+        conversation_id: ConversationId,
+        authority: &mut ConversationAuthority,
+        appender: &LogAppender<'_>,
+    ) -> Result<(), ParticipantSemanticError> {
+        authority
+            .repair_pending_specific_fates(appender)
+            .map_err(|error| state_error(&error))?;
+        let observer_progress = authority.observer_progress;
+        let witnesses = authority.observer_progress_witnesses();
+        if !authority.tokens.is_empty() || authority.is_closed() {
+            self.reconcile_observer_progress(conversation_id, witnesses, observer_progress)?;
+        } else if !witnesses.is_empty() {
+            return Err(ParticipantSemanticError::Internal {
+                message: format!(
+                    "unenrolled conversation {conversation_id} projected observer progress"
+                ),
+            });
+        }
+        let now = self
+            .now_ms()
+            .map_err(|error| ParticipantSemanticError::Internal {
+                message: format!("participant clock read failed: {error}"),
+            })?;
+        let now = u128::from(now);
+        authority.prune_expired_provenance(now);
+        let contribution = authority
+            .capacity_contribution(now)
+            .map_err(|error| state_error(&error))?;
+        self.capacity
+            .fold_conversation(conversation_id, contribution)
+            .map_err(|error| state_error(&error))?;
+        Ok(())
+    }
+
     /// Cold-replays one conversation's durable log and repairs its observer
     /// registration.
     ///
@@ -616,11 +715,13 @@ impl ProductionParticipantHandler {
             log,
             registry: &self.registry,
             conversation_id,
+            outbox_log: &outbox_log,
+            outstanding_extension_rows: Cell::new(0),
         };
         replayed
             .repair_pending_specific_fates(&appender)
             .map_err(|error| state_error(&error))?;
-        let observer_witnesses = replayed.take_observer_progress_witnesses();
+        let observer_witnesses = replayed.observer_progress_witnesses();
         // F8B R-SEAL (§6.6). This is the THIRD site that reads `tokens` empty
         // as "never enrolled" — the two the ruling names are the replay
         // invariant twins. A Closed conversation is the state that proxy never
@@ -634,7 +735,7 @@ impl ProductionParticipantHandler {
         if !replayed.tokens.is_empty() || replayed.is_closed() {
             self.reconcile_observer_progress(
                 conversation_id,
-                &observer_witnesses,
+                observer_witnesses,
                 replayed.observer_progress,
             )?;
         } else if !observer_witnesses.is_empty() {
@@ -794,6 +895,23 @@ pub(super) struct LogAppender<'a> {
     pub(super) log: &'a OperationLog,
     pub(super) registry: &'a ConversationRegistry,
     pub(super) conversation_id: ConversationId,
+    /// Board #60 §3c. The Unit 2 extension log a committed source completes
+    /// itself into, under the same conversation lock as its base append.
+    pub(super) outbox_log: &'a OutboxLog,
+    /// Owed-minus-written Unit 2 extension rows for the operation this
+    /// appender is serving. Incremented by every appended row that owes one
+    /// ([`owes_extension_row`]), decremented by every row written in place.
+    /// Zero at the end of the operation is the OUTCOME GATE that lets the
+    /// commit path skip its from-zero replay.
+    pub(super) outstanding_extension_rows: Cell<u64>,
+}
+
+impl LogAppender<'_> {
+    /// Rows this operation appended that owe an extension row and have not
+    /// been given one in place.
+    pub(super) fn outstanding_extension_rows(&self) -> u64 {
+        self.outstanding_extension_rows.get()
+    }
 }
 
 impl DurableAppend for LogAppender<'_> {
@@ -805,7 +923,25 @@ impl DurableAppend for LogAppender<'_> {
         if expected_sequence == 0 && matches!(operation, StoredOperation::Genesis { .. }) {
             self.registry.register(self.conversation_id)?;
         }
-        block_on(self.log.append(operation, expected_sequence))?
+        block_on(self.log.append(operation, expected_sequence))??;
+        if owes_extension_row(operation) {
+            self.outstanding_extension_rows
+                .set(self.outstanding_extension_rows.get().saturating_add(1));
+        }
+        Ok(())
+    }
+
+    fn extension_log(&self) -> Option<&OutboxLog> {
+        Some(self.outbox_log)
+    }
+
+    fn owed_extension_rows(&self) -> u64 {
+        self.outstanding_extension_rows.get()
+    }
+
+    fn discharge_owed_extension_row(&self) {
+        self.outstanding_extension_rows
+            .set(self.outstanding_extension_rows.get().saturating_sub(1));
     }
 }
 

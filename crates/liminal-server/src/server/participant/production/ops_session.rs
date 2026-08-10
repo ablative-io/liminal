@@ -127,10 +127,8 @@ impl ConversationAuthority {
         self.record_produced_source(
             source_log_sequence,
             &source,
-            ReplayedProjectionFacts {
-                superseded_binding_epoch: None,
-                marker_delivery: None,
-            },
+            ReplayedProjectionFacts::none(),
+            appender,
             impact,
         )?;
         self.record_binding_changed(request.participant_id, impact);

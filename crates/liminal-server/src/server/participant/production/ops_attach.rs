@@ -19,7 +19,8 @@ use liminal::durability::DurableStore;
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, AttachCommit, AttachFrontierCharges, AttachTransition,
     BindingSlotDecision, BindingState, CredentialAttachLiveReceipt, CredentialAttachLookupResult,
-    LiveFrontierOwner, PresentedIdentity, RetainedRecordCharge, SemanticConnectionCapacityDecision,
+    LiveFrontierOwner, PresentedIdentity, ReceiptDeadlines, RetainedRecordCharge,
+    SemanticConnectionCapacityDecision,
     apply_attach_frontier, commit_attach, decide_attached_operation, lookup_credential_attach,
     select_credential_attach_binding_slot,
 };
@@ -43,6 +44,7 @@ use super::ops_attach_capacity::AttachStage8;
 use super::ops_attach_finalizer::SelectedFencedFinalizer;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
 use super::ops_attach_verify::{AttachVerification, stored_attach_parameters, verify_attach_mode};
+use super::dispatch_impact::AttachedSourceRecord;
 use super::outbox_projection::capture_projection_prestate;
 use super::presented_refusal::PresentedRefusal;
 use super::state::{
@@ -140,31 +142,15 @@ impl ConversationAuthority {
                 retire,
             } => (reservation, retire),
         };
-        // The rotation result: the new binding epoch carries the successor of
-        // the verified current generation (the crate's ResultGeneration law).
-        let next_generation = request
-            .capability_generation
-            .get()
-            .checked_add(1)
-            .and_then(Generation::new)
-            .ok_or(StateError::AllocationExhausted {
-                domain: "capability generation",
-            })?;
         let (attached_order, attached_seq, attach_mode) =
             self.allocate_attach_mode(slot.binding, envelope)?;
-        let allocation = StoredAttachAllocation {
-            binding_epoch: BindingEpoch::new(
-                operation_facts.receiving_incarnation,
-                next_generation,
-            )
-            .into(),
-            attach_secret: facts::mint_secret_bytes()?,
+        let allocation = stored_attach_allocation(
+            request,
+            operation_facts,
+            &deadlines,
             attached_order,
             attached_seq,
-            receipt_expires_at: deadlines.receipt_expires_at().into(),
-            provenance_expires_at: deadlines.provenance_expires_at().into(),
-            admitted_now_ms: operation_facts.now_ms,
-        };
+        )?;
         let source_log_sequence = self.next_log_sequence;
         let source = attached_source(request, allocation, &attach_mode);
         let projection_facts = capture_projection_prestate(self, &source);
@@ -175,9 +161,16 @@ impl ConversationAuthority {
             store,
             CommitMode::Live(appender),
         )?;
-        self.record_produced_source(source_log_sequence, &source, projection_facts, impact)?;
-        self.record_binding_changed(request.participant_id, impact);
-        self.record_episode_changed(impact);
+        self.record_attached_source(
+            AttachedSourceRecord {
+                source_log_sequence,
+                source: &source,
+                projection_facts,
+                participant_id: request.participant_id,
+            },
+            appender,
+            impact,
+        )?;
         // The durable append succeeded: the stage-8 reservation becomes
         // permanent and the receipts this rotation retired early (the
         // superseded attach receipt and, on the first rotation, the ended
@@ -559,4 +552,36 @@ fn attached_source(
         mode: Box::new(mode.clone()),
         event: Vec::new(),
     }
+}
+
+/// Mints one committed attach allocation from the rotation's exact inputs.
+///
+/// The rotation result carries the successor of the verified current
+/// generation (the crate's `ResultGeneration` law), and both deadlines come from
+/// the receipt window this operation already decided — never from the request.
+fn stored_attach_allocation(
+    request: &CredentialAttachRequest,
+    operation_facts: &OperationFacts,
+    deadlines: &ReceiptDeadlines,
+    attached_order: u64,
+    attached_seq: u64,
+) -> Result<StoredAttachAllocation, StateError> {
+    let next_generation = request
+        .capability_generation
+        .get()
+        .checked_add(1)
+        .and_then(Generation::new)
+        .ok_or(StateError::AllocationExhausted {
+            domain: "capability generation",
+        })?;
+    Ok(StoredAttachAllocation {
+        binding_epoch: BindingEpoch::new(operation_facts.receiving_incarnation, next_generation)
+            .into(),
+        attach_secret: facts::mint_secret_bytes()?,
+        attached_order,
+        attached_seq,
+        receipt_expires_at: deadlines.receipt_expires_at().into(),
+        provenance_expires_at: deadlines.provenance_expires_at().into(),
+        admitted_now_ms: operation_facts.now_ms,
+    })
 }

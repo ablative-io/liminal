@@ -45,6 +45,7 @@ use crate::server::participant::{
 use super::ProductionParticipantHandler;
 use super::boot_drain::BootDrainVerdict;
 use super::handler::LogAppender;
+use super::outbox_log::OutboxLog;
 use super::log::{
     DecodedStoredOperation, OperationLog, OperationLogError, StoredOperation,
     StoredTerminalDisposition,
@@ -387,10 +388,13 @@ fn a_genesis_only_conversation_still_enrolls_as_ordinary_flow() -> Result<(), Bo
     {
         let writer = ProductionParticipantHandler::new(Arc::clone(&store), seal_config())?;
         let log = OperationLog::new(Arc::clone(&store), GENESIS_ONLY);
+        let outbox_log = OutboxLog::new(Arc::clone(&store), GENESIS_ONLY);
         let appender = LogAppender {
             log: &log,
             registry: &writer.registry,
             conversation_id: GENESIS_ONLY,
+            outbox_log: &outbox_log,
+            outstanding_extension_rows: std::cell::Cell::new(0),
         };
         let mut authority = ConversationAuthority::empty(GENESIS_ONLY);
         authority.ensure_genesis(&appender)?;

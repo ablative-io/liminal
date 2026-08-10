@@ -36,7 +36,7 @@ use super::observer_progress::{
     ObserverProgressSourceWitness, ObserverProgressWitnessState,
 };
 use super::outbox::{ConversationOutbox, ConversationOutboxError};
-use super::outbox_log::OutboxLogError;
+use super::outbox_log::{OutboxLog, OutboxLogError};
 use super::presented_refusal::PresentedRefusal;
 
 /// Exact committed credential-attach receipt with its own deadline pair.
@@ -377,6 +377,46 @@ pub(super) trait DurableAppend {
         operation: &StoredOperation,
         expected_sequence: u64,
     ) -> Result<(), OperationLogError>;
+
+    /// The Unit 2 extension log this appender can complete a source into.
+    ///
+    /// `Some` means a committed source may write its own extension row under
+    /// the conversation lock (board #60 §3c), which is what lets the commit
+    /// path skip the from-zero replay. `None` — the default every fixture
+    /// appender takes — leaves the from-zero replay as the writer, exactly as
+    /// before. The absent case is therefore slower and identical, never faster
+    /// and different: an appender that surrenders no extension log also
+    /// discharges no owed row, so its operation always carries debt and always
+    /// reconciles.
+    fn extension_log(&self) -> Option<&OutboxLog> {
+        None
+    }
+
+    /// Rows this operation has appended that owe a Unit 2 extension row and
+    /// have not been given one.
+    ///
+    /// A source may only complete in place when this reads exactly ONE — its
+    /// own. The extension stream is physically ordered and the replay's repair
+    /// branch can only append at confirmed EOF, so writing a row while an
+    /// EARLIER source in the same operation is still owed one would strand the
+    /// earlier row behind a later physical row and make the conversation
+    /// unloadable ("Unit 2 extension is missing a projection before a later
+    /// physical row"). When an operation mixes completing and non-completing
+    /// sources — a connection fate that also drains, say — the whole operation
+    /// defers to the from-zero replay, which writes them in base-log order.
+    fn owed_extension_rows(&self) -> u64 {
+        0
+    }
+
+    /// Reports that one owed Unit 2 extension row was just written in place.
+    ///
+    /// The owed count is taken at the APPEND seam — the only funnel every base
+    /// row passes through — because whether a row owes an extension row is a
+    /// property of the row, while whether it got one is a property of the call
+    /// site. Sources with no in-place completion (participant acks, Leave,
+    /// Died, connection-close Detached) never discharge, so their operations
+    /// keep the from-zero replay as their writer, unchanged by this lane.
+    fn discharge_owed_extension_row(&self) {}
 }
 
 impl ConversationAuthority {
@@ -466,10 +506,24 @@ impl ConversationAuthority {
     }
 
     /// Surrenders the complete validated source pass in merged replay order.
+    #[cfg(test)]
     pub(super) fn take_observer_progress_witnesses(
         &mut self,
     ) -> Vec<ObserverProgressSourceWitness> {
         self.observer_progress_witnesses.take()
+    }
+
+    /// Borrows the complete validated source pass in merged replay order.
+    ///
+    /// Board #60 §3c made this a BORROW rather than a drain. The reconcile
+    /// planner validates the durable observer prefix against the WHOLE source
+    /// history (`plan_observer_progress_reconcile` starts its running maximum
+    /// at zero and must reach the authority's own maximum), so the owner has
+    /// to keep its vector to answer the next commit without replaying the log
+    /// to rebuild it. Draining here is what forced every commit to be preceded
+    /// by a from-zero replay.
+    pub(super) fn observer_progress_witnesses(&self) -> &[ObserverProgressSourceWitness] {
+        self.observer_progress_witnesses.witnesses()
     }
 
     /// Takes the shell for a consuming protocol decision.

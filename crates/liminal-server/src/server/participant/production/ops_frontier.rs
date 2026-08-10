@@ -308,10 +308,8 @@ impl ConversationAuthority {
         self.record_produced_source(
             source_log_sequence,
             &source,
-            ReplayedProjectionFacts {
-                superseded_binding_epoch: None,
-                marker_delivery: Some(marker_delivery),
-            },
+            ReplayedProjectionFacts::marker(marker_delivery),
+            appender,
             impact,
         )?;
         if self
@@ -378,10 +376,8 @@ impl ConversationAuthority {
         self.record_produced_source(
             source_log_sequence,
             &source,
-            ReplayedProjectionFacts {
-                superseded_binding_epoch: None,
-                marker_delivery: None,
-            },
+            ReplayedProjectionFacts::none(),
+            appender,
             impact,
         )?;
         self.record_episode_changed(impact);

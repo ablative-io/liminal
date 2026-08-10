@@ -11,7 +11,7 @@ use liminal_protocol::wire::{
 use super::ProductionParticipantHandler;
 use super::tests::{dispatch, open_disk_store_for_tests, test_participant_config};
 
-fn authority_snapshot(
+pub(super) fn authority_snapshot(
     handler: &ProductionParticipantHandler,
     conversation_id: u64,
 ) -> Result<String, Box<dyn Error>> {

@@ -21,6 +21,24 @@ pub(super) struct ReplayedProjectionFacts {
     pub(super) marker_delivery: Option<ParticipantDelivery>,
 }
 
+impl ReplayedProjectionFacts {
+    /// The empty fact set: a source whose projection needs no replay prestate.
+    pub(super) const fn none() -> Self {
+        Self {
+            superseded_binding_epoch: None,
+            marker_delivery: None,
+        }
+    }
+
+    /// The one fact a marker drain's projection needs.
+    pub(super) const fn marker(delivery: ParticipantDelivery) -> Self {
+        Self {
+            superseded_binding_epoch: None,
+            marker_delivery: Some(delivery),
+        }
+    }
+}
+
 /// Captures the prior binding required by a superseding attach projection.
 pub(super) fn capture_projection_prestate(
     authority: &ConversationAuthority,
@@ -43,6 +61,52 @@ pub(super) fn capture_projection_prestate(
     ReplayedProjectionFacts {
         superseded_binding_epoch,
         marker_delivery: None,
+    }
+}
+
+/// Whether one durable base row OWES a Unit 2 extension row.
+///
+/// Board #60 §3c. The commit path may only skip its from-zero replay once
+/// every row the operation appended has written its own extension row, and
+/// that question has to be answerable BEFORE the poststate exists — at the
+/// append seam, from the row alone. So this is the syntactic half of
+/// [`project_committed_source`]: arm for arm, `true` exactly where that
+/// function returns `Some`, and it takes no authority.
+///
+/// The two are pinned against each other on real durable bytes by
+/// `tests_p0_64_live_extension::owed_rows_match_written_rows`, which both pins
+/// in that module run after every committed request: a row that owes an
+/// extension row must have exactly one carrying its own base sequence, and a
+/// row that owes none must have none. A predicate that drifted from the
+/// projection would either strand a projection with no writer (the replay
+/// retired, the row never appended) or wedge the fast path off forever, and
+/// only a mechanical comparison sees either.
+pub(super) const fn owes_extension_row(operation: &StoredOperation) -> bool {
+    match operation {
+        StoredOperation::Genesis { .. }
+        | StoredOperation::Ordinary { .. }
+        | StoredOperation::Recovered { .. } => false,
+        StoredOperation::Enrolled { .. }
+        | StoredOperation::Attached { .. }
+        | StoredOperation::ZeroDebtAck { .. }
+        | StoredOperation::NonzeroDebtAck { .. }
+        | StoredOperation::MarkerDrained { .. }
+        | StoredOperation::RecordAdmission { .. } => true,
+        StoredOperation::Detached { row } => matches!(
+            (&row.disposition, &row.source),
+            (
+                StoredTerminalDisposition::Committed { .. },
+                StoredDetachedSource::ExplicitRequestCommitted { .. }
+                    | StoredDetachedSource::ConnectionClose { .. },
+            )
+        ),
+        StoredOperation::Left { row } => !matches!(
+            row.finalizer_presentation,
+            StoredFinalizerPresentation::ConsumeRecoveredReservation { .. }
+        ),
+        StoredOperation::Died { row } => {
+            matches!(row.disposition, StoredTerminalDisposition::Committed { .. })
+        }
     }
 }
 
