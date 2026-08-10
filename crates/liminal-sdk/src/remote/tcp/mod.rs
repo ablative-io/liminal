@@ -33,6 +33,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::time::Duration;
 use std::net::TcpStream;
 
 use liminal::protocol::{
@@ -147,6 +148,21 @@ impl ParticipantRemoteTransport for TcpRemoteTransport {
             frame,
             provenance: slot.provenance,
         })
+    }
+
+    fn receive_participant_within(
+        &self,
+        _server_address: &ServerAddress,
+        budget: Duration,
+    ) -> Result<Option<ParticipantTransportFrame>, SdkError> {
+        let mut slot = self.connection.lock();
+        let Some(frame) = slot.connection.receive_participant_within(budget)? else {
+            return Ok(None);
+        };
+        Ok(Some(ParticipantTransportFrame {
+            frame,
+            provenance: slot.provenance,
+        }))
     }
 
     fn reconnect_participant(

@@ -16,6 +16,7 @@ pub use recovery::{
 
 use alloc::sync::Arc;
 use core::fmt;
+use core::time::Duration;
 
 use liminal_protocol::client::{
     ClientCorrelatedInboundDecision, ClientInboundDecision, ClientInboundRefusalReason,
@@ -204,6 +205,16 @@ pub enum RemoteParticipantSendOutcome {
         reconnect: RemoteReconnectPermitOutcome,
     },
 }
+
+/// Default quiet window for [`RemoteParticipantHandle::try_receive`].
+///
+/// Deliberately ONE steady-state transport receive window rather than a new
+/// number of its own: that is the grain both transports already poll on, and it
+/// is the shape consumers' drain loops were written against before a total
+/// response deadline was layered above it. A pump that reports quiet after one
+/// closed window is the behaviour they expect; the deadline above it is the
+/// reply-owed protection they were never asking for.
+pub const PARTICIPANT_PUMP_WINDOW: Duration = super::framing::IO_TIMEOUT;
 
 /// Typed result of one decoded participant frame on the real receive path.
 #[derive(Debug)]
@@ -430,6 +441,30 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
 
     /// Receives one real participant frame and delegates every `ServerValue` to the crate.
     ///
+    /// # The contract, and why it is this one
+    ///
+    /// THIS IS THE REPLY-OWED DOOR. It blocks for up to the transport's full
+    /// response deadline (60 s), because the caller it is written for has just
+    /// sent a request and is waiting for the correlated answer — and there, a
+    /// quiet connection means a slow server, not a dead one. Ending that wait
+    /// early is the 2026-08-10 outage's client-side mechanism, so this method
+    /// keeps the deadline unchanged and unconditionally.
+    ///
+    /// A consumer PUMPING an idle connection — looping to collect whatever the
+    /// server pushes next, where silence is a normal state rather than a fault
+    /// — must use [`receive_within`](Self::receive_within) or
+    /// [`try_receive`](Self::try_receive) instead. That is not a preference: a
+    /// drain loop built on this method waits out the full deadline on every
+    /// quiet read, which is how a 30 s boot gate blows on a healthy server.
+    ///
+    /// The split is by CALLER INTENT and cannot be anything else. At a clean
+    /// frame boundary with an empty buffer, a pump read and an outage-shaped
+    /// reply-owed read are byte-for-byte identical states; only the caller
+    /// knows which one it is making, so only the caller's choice of method can
+    /// carry it. Inferring it from buffered bytes, or from whether an operation
+    /// is outstanding, would silently shorten the deadline for some class of
+    /// genuinely reply-owed read and re-open the outage for it.
+    ///
     /// Pushed deliveries are at-least-once: the same
     /// `(conversation_id, delivery_seq)` may arrive more than once on one
     /// healthy connection, byte-identical each time — deduplicate on the pair
@@ -439,10 +474,77 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
     ///
     /// Returns transport, direction, LPCR encoding, or storage failures.
     pub fn receive(&self) -> Result<RemoteParticipantInbound, RemoteParticipantError> {
-        let ParticipantTransportFrame { frame, provenance } = self
+        let frame = self
             .transport
             .receive_participant(&self.server_address)
             .map_err(RemoteParticipantError::Transport)?;
+        self.classify_inbound(frame)
+    }
+
+    /// Receives one participant frame if one arrives within `budget`, reporting
+    /// a quiet connection as `Ok(None)` instead of an error.
+    ///
+    /// THE PUMP DOOR — the lawful read for a consumer that is owed nothing.
+    /// `Ok(None)` means "no frame within this window", which is a normal state
+    /// on a healthy connection and never a fault; a real transport failure
+    /// still returns `Err`, and a quiet window never surfaces a raw errno.
+    ///
+    /// `budget` is the CALLER'S bound and is spent across as many transport
+    /// read windows as it takes. It never shortens anything else: a caller that
+    /// uses this method to await a correlated answer simply names its own
+    /// deadline, and passing one at or above the transport's 60 s response
+    /// deadline reproduces [`receive`](Self::receive)'s patience with a typed
+    /// silence at the end instead of an error.
+    ///
+    /// `Duration::ZERO` polls only what has already decoded, without arming a
+    /// read. Bytes of a partly-arrived frame stay buffered across an
+    /// `Ok(None)`, so a frame that was mid-flight when the budget expired is
+    /// never lost — the next call resumes on it.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, direction, LPCR encoding, or storage failures. A
+    /// quiet window is NOT one of them.
+    pub fn receive_within(
+        &self,
+        budget: Duration,
+    ) -> Result<Option<RemoteParticipantInbound>, RemoteParticipantError> {
+        let Some(frame) = self
+            .transport
+            .receive_participant_within(&self.server_address, budget)
+            .map_err(RemoteParticipantError::Transport)?
+        else {
+            return Ok(None);
+        };
+        self.classify_inbound(frame).map(Some)
+    }
+
+    /// One [`PARTICIPANT_PUMP_WINDOW`] of patience, then `Ok(None)`.
+    ///
+    /// The drain-loop convenience over [`receive_within`](Self::receive_within):
+    /// a consumer that wants "give me the next frame, or tell me the connection
+    /// is quiet" without choosing a number. Loop it until it answers `Ok(None)`
+    /// and the backlog is drained.
+    ///
+    /// # Errors
+    ///
+    /// As [`receive_within`](Self::receive_within).
+    pub fn try_receive(&self) -> Result<Option<RemoteParticipantInbound>, RemoteParticipantError> {
+        self.receive_within(PARTICIPANT_PUMP_WINDOW)
+    }
+
+    /// Routes one decoded transport frame into the crate's inbound decisions.
+    ///
+    /// Shared by [`receive`](Self::receive) and
+    /// [`receive_within`](Self::receive_within) so the two doors differ ONLY in
+    /// how long they wait for a frame. Every correlation, application, and
+    /// refusal rule below is reached identically by both — a pump read that
+    /// does find a frame applies it exactly as a reply-owed read would.
+    fn classify_inbound(
+        &self,
+        frame: ParticipantTransportFrame,
+    ) -> Result<RemoteParticipantInbound, RemoteParticipantError> {
+        let ParticipantTransportFrame { frame, provenance } = frame;
         match frame {
             ParticipantFrame::ServerPush(value) => {
                 Ok(RemoteParticipantInbound::Push { value, provenance })

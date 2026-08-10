@@ -31,12 +31,13 @@ pub use handles::{
     SdkConversationHandle,
 };
 pub use participant::{
-    ParticipantResponseProvenance, ParticipantResumeStore, RemoteDetachReplayOutcome,
-    RemoteExpectedOperationRecovery, RemoteLostOperationResolution, RemoteLostReconnectResolution,
-    RemoteOperationRecordOutcome, RemoteOperationTransportFate, RemoteParticipantError,
-    RemoteParticipantInbound, RemoteParticipantOperation, RemoteParticipantSendOutcome,
-    RemoteReconnectAttemptOutcome, RemoteReconnectPermit, RemoteReconnectPermitOutcome,
-    RemoteReconnectPermitRecovery, RemoteReplayApplyOutcome, RemoteTransportLossOutcome,
+    PARTICIPANT_PUMP_WINDOW, ParticipantResponseProvenance, ParticipantResumeStore,
+    RemoteDetachReplayOutcome, RemoteExpectedOperationRecovery, RemoteLostOperationResolution,
+    RemoteLostReconnectResolution, RemoteOperationRecordOutcome, RemoteOperationTransportFate,
+    RemoteParticipantError, RemoteParticipantInbound, RemoteParticipantOperation,
+    RemoteParticipantSendOutcome, RemoteReconnectAttemptOutcome, RemoteReconnectPermit,
+    RemoteReconnectPermitOutcome, RemoteReconnectPermitRecovery, RemoteReplayApplyOutcome,
+    RemoteTransportLossOutcome,
 };
 
 #[cfg(test)]

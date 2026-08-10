@@ -114,6 +114,7 @@ mod transport {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
     use core::fmt;
+    use core::time::Duration;
 
     use liminal::protocol::{
         CausalContext, Frame, MessageEnvelope, PUBLISH_DELIVERED_FLAG,
@@ -236,6 +237,19 @@ mod transport {
         ) -> Result<ParticipantTransportFrame, SdkError> {
             let (frame, provenance) = self.connection.lock().receive_participant()?;
             Ok(ParticipantTransportFrame { frame, provenance })
+        }
+
+        fn receive_participant_within(
+            &self,
+            _server_address: &ServerAddress,
+            budget: Duration,
+        ) -> Result<Option<ParticipantTransportFrame>, SdkError> {
+            let Some((frame, provenance)) =
+                self.connection.lock().receive_participant_within(budget)?
+            else {
+                return Ok(None);
+            };
+            Ok(Some(ParticipantTransportFrame { frame, provenance }))
         }
 
         fn reconnect_participant(
