@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running unittests src/lib.rs (target/debug/deps/liminal-74af4cd07912af3f)
+
+running 2 tests
+test durability::store::paged_read_shape_tests::a_bounded_read_never_scans_beyond_its_page ... FAILED
+test durability::store::paged_read_shape_tests::page_size_never_changes_the_answer ... ok
+
+failures:
+
+---- durability::store::paged_read_shape_tests::a_bounded_read_never_scans_beyond_its_page stdout ----
+
+thread 'durability::store::paged_read_shape_tests::a_bounded_read_never_scans_beyond_its_page' (101321897) panicked at crates/liminal/src/durability/store.rs:1188:9:
+assertion `left == right` failed: a full stream read must scan each row exactly once instead of re-scanning every suffix once per page
+  left: 640
+ right: 256
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    durability::store::paged_read_shape_tests::a_bounded_read_never_scans_beyond_its_page
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 344 filtered out; finished in 19.33s
+
+error: test failed, to rerun pass `-p liminal-rs --lib`
+TRUE EXIT=101

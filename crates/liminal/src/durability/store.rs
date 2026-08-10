@@ -127,6 +127,7 @@ impl DurableStore for HaematiteStore {
             .event_store
             .read_from(stream_key.as_bytes(), offset)
             .map_err(DurabilityError::from)?;
+        account_engine_read(events.len(), true);
         events.truncate(limit);
         Ok(events.into_iter().map(StoredEntry::from).collect())
     }
@@ -493,6 +494,95 @@ fn open_ephemeral_in(
     .map_err(|error| DurabilityError::EphemeralStoreOpen(error.to_string()))?;
     Ok(EphemeralHaematiteStore::new(database, ephemeral_dir))
 }
+
+/// Engine-read accounting for the paged-read shape (#60).
+///
+/// Counts what the ENGINE handed back, which is the quantity the page limit is
+/// supposed to bound. A `DurableStore` decorator cannot see it: by the time a
+/// wrapper observes the result it has already been cut to `limit`, so the
+/// difference between "read one page" and "read the whole suffix and throw it
+/// away" is invisible from outside this type.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EngineReadAccounting {
+    /// `read_from` calls made while the guard was live.
+    pub(crate) calls: usize,
+    /// Entries the engine returned, summed before any truncation to `limit`.
+    pub(crate) engine_entries: usize,
+    /// Calls that fell through to the unbounded engine read.
+    pub(crate) unbounded_calls: usize,
+    /// Set when a counter would have wrapped; a saturated count is never a pin.
+    pub(crate) counter_overflow_observed: bool,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ENGINE_READ_ACCOUNTING: std::cell::RefCell<Option<EngineReadAccounting>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Scopes engine-read accounting to one thread and one measured region.
+///
+/// `!Send` so accounting cannot straddle a thread boundary and report a sum
+/// whose addends came from different call stacks.
+#[cfg(test)]
+pub(crate) struct EngineReadAccountingGuard {
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(test)]
+impl EngineReadAccountingGuard {
+    pub(crate) fn start() -> Self {
+        ENGINE_READ_ACCOUNTING.with(|accounting| {
+            *accounting.borrow_mut() = Some(EngineReadAccounting::default());
+        });
+        Self {
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> EngineReadAccounting {
+        ENGINE_READ_ACCOUNTING
+            .with(|accounting| accounting.borrow().as_ref().copied().unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+impl Drop for EngineReadAccountingGuard {
+    fn drop(&mut self) {
+        ENGINE_READ_ACCOUNTING.with(|accounting| {
+            *accounting.borrow_mut() = None;
+        });
+    }
+}
+
+/// Records one engine read. A no-op when no guard is live.
+#[cfg(test)]
+fn account_engine_read(engine_entries: usize, unbounded: bool) {
+    ENGINE_READ_ACCOUNTING.with(|accounting| {
+        if let Some(active) = accounting.borrow_mut().as_mut() {
+            match (
+                active.calls.checked_add(1),
+                active.engine_entries.checked_add(engine_entries),
+            ) {
+                (Some(calls), Some(entries)) => {
+                    active.calls = calls;
+                    active.engine_entries = entries;
+                }
+                _ => active.counter_overflow_observed = true,
+            }
+            if unbounded {
+                match active.unbounded_calls.checked_add(1) {
+                    Some(unbounded_calls) => active.unbounded_calls = unbounded_calls,
+                    None => active.counter_overflow_observed = true,
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(test))]
+const fn account_engine_read(_engine_entries: usize, _unbounded: bool) {}
 
 impl From<Event> for StoredEntry {
     fn from(event: Event) -> Self {
@@ -1018,5 +1108,169 @@ mod ephemeral_lifecycle_tests {
             "the leak log names the leaked directory; captured: {logged:?}"
         );
         std::fs::remove_dir_all(&path).expect("test cleans up the deliberately leaked directory");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod paged_read_shape_tests {
+    //! Board #60. The page limit must be honoured by the ENGINE, not by a
+    //! truncation applied after the engine has already materialised the suffix.
+    //!
+    //! These pins are counts, never durations: the defect is a read shape, and
+    //! a shape is deterministic where a latency is not.
+
+    use super::{DurableStore, EngineReadAccountingGuard, open_ephemeral};
+    use crate::durability::bridge::block_on;
+
+    /// Page size used by both production replay readers (`READ_BATCH_SIZE` and
+    /// `UNIT2_OUTBOX_RESTORE_BATCH_ROWS` are both 64).
+    const PAGE: usize = 64;
+    /// Four pages. Enough that the quadratic and the linear shape differ by
+    /// more than a factor of two, small enough that seeding stays cheap.
+    const ROWS: u64 = 256;
+    const STREAM: &str = "liminal/p0-60/paged-read-shape";
+
+    /// Seeds `ROWS` events into one stream.
+    fn seeded() -> Result<impl DurableStore, Box<dyn std::error::Error>> {
+        let store = open_ephemeral(1)?;
+        for sequence in 0..ROWS {
+            block_on(store.append(STREAM, sequence.to_be_bytes().to_vec(), sequence))??;
+        }
+        block_on(store.flush())??;
+        Ok(store)
+    }
+
+    /// Walks the whole stream one page at a time, exactly as replay does.
+    fn read_whole_stream(
+        store: &impl DurableStore,
+        page: usize,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut offset = 0_u64;
+        let mut seen = 0_usize;
+        loop {
+            let entries = block_on(store.read_from(STREAM, offset, page))??;
+            if entries.is_empty() {
+                return Ok(seen);
+            }
+            for entry in &entries {
+                assert_eq!(entry.sequence, offset, "paged read must stay contiguous");
+                offset += 1;
+            }
+            seen = seen
+                .checked_add(entries.len())
+                .ok_or("row counter overflowed")?;
+        }
+    }
+
+    /// Every read below is bounded by its `limit`, so no read costs more than
+    /// the rows it returns. One seeded store carries all four shapes.
+    #[test]
+    fn a_bounded_read_never_scans_beyond_its_page() -> Result<(), Box<dyn std::error::Error>> {
+        let store = seeded()?;
+
+        // 1. The whole stream, paged. O(N), not O(N^2).
+        let accounting = EngineReadAccountingGuard::start();
+        let seen = read_whole_stream(&store, PAGE)?;
+        let walk = accounting.snapshot();
+        drop(accounting);
+        assert_eq!(seen, ROWS as usize, "the walk must deliver every row");
+        assert!(
+            !walk.counter_overflow_observed,
+            "a saturated counter is not a measurement"
+        );
+        assert!(walk.calls > 0, "the walk must have reached the store");
+        assert_eq!(
+            walk.engine_entries, ROWS as usize,
+            "a full stream read must scan each row exactly once instead of \
+             re-scanning every suffix once per page"
+        );
+
+        // 2. One page from the head.
+        let accounting = EngineReadAccountingGuard::start();
+        let head = block_on(store.read_from(STREAM, 0, PAGE))??;
+        let head_read = accounting.snapshot();
+        drop(accounting);
+        assert_eq!(head.len(), PAGE, "a full page returns its limit");
+        assert_eq!(
+            head_read.engine_entries, PAGE,
+            "the engine must be asked for one page, not for the whole stream"
+        );
+
+        // 3. One page from the MIDDLE. The rows after the page are the ones a
+        //    suffix-scanning read would drag along; the rows before it are the
+        //    ones the offset already excludes, so only a bounded upper edge can
+        //    make this count come out at PAGE.
+        let middle_offset = ROWS / 2;
+        let accounting = EngineReadAccountingGuard::start();
+        let middle = block_on(store.read_from(STREAM, middle_offset, PAGE))??;
+        let middle_read = accounting.snapshot();
+        drop(accounting);
+        assert_eq!(
+            middle.len(),
+            PAGE,
+            "a full page mid-stream returns its limit"
+        );
+        assert_eq!(
+            middle_read.engine_entries, PAGE,
+            "a mid-stream page must not scan the rows that follow it"
+        );
+
+        // 4. Past the head: end of stream, and no scan.
+        let accounting = EngineReadAccountingGuard::start();
+        let past = block_on(store.read_from(STREAM, ROWS, PAGE))??;
+        let past_read = accounting.snapshot();
+        drop(accounting);
+        assert!(past.is_empty(), "past the head is end of stream");
+        assert_eq!(
+            past_read.engine_entries, 0,
+            "an end-of-stream page must not scan the stream"
+        );
+        Ok(())
+    }
+
+    /// The equivalence the pushdown must preserve. This passes before and after
+    /// the fix by design: it is the control that says the fix changed the read
+    /// SHAPE and nothing else.
+    #[test]
+    fn page_size_never_changes_the_answer() -> Result<(), Box<dyn std::error::Error>> {
+        let store = seeded()?;
+        let whole = block_on(store.read_from(STREAM, 0, usize::MAX))??;
+        assert_eq!(whole.len(), ROWS as usize);
+
+        for page in [1_usize, 7, 64, 255, 256, 257] {
+            let mut offset = 0_u64;
+            let mut collected = Vec::new();
+            loop {
+                let entries = block_on(store.read_from(STREAM, offset, page))??;
+                if entries.is_empty() {
+                    break;
+                }
+                assert!(entries.len() <= page, "a page never exceeds its limit");
+                offset = offset
+                    .checked_add(u64::try_from(entries.len())?)
+                    .ok_or("offset overflowed")?;
+                collected.extend(entries);
+            }
+            assert_eq!(collected, whole, "page size {page} changed the answer");
+        }
+
+        // A zero limit is the one page size that must return nothing, and it
+        // must not be answered by a bounded window that silently agrees.
+        assert!(
+            block_on(store.read_from(STREAM, 0, 0))??.is_empty(),
+            "a zero limit reads nothing"
+        );
+
+        // Every suffix start agrees with the same suffix of the whole read.
+        for offset in [0_u64, 1, 63, 64, 65, 128, 255] {
+            let suffix = block_on(store.read_from(STREAM, offset, usize::MAX))??;
+            assert_eq!(
+                suffix,
+                whole[usize::try_from(offset)?..],
+                "suffix from {offset} diverged"
+            );
+        }
+        Ok(())
     }
 }
