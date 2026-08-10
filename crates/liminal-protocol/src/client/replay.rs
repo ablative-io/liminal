@@ -49,9 +49,11 @@ pub enum DetachReplayTerminal {
 /// Only the settlement path constructs this, and only from a value the crate
 /// has already correlated to the retained detach, so the pairing cannot be
 /// forged through the public API. Restore re-checks it anyway.
+/// The value is boxed so this terminal does not widen every `DetachReplayStatus`
+/// to the size of the largest server value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetachAuthorityRefused {
-    pub(super) value: ServerValue,
+    pub(super) value: alloc::boxed::Box<ServerValue>,
 }
 
 impl DetachAuthorityRefused {
@@ -181,6 +183,59 @@ impl SdkDetachReplayAggregate {
         } else {
             false
         }
+    }
+
+    /// Settles a replay the correlated response left active, retaining the
+    /// exact value that refused it.
+    ///
+    /// `expected` names the detach whose slot is being retired in this same
+    /// statement. Only the replay holding that same detach may be settled: a
+    /// replay retaining some other detach was already decoupled before this
+    /// response arrived, and quietly terminalizing it here would launder
+    /// exactly the fault this path exists to prevent.
+    ///
+    /// Returns whether it settled anything, so the caller can assert the
+    /// post-condition rather than assume it.
+    pub(super) fn settle_refused_authority(
+        &mut self,
+        expected: &DetachEnvelope,
+        value: &ServerValue,
+    ) -> bool {
+        let DetachReplayState::Recorded { request, status } = &mut self.state else {
+            return false;
+        };
+        if !matches!(
+            status,
+            DetachReplayStatus::Parked | DetachReplayStatus::InFlight
+        ) {
+            return false;
+        }
+        if request.conversation_id != expected.conversation_id
+            || request.participant_id != expected.participant_id
+            || request.capability_generation != expected.capability_generation
+            || request.detach_attempt_token != expected.detach_attempt_token
+        {
+            return false;
+        }
+        *status = DetachReplayStatus::Terminal(DetachReplayTerminal::AuthorityRefused(
+            DetachAuthorityRefused {
+                value: alloc::boxed::Box::new(value.clone()),
+            },
+        ));
+        true
+    }
+
+    /// Whether the replay still expects a transport attempt or an answer.
+    ///
+    /// Used to assert the settlement's post-condition rather than assume it.
+    pub(super) const fn is_active(&self) -> bool {
+        matches!(
+            self.state,
+            DetachReplayState::Recorded {
+                status: DetachReplayStatus::Parked | DetachReplayStatus::InFlight,
+                ..
+            }
+        )
     }
 
     pub(super) fn apply_detach_committed(&mut self, value: &DetachCommitted) -> bool {

@@ -120,6 +120,18 @@ fn coupled_in_flight_detach() -> TestResult<ClientParticipantAggregate> {
     Ok(aggregate)
 }
 
+/// The exact value the replay retained as its refusal, if that is how it
+/// settled. `None` for every other status, so a wrong terminal fails loudly
+/// rather than silently skipping the comparison.
+fn retained_refusal(aggregate: &ClientParticipantAggregate) -> Option<&ServerValue> {
+    match aggregate.detach_replay.status() {
+        Some(DetachReplayStatus::Terminal(DetachReplayTerminal::AuthorityRefused(refused))) => {
+            Some(refused.value())
+        }
+        _ => None,
+    }
+}
+
 fn deliver(value: ServerValue) -> TestResult<ClientParticipantAggregate> {
     let correlation = ClientResponseCorrelation { authorization: 1 };
     let ClientCorrelatedInboundDecision::Applied(applied) =
@@ -149,11 +161,13 @@ fn every_correlated_refusal_settles_the_replay_and_stays_persistable() -> TestRe
             ),
             "#59 REPRODUCED: {name} cleared the expected detach and left the replay active"
         );
-        let Ok(record) = aggregate.resume_record() else {
-            panic!("#59 REPRODUCED: {name} minted an aggregate that refuses to encode");
-        };
+        let record = aggregate.resume_record();
         assert!(
-            record.restore().is_ok(),
+            record.is_ok(),
+            "#59 REPRODUCED: {name} minted an aggregate that refuses to encode"
+        );
+        assert!(
+            record.is_ok_and(|record| record.restore().is_ok()),
             "#59 REPRODUCED: {name} minted a record that no restore accepts"
         );
     }
@@ -171,30 +185,21 @@ fn every_correlated_refusal_settles_the_replay_and_stays_persistable() -> TestRe
 fn the_settled_terminal_retains_the_exact_refusing_value() -> TestResult {
     for (name, value) in correlated_refusals_of_the_replayed_detach()? {
         let aggregate = deliver(value.clone())?;
-        let Some(DetachReplayStatus::Terminal(DetachReplayTerminal::AuthorityRefused(refused))) =
-            aggregate.detach_replay.status()
-        else {
-            panic!("#59 REPRODUCED: {name} did not settle into a typed authority refusal");
-        };
         assert_eq!(
-            refused.value(),
-            &value,
-            "{name}: the retained refusal must be the exact value, not a projection"
+            retained_refusal(&aggregate),
+            Some(&value),
+            "#59 REPRODUCED: {name} did not settle into a typed authority refusal \
+             retaining the exact value"
         );
         let restored = aggregate
             .resume_record()
             .map_err(|_| "a settled replay must encode")?
             .restore()
             .map_err(|_| "a settled replay must restore")?;
-        let Some(DetachReplayStatus::Terminal(DetachReplayTerminal::AuthorityRefused(refused))) =
-            restored.detach_replay.status()
-        else {
-            panic!("{name}: the typed refusal must survive the canonical round trip");
-        };
         assert_eq!(
-            refused.value(),
-            &value,
-            "{name}: the round trip must not project the retained refusal"
+            retained_refusal(&restored),
+            Some(&value),
+            "{name}: the typed refusal must survive the canonical round trip unprojected"
         );
     }
     Ok(())
@@ -213,7 +218,7 @@ fn an_answered_detach_keeps_its_own_terminal() -> TestResult {
         super::gen_skip_supersession_tests::epoch(REPLAY_GENERATION)?,
         13,
     );
-    let aggregate = deliver(ServerValue::DetachCommitted(committed.clone()))?;
+    let aggregate = deliver(ServerValue::DetachCommitted(committed))?;
     assert!(matches!(
         aggregate.detach_replay.status(),
         Some(DetachReplayStatus::Terminal(

@@ -286,7 +286,7 @@ fn a_refused_detach_authority_checkpoints_and_restores_steerable() -> TestResult
         })?;
     assert!(
         matches!(
-            reborn.record_operation(stale_reattach())?,
+            reborn.record_operation(stale_reattach()?)?,
             super::RemoteOperationRecordOutcome::Refused {
                 reason: ClientOperationRecordRefusalReason::BindingMismatch,
                 ..
@@ -299,15 +299,15 @@ fn a_refused_detach_authority_checkpoints_and_restores_steerable() -> TestResult
 
 /// The consumer's fresh-state probe: re-attach at the generation the broker
 /// disclosed, which the local binding has no credential for.
-fn stale_reattach() -> ClientRequest {
-    ClientRequest::CredentialAttach(CredentialAttachRequest {
+fn stale_reattach() -> Result<ClientRequest, io::Error> {
+    Ok(ClientRequest::CredentialAttach(CredentialAttachRequest {
         conversation_id: CONVERSATION,
         participant_id: PARTICIPANT,
-        capability_generation: generation(2).expect("generation two is nonzero"),
+        capability_generation: generation(2)?,
         attach_secret: AttachSecret::new([2; 32]),
         attach_attempt_token: AttachAttemptToken::new([11; 16]),
         accept_marker_delivery_seq: None,
-    })
+    }))
 }
 
 /// Builds the real torn state: a node whose durable resume record is ahead of

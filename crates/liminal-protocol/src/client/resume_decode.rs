@@ -216,9 +216,9 @@ fn decode_terminal(
                 source: None,
             });
         }
-        (8, value) => {
-            DetachReplayTerminal::AuthorityRefused(super::DetachAuthorityRefused { value })
-        }
+        (8, value) => DetachReplayTerminal::AuthorityRefused(super::DetachAuthorityRefused {
+            value: alloc::boxed::Box::new(value),
+        }),
         _ => {
             return Err(ClientResumeRecordDecodeError::NestedCodec {
                 section: ClientResumeRecordSection::DetachReplay,
