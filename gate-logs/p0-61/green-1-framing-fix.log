@@ -1,0 +1,13 @@
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.71s
+     Running unittests src/lib.rs (target/debug/deps/liminal_sdk-141d97a61593d9b6)
+
+running 4 tests
+test remote::framing::tests::the_response_deadline_outlives_a_single_receive_window ... ok
+test remote::framing::tests::a_closed_receive_window_is_a_wait_not_a_lost_connection ... ok
+test remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno ... ok
+test remote::framing::tests::a_real_socket_survives_a_reply_slower_than_its_receive_window ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 11.01s
+
+TRUE_EXIT=0

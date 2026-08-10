@@ -1,5 +1,6 @@
 use super::*;
 use std::net::TcpListener;
+use std::time::Instant;
 
 /// `EAGAIN` as this platform numbers it — 35 on macOS and the BSDs, 11 on Linux.
 /// A socket carrying `SO_RCVTIMEO` reports a closed window with it, and
@@ -39,6 +40,15 @@ impl StallingStream {
             stalls,
             ready,
             endless: false,
+        }
+    }
+
+    /// A stream whose window closes forever: the peer that never answers.
+    const fn silent() -> Self {
+        Self {
+            stalls: 0,
+            ready: Vec::new(),
+            endless: true,
         }
     }
 }
@@ -211,4 +221,59 @@ fn a_real_socket_survives_a_reply_slower_than_its_receive_window() -> Result<(),
     drop(connection);
     server.join().ok();
     Ok(())
+}
+
+/// RED PIN (p0-61, direction (c)) — the bound, and what it is allowed to say.
+///
+/// Absorbing a closed window must not trade a fatal error for an unbounded
+/// hang: a peer that never answers still ends the wait, and the error names the
+/// timeout and how long it waited. It must never surface the raw
+/// `EAGAIN`/`Resource temporarily unavailable` text, which reads as a broken
+/// socket and sent the outage's diagnosis in the wrong direction.
+#[test]
+fn an_expired_response_deadline_names_the_timeout_and_never_the_errno() {
+    const BUDGET: Duration = Duration::from_millis(120);
+
+    let mut connection = Connection {
+        stream: StallingStream::silent(),
+        buffer: Vec::new(),
+        open_conversations: BTreeSet::new(),
+    };
+
+    let started = Instant::now();
+    let error = connection
+        .receive_within(BUDGET)
+        .expect_err("a silent peer must not be waited on forever");
+    let waited = started.elapsed();
+
+    assert!(
+        waited >= BUDGET,
+        "the deadline ended the wait early: waited {waited:?} against a {BUDGET:?} budget"
+    );
+    let SdkError::Connection { description } = &error else {
+        panic!("expected a Connection error naming the timeout, received {error:?}");
+    };
+    assert!(
+        description.contains("timed out") && description.contains("waiting for a server response"),
+        "the deadline error does not name a timeout: {description}"
+    );
+    assert!(
+        !description.contains("os error")
+            && !description
+                .to_lowercase()
+                .contains("temporarily unavailable"),
+        "the deadline error leaked the raw receive-window errno: {description}"
+    );
+}
+
+/// The response deadline is a chosen bound, not the socket's receive window: the
+/// two must not be the same number, or absorbing a closed window would buy
+/// nothing. Pins the ordering the fix rests on rather than the literal value.
+#[test]
+fn the_response_deadline_outlives_a_single_receive_window() {
+    assert!(
+        RESPONSE_DEADLINE > IO_TIMEOUT,
+        "the response deadline ({RESPONSE_DEADLINE:?}) must span more than one \
+         receive window ({IO_TIMEOUT:?})"
+    );
 }

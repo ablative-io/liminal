@@ -1,0 +1,20 @@
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.44s
+     Running unittests src/lib.rs (target/debug/deps/liminal_sdk-141d97a61593d9b6)
+
+running 1 test
+
+thread 'remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno' (100436640) panicked at crates/liminal-sdk/src/remote/framing_tests.rs:249:5:
+the deadline ended the wait early: waited 24.474541ms against a 120ms budget
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno ... FAILED
+
+failures:
+
+failures:
+    remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p liminal-sdk --lib`
+TRUE_EXIT=101

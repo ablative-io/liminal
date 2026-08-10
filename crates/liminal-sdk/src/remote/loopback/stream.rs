@@ -49,7 +49,7 @@ impl FrameStream for LoopbackStream {
     ///
     /// The duplex answers a closed window with `TimedOut` and the socket
     /// answers it with `WouldBlock` or `TimedOut` depending on the platform.
-    /// The framing layer's `fill_buffer_nonfatal` already treats those two
+    /// The framing layer's `fill_buffer_once` already treats those two
     /// kinds identically — it has to, because the socket itself is not
     /// consistent about which it gives — so `TimedOut` lands on the same arm a
     /// silent socket lands on. `Ok(0)` is end of file on both.
