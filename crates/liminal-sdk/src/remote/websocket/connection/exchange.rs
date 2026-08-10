@@ -228,6 +228,50 @@ pub(super) fn receive_participant_frame(link: &mut WsLink) -> Result<Frame, Exch
     }
 }
 
+/// Reads the next non-delivery frame if one arrives within `budget`, reporting
+/// a quiet link as `Ok(None)`.
+///
+/// The WebSocket twin of the TCP transport's pump door, and the parity matters
+/// for the same reason #61's did: a consumer draining an idle connection must
+/// end its drain on the same silence whichever transport carries it, or the
+/// same boot gate blows on one mount and not the other.
+///
+/// `budget` is spent across as many armed windows as it takes, with
+/// [`IO_TIMEOUT`] as the polling grain — a remaining budget shorter than one
+/// grain arms exactly that much rather than overshooting the caller's bound. A
+/// spent budget returns before arming anything, so `Duration::ZERO` never
+/// reaches the socket's `setsockopt`, which refuses a zero deadline.
+///
+/// Nothing here terminates the link: a quiet window is not a failure, so the
+/// driver never sees a `Failed` event and the socket is retained for the next
+/// call — unlike [`receive_correlated`], where a spent deadline genuinely does
+/// break the positional correlation contract.
+pub(super) fn receive_participant_frame_within(
+    link: &mut WsLink,
+    budget: Duration,
+) -> Result<Option<Frame>, ExchangeError> {
+    let started = Instant::now();
+    loop {
+        let Some(remaining) = budget.checked_sub(started.elapsed()) else {
+            return Ok(None);
+        };
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        match read_step(link, Some(remaining.min(IO_TIMEOUT)))? {
+            // A closed window is a wait here too; the budget check above is the
+            // only thing that ends this loop with silence.
+            LinkRead::TimedOut => {}
+            LinkRead::Frame { bytes, correlation } => match correlation {
+                FrameCorrelation::UnsolicitedDelivery => {}
+                FrameCorrelation::CorrelatedResponse | FrameCorrelation::UnsolicitedFrame => {
+                    return decode_response(link, &bytes).map(Some);
+                }
+            },
+        }
+    }
+}
+
 /// Describes a spent [`RESPONSE_DEADLINE`] in seconds waited and seconds
 /// budgeted, naming the timeout rather than the window that reported it.
 fn deadline_detail(awaited: &str, elapsed: Duration) -> String {

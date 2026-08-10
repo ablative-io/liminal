@@ -208,11 +208,49 @@ impl<S: FrameStream> Connection<S> {
         self.send(&participant::request_frame(request)?)
     }
 
-    /// Reads and direction-decodes one canonical participant response.
+    /// Reads and direction-decodes one canonical participant response, waiting
+    /// out [`RESPONSE_DEADLINE`] for it.
+    ///
+    /// The REPLY-OWED door: the caller has sent a request and is waiting for
+    /// its correlated answer, so a quiet connection is a slow server and the
+    /// full deadline is the protection that keeps it from being read as a dead
+    /// one. Callers that are pumping rather than awaiting want
+    /// [`receive_participant_within`](Self::receive_participant_within).
     pub(in crate::remote) fn receive_participant(
         &mut self,
     ) -> Result<liminal_protocol::wire::ParticipantFrame, SdkError> {
         participant::response_frame(self.receive()?)
+    }
+
+    /// Reads and direction-decodes one canonical participant response if one
+    /// arrives within `budget`, reporting a quiet window as `Ok(None)`.
+    ///
+    /// The PUMP door. The discriminator between this and
+    /// [`receive_participant`](Self::receive_participant) is CALLER INTENT and
+    /// nothing else — an empty buffer at a clean frame boundary is byte-for-byte
+    /// the same state whether the caller is owed a reply or is collecting
+    /// whatever the server pushes next, so which method was called is the only
+    /// honest signal available. Keying on buffered bytes instead would read the
+    /// 2026-08-10 outage's own shape (request sent, answer owed, nothing arrived
+    /// yet) as a pump read and re-open it.
+    ///
+    /// `budget` is spent across as many read windows as it takes, with
+    /// [`IO_TIMEOUT`] as the polling grain beneath it exactly as
+    /// [`RESPONSE_DEADLINE`] has. A budget shorter than one grain arms a
+    /// correspondingly shorter window instead of overshooting it, and
+    /// `Duration::ZERO` polls only what has already decoded.
+    ///
+    /// Partial bytes stay in the connection's frame buffer across a quiet
+    /// report, so a frame that was mid-flight when the budget expired is never
+    /// lost; the next call resumes on the same buffer.
+    pub(in crate::remote) fn receive_participant_within(
+        &mut self,
+        budget: Duration,
+    ) -> Result<Option<liminal_protocol::wire::ParticipantFrame>, SdkError> {
+        let Some(frame) = self.receive_optional_within(budget)? else {
+            return Ok(None);
+        };
+        participant::response_frame(frame).map(Some)
     }
 
     fn handshake(&mut self, auth_token: &[u8]) -> Result<(), SdkError> {
@@ -327,6 +365,84 @@ impl<S: FrameStream> Connection<S> {
                         });
                     }
                 }
+            }
+        }
+    }
+
+    /// Reads one frame within `budget`, reporting a spent budget as `Ok(None)`
+    /// rather than an error, and restoring the steady-state read window on
+    /// every exit including the failing ones.
+    ///
+    /// This is [`fill_buffer`](Self::fill_buffer)'s policy sibling, over the
+    /// same [`fill_buffer_once`](Self::fill_buffer_once) primitive: both spend
+    /// a budget across closed windows, and they differ only in what a spent
+    /// budget MEANS. For a reply-owed read it is the end of a wait and an
+    /// error; for a pump read it is silence, which is a normal state.
+    fn receive_optional_within(&mut self, budget: Duration) -> Result<Option<Frame>, SdkError> {
+        let started = Instant::now();
+        let result = self.poll_within(started, budget);
+        // Always restore the steady-state timeout, even on error — the same
+        // discipline `receive_with_timeout` keeps, and for the same reason: the
+        // next caller on this shared connection inherits the window.
+        let restore =
+            self.stream
+                .set_read_deadline(IO_TIMEOUT)
+                .map_err(|source| SdkError::Connection {
+                    description: format!("failed to restore read timeout: {source}"),
+                });
+        let frame = result?;
+        restore?;
+        Ok(frame)
+    }
+
+    /// The bounded-quiet read loop. [`IO_TIMEOUT`] stays the polling grain and
+    /// `budget` is the bound; a remaining budget shorter than one grain arms
+    /// exactly that much rather than overshooting the caller's bound.
+    ///
+    /// A spent budget returns BEFORE arming anything, which is also what makes
+    /// `Duration::ZERO` legal: a socket refuses a zero read deadline with
+    /// `EINVAL`, so a zero budget is honoured as a pure poll of what has
+    /// already decoded rather than passed down to `setsockopt`.
+    fn poll_within(
+        &mut self,
+        started: Instant,
+        budget: Duration,
+    ) -> Result<Option<Frame>, SdkError> {
+        loop {
+            match decode(&self.buffer) {
+                Ok((frame, consumed)) => {
+                    self.buffer.drain(..consumed);
+                    if matches!(frame, Frame::Deliver { .. }) {
+                        // The same drain `receive_within` performs: in v1
+                        // channel deliveries are surfaced only through the
+                        // dedicated `SubscriptionStream`, so an unsolicited
+                        // `Deliver` here is consumed to keep framing in sync.
+                        continue;
+                    }
+                    return Ok(Some(frame));
+                }
+                Err(
+                    ProtocolError::IncompleteHeader { .. } | ProtocolError::TruncatedPayload { .. },
+                ) => {
+                    let Some(remaining) = budget.checked_sub(started.elapsed()) else {
+                        return Ok(None);
+                    };
+                    if remaining.is_zero() {
+                        return Ok(None);
+                    }
+                    self.stream
+                        .set_read_deadline(remaining.min(IO_TIMEOUT))
+                        .map_err(|source| SdkError::Connection {
+                            description: format!("failed to set the pump read window: {source}"),
+                        })?;
+                    match self.fill_buffer_once()? {
+                        // A closed window is a wait here too. The loop re-reads
+                        // the remaining budget above and reports silence only
+                        // once the budget itself is spent — never the window.
+                        FillOutcome::Read | FillOutcome::TimedOut => {}
+                    }
+                }
+                Err(error) => return Err(protocol_error(&error)),
             }
         }
     }

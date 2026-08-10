@@ -28,14 +28,14 @@ pub use remote::{
     WebSocketRemoteTransport, WebSocketSubscriptionStream,
 };
 pub use remote::{
-    ParticipantResponseProvenance, ParticipantResumeStore, RemoteChannelHandle, RemoteConfig,
-    RemoteConversationHandle, RemoteDetachReplayOutcome, RemoteExpectedOperationRecovery,
-    RemoteLostOperationResolution, RemoteLostReconnectResolution, RemoteOperationRecordOutcome,
-    RemoteOperationTransportFate, RemoteParticipantError, RemoteParticipantHandle,
-    RemoteParticipantInbound, RemoteParticipantOperation, RemoteParticipantSendOutcome,
-    RemoteReconnectAttemptOutcome, RemoteReconnectPermit, RemoteReconnectPermitOutcome,
-    RemoteReconnectPermitRecovery, RemoteReplayApplyOutcome, RemoteTransportLossOutcome,
-    SdkChannelHandle, SdkConfig, SdkConversationHandle, ServerAddress, build_channel_handle,
-    build_conversation_handle,
+    PARTICIPANT_PUMP_WINDOW, ParticipantResponseProvenance, ParticipantResumeStore,
+    RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, RemoteDetachReplayOutcome,
+    RemoteExpectedOperationRecovery, RemoteLostOperationResolution, RemoteLostReconnectResolution,
+    RemoteOperationRecordOutcome, RemoteOperationTransportFate, RemoteParticipantError,
+    RemoteParticipantHandle, RemoteParticipantInbound, RemoteParticipantOperation,
+    RemoteParticipantSendOutcome, RemoteReconnectAttemptOutcome, RemoteReconnectPermit,
+    RemoteReconnectPermitOutcome, RemoteReconnectPermitRecovery, RemoteReplayApplyOutcome,
+    RemoteTransportLossOutcome, SdkChannelHandle, SdkConfig, SdkConversationHandle, ServerAddress,
+    build_channel_handle, build_conversation_handle,
 };
 pub use types::{SchemaMetadata, SchemaValidate};

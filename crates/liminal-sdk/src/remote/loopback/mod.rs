@@ -40,6 +40,7 @@ use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::time::Duration;
 
 use liminal::protocol::{
     CausalContext, Frame, MessageEnvelope, PUBLISH_DELIVERED_FLAG, PUBLISH_IDEMPOTENCY_KEY_FLAG,
@@ -172,6 +173,26 @@ impl ParticipantRemoteTransport for LoopbackRemoteTransport {
             frame,
             provenance: slot.provenance,
         })
+    }
+
+    /// Answers the pump honestly over the in-memory duplex: the same generic
+    /// [`Connection`] method the socket mount uses, reached through the same
+    /// `FrameStream` window the loopback ring already implements. An embedded
+    /// consumer's drain loop therefore ends on the same silence a socket
+    /// consumer's does, which is the parity the in-process design requires.
+    fn receive_participant_within(
+        &self,
+        _server_address: &ServerAddress,
+        budget: Duration,
+    ) -> Result<Option<ParticipantTransportFrame>, SdkError> {
+        let mut slot = self.connection.lock();
+        let Some(frame) = slot.connection.receive_participant_within(budget)? else {
+            return Ok(None);
+        };
+        Ok(Some(ParticipantTransportFrame {
+            frame,
+            provenance: slot.provenance,
+        }))
     }
 
     /// Opens a fresh loopback connection and advances the transport identity,

@@ -17,6 +17,7 @@ use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use liminal::protocol::{CONVERSATION_REPLY_REQUESTED_FLAG, Frame, MessageEnvelope};
 
@@ -28,7 +29,7 @@ use crate::remote::participant::ParticipantResponseProvenance;
 use self::exchange::{
     APPLICATION_STREAM_ID, ExchangeError, LinkLoss, WsLink, drain_conversation_error,
     ensure_conversation_open, exchange_correlated, handshake, loss_error,
-    receive_participant_frame, send_frame,
+    receive_participant_frame, receive_participant_frame_within, send_frame,
 };
 use super::binding::{
     AttemptFateOutcome, LossRecordOutcome, OpenRequestDecision, WebSocketAuthorityBinding,
@@ -280,6 +281,21 @@ impl WsConnection {
         let frame = self.with_link(receive_participant_frame)?;
         let participant = super::participant::response_frame(frame)?;
         Ok((participant, self.provenance))
+    }
+
+    /// Reads the next canonical participant frame if one arrives within
+    /// `budget`, reporting a quiet link as `Ok(None)` (TCP parity: the pump
+    /// door, where silence is a normal state rather than a fault).
+    pub(super) fn receive_participant_within(
+        &mut self,
+        budget: Duration,
+    ) -> Result<Option<(ParticipantFrame, ParticipantResponseProvenance)>, SdkError> {
+        let Some(frame) = self.with_link(|link| receive_participant_frame_within(link, budget))?
+        else {
+            return Ok(None);
+        };
+        let participant = super::participant::response_frame(frame)?;
+        Ok(Some((participant, self.provenance)))
     }
 
     /// Replaces the socket for the participant machinery (TCP parity): the
