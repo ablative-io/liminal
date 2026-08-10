@@ -522,6 +522,10 @@ enum FillOutcome {
     TimedOut,
 }
 
+#[cfg(test)]
+#[path = "framing_tests.rs"]
+mod tests;
+
 /// Maps a low-level wire codec error into the SDK error taxonomy.
 pub(in crate::remote) fn protocol_error(error: &ProtocolError) -> SdkError {
     SdkError::Protocol {
