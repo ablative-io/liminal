@@ -145,7 +145,7 @@ redundant and removable, pinned by an equivalence oracle. They are not equal:
 outbox owner untouched. The reconcile is the mechanism that makes them equal,
 not a check that they already are. Deleting it loses durable state.
 
-### 3c. Complete the appended source in place — ADOPTED (design)
+### 3c. Complete the appended source in place — DESIGNED, NOT LANDED IN THIS LANE
 
 Give `RecordAdmission` the same commit-completion `MarkerAck` already has:
 
@@ -167,11 +167,42 @@ crash residue; a source committed in-process under the lock has no crash
 residue to repair, and the observer-progress witnesses the live path already
 accumulates (`begin/end_observer_progress_source`) are reconciled directly.
 
-Equivalence is pinned, not argued: generated histories are driven through the
+Equivalence would be pinned, not argued: generated histories driven through the
 live path, then cold-replayed from the durable bytes into a fresh handler, and
-the two are compared.
+the two compared.
 
-### 3d. Push the page limit into the store — ADOPTED (independent, lands first)
+**Why it is not in this lane.** The live commit path and the replay path do not
+merely disagree about who writes the extension row; they disagree about
+observer-progress accounting. `begin_observer_progress_source` /
+`end_observer_progress_source` (`state.rs:457`, `state.rs:463`) bracket every
+row applied by a replay (`ops_session_replay.rs:78,93`, `outbox_replay.rs:88,116,143,148`)
+and are called from **no live commit site at all**. The witness state the
+handler reconciles (`handler.rs:623`, `take_observer_progress_witnesses`) is
+therefore produced by the replay, not by the live apply — a second thing the
+from-zero pass is the sole producer of, on the same footing as the extension
+row.
+
+Landing 3c means giving all five sources that append a base row and produce a
+projection (`record_produced_source` callers: `ops_frontier.rs:308`,
+`ops_frontier.rs:378`, `ops_session.rs:127`, `ops_attach.rs:178`,
+`ops_enroll.rs:204`) a live commit-completion that reproduces the replay's
+extension write AND its observer-progress bracketing exactly — the property
+`tests_w1b_umbrella::fate_live_and_cold_replay_produce_identical_witnesses_and_state`
+already exists to guard. That is a refactor of the Unit 2 / observer-progress
+seam, not an edit, and shipping a half of it that greens a row-count pin while
+quietly changing observer-progress semantics would be a fix that closes a
+different failure. It is scoped here and left red on purpose (§6).
+
+Two smaller economies were examined and rejected as NOT free. The outbox
+pre-validation walk (`handler.rs:600`) and the base-log schema validation walk
+(`ops_session_replay.rs:33`) each duplicate a stream the following pass walks
+again, but both exist to establish that the whole stream decodes BEFORE any
+state is installed — a fail-fast ordering the suite pins by name
+(`tests_w3_restore::midstream_outbox_decode_failure_preserves_typed_error_and_publishes_no_state`).
+Deleting either halves the constant by changing error semantics, which is a
+different lane's decision.
+
+### 3d. Push the page limit into the store — LANDED IN THIS LANE
 
 `HaematiteStore::read_from` builds a bounded key window and asks the engine for
 exactly that window:
@@ -273,3 +304,25 @@ the lane that has that requirement.
   is the next ceiling after this one.
 - **Neither** gives the participant protocol catch-up. §4 is a design position,
   not a delivery.
+
+## 6. State of this lane, and what is left red
+
+**Landed:** §3d. A full stream read costs N engine rows instead of ≈N²/128,
+pinned by counts inside `HaematiteStore` because the quantity is invisible from
+outside it (`crates/liminal/src/durability/store.rs`, module
+`paged_read_shape_tests`). This removes the quadratic. It does not move the
+ceiling: it makes each of the four passes cheaper, not fewer.
+
+**Not landed:** §3c, the fix that moves the ceiling.
+
+**Left mechanical rather than prose.** The defect is pinned by
+`tests_p0_60_admission_cost`, which asserts that one admission's durable read
+cost grows by exactly `FULL_PASSES_PER_COMMIT` (4) rows per record of history,
+measured at three histories so the linearity is pinned too, not just a
+difference. The number 4 is §1a's table of passes, arriving independently from
+an instrument that knows nothing about the table.
+
+Those two pins are green today **because the defect is present**, and they say
+so in their own names and doc comments. The lane that lands §3c inverts them to
+`growth == 0`. A green there today means the ceiling is still where the field
+measured it: 1.75 s/admission at N≈1,510, single-admission-fatal at N≈4,328.

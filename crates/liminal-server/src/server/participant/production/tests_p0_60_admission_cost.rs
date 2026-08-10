@@ -27,8 +27,13 @@ const CONVERSATION: u64 = 0xF0_60_01;
 /// Histories the slope is taken across. Both sit well below
 /// `max_retained_record_rows` (1,024) so no marker drain fires and the two
 /// measurements describe the same operation.
-const SHORT_HISTORY: u64 = 32;
-const LONG_HISTORY: u64 = 96;
+const HISTORIES: [u64; 3] = [32, 64, 96];
+
+/// Full passes over the conversation that one committed source currently
+/// makes: the outbox pre-validation walk, the base-log schema validation
+/// walk, the base-log replay walk, and the outbox merge walk. Named in
+/// `docs/design/p0-60-admission-cost.md` §1a, and measured below.
+const FULL_PASSES_PER_COMMIT: u64 = 4;
 
 /// Counts durable reads at the `DurableStore` boundary.
 ///
@@ -208,45 +213,79 @@ fn reads_for_one_admission_at(history: u64) -> Result<(usize, usize), Box<dyn Er
     Ok(counting.counts())
 }
 
-/// The slope pin. A cost that does not grow is the whole requirement, and two
-/// histories are what makes "does not grow" an assertion rather than a hope.
+/// ⛔ THIS PIN ASSERTS THE DEFECT, DELIBERATELY, AND MUST BE INVERTED BY THE
+/// FIX. ⛔
+///
+/// Board #60's fix — completing a committed source in place instead of
+/// replaying the conversation to write its Unit 2 extension row
+/// (`docs/design/p0-60-admission-cost.md` §3c) — is NOT landed. Until it is,
+/// admission cost grows with history, and the honest thing to do with a defect
+/// that is going to survive a lane is to make it MECHANICAL rather than prose:
+/// pinned here, it cannot drift, cannot be partially fixed unnoticed, and
+/// cannot be believed to be gone.
+///
+/// The pin is the SLOPE, and the slope has a named cause. Each committed source
+/// makes [`FULL_PASSES_PER_COMMIT`] complete walks of the conversation, so one
+/// admission's durable read cost rises by exactly that many rows per record of
+/// history. Measuring at three histories rather than two also pins that the
+/// growth is LINEAR: two points can be joined by any curve.
+///
+/// The lane that lands §3c turns this into `growth == 0` and renames it. A
+/// green here means the ceiling is still there.
 #[test]
-fn one_admission_reads_the_same_at_any_history() -> Result<(), Box<dyn Error>> {
-    let (short_reads, short_rows) = reads_for_one_admission_at(SHORT_HISTORY)?;
-    let (long_reads, long_rows) = reads_for_one_admission_at(LONG_HISTORY)?;
+fn admission_cost_still_grows_by_one_pass_per_history_record() -> Result<(), Box<dyn Error>> {
+    let mut measured = Vec::new();
+    for history in HISTORIES {
+        let (reads, rows) = reads_for_one_admission_at(history)?;
+        measured.push((history, reads, rows));
+    }
 
-    // The instrument must be able to see the defect it is pinning: if the
-    // counter never moved, an equality below would be vacuous.
+    // The instrument must be able to see what it claims to measure: a counter
+    // that never moved would make every difference below vacuously zero.
+    let (_, first_reads, first_rows) = measured[0];
     assert!(
-        short_reads > 0,
+        first_reads > 0 && first_rows > 0,
         "the admission path must have reached the store"
     );
 
-    assert_eq!(
-        long_rows, short_rows,
-        "one admission read {long_rows} durable rows at history {LONG_HISTORY} but \
-         {short_rows} at history {SHORT_HISTORY}: admission cost grows with the \
-         conversation"
-    );
-    assert_eq!(
-        long_reads, short_reads,
-        "one admission made {long_reads} store reads at history {LONG_HISTORY} but \
-         {short_reads} at history {SHORT_HISTORY}: admission cost grows with the \
-         conversation"
-    );
+    for window in measured.windows(2) {
+        let [(previous_history, _, previous_rows), (history, _, rows)] = window else {
+            return Err("windows(2) yielded a short window".into());
+        };
+        let extra_history = history
+            .checked_sub(*previous_history)
+            .ok_or("histories must ascend")?;
+        let extra_rows = u64::try_from(
+            rows.checked_sub(*previous_rows)
+                .ok_or("admission read cost fell as history grew: the shape changed, re-measure")?,
+        )?;
+        assert_eq!(
+            extra_rows,
+            extra_history * FULL_PASSES_PER_COMMIT,
+            "between history {previous_history} and {history} one admission's durable \
+             read cost grew by {extra_rows} rows; {FULL_PASSES_PER_COMMIT} full passes \
+             over the conversation predict {}. If this fell to zero the fix landed and \
+             this pin must be inverted; anything else means the number of full passes \
+             changed and docs/design/p0-60-admission-cost.md is stale",
+            extra_history * FULL_PASSES_PER_COMMIT
+        );
+    }
     Ok(())
 }
 
-/// A committed admission must not re-read the history it is appending to. The
-/// absolute bound complements the slope: a constant that happens to be large is
-/// still a constant, and this says the constant is small.
+/// The arithmetic that makes #60 a ceiling rather than a slow patch: cost per
+/// admission is proportional to history with no constant term worth speaking of.
+///
+/// Also a defect pin, and inverted by the same fix.
 #[test]
-fn one_admission_does_not_reread_the_conversation() -> Result<(), Box<dyn Error>> {
-    let (_, rows) = reads_for_one_admission_at(LONG_HISTORY)?;
+fn one_admission_rereads_the_whole_conversation() -> Result<(), Box<dyn Error>> {
+    let history = HISTORIES[HISTORIES.len() - 1];
+    let (_, rows) = reads_for_one_admission_at(history)?;
     assert!(
-        rows < usize::try_from(LONG_HISTORY)?,
-        "one admission read {rows} durable rows into a {LONG_HISTORY}-row \
-         conversation: the commit is replaying its own history"
+        u64::try_from(rows)? >= history,
+        "one admission read {rows} durable rows into a {history}-row conversation. \
+         Fewer than the history means the commit stopped replaying it — the fix \
+         landed, and this pin must be inverted"
     );
     Ok(())
 }
