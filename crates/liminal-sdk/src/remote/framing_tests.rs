@@ -81,6 +81,14 @@ impl FrameStream for StallingStream {
     }
 }
 
+/// A fixture-level failure, carried in the error type these tests already
+/// return so a broken fixture is never mistaken for a broken client.
+fn fixture_failure(detail: &str) -> SdkError {
+    SdkError::Protocol {
+        description: detail.to_string(),
+    }
+}
+
 /// The `ConnectAck` the fixtures answer a handshake with.
 const fn connect_ack() -> Frame {
     Frame::ConnectAck {
@@ -231,7 +239,7 @@ fn a_real_socket_survives_a_reply_slower_than_its_receive_window() -> Result<(),
 /// `EAGAIN`/`Resource temporarily unavailable` text, which reads as a broken
 /// socket and sent the outage's diagnosis in the wrong direction.
 #[test]
-fn an_expired_response_deadline_names_the_timeout_and_never_the_errno() {
+fn an_expired_response_deadline_names_the_timeout_and_never_the_errno() -> Result<(), SdkError> {
     const BUDGET: Duration = Duration::from_millis(120);
 
     let mut connection = Connection {
@@ -241,17 +249,25 @@ fn an_expired_response_deadline_names_the_timeout_and_never_the_errno() {
     };
 
     let started = Instant::now();
-    let error = connection
-        .receive_within(BUDGET)
-        .expect_err("a silent peer must not be waited on forever");
+    let outcome = connection.receive_within(BUDGET);
     let waited = started.elapsed();
 
+    let error = match outcome {
+        Ok(frame) => {
+            return Err(fixture_failure(&format!(
+                "a silent peer must not be waited on forever; a frame decoded: {frame:?}"
+            )));
+        }
+        Err(error) => error,
+    };
     assert!(
         waited >= BUDGET,
         "the deadline ended the wait early: waited {waited:?} against a {BUDGET:?} budget"
     );
     let SdkError::Connection { description } = &error else {
-        panic!("expected a Connection error naming the timeout, received {error:?}");
+        return Err(fixture_failure(&format!(
+            "expected a Connection error naming the timeout, received {error:?}"
+        )));
     };
     assert!(
         description.contains("timed out") && description.contains("waiting for a server response"),
@@ -264,6 +280,7 @@ fn an_expired_response_deadline_names_the_timeout_and_never_the_errno() {
                 .contains("temporarily unavailable"),
         "the deadline error leaked the raw receive-window errno: {description}"
     );
+    Ok(())
 }
 
 /// The response deadline is a chosen bound, not the socket's receive window: the

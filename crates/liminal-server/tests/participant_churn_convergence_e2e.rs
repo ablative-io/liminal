@@ -147,6 +147,7 @@ impl ParticipantResumeStore for SharedResumeStore {
         })?;
         guard.clear();
         guard.extend_from_slice(canonical_lpcr);
+        drop(guard);
         Ok(())
     }
 }
@@ -325,7 +326,7 @@ const CHURN_ATTEMPT_TOKEN: [u8; 16] = [0xC3; 16];
 const FRESH_ATTEMPT_TOKEN: [u8; 16] = [0xC5; 16];
 
 /// One credential attach, with the credentials the caller currently holds.
-fn attach_request(
+const fn attach_request(
     participant_id: ParticipantId,
     attach_secret: AttachSecret,
     capability_generation: Generation,
@@ -343,7 +344,7 @@ fn attach_request(
 
 /// The request every torn iteration presents: the participant's enrollment
 /// credential under [`CHURN_ATTEMPT_TOKEN`].
-fn churn_attach_request(detached: &DetachedParticipant) -> ClientRequest {
+const fn churn_attach_request(detached: &DetachedParticipant) -> ClientRequest {
     attach_request(
         detached.participant_id,
         detached.attach_secret,
@@ -497,10 +498,13 @@ fn a_conversation_converges_after_attach_exchanges_torn_mid_flight() -> Result<(
         // that it carries a live credential rather than a refusal or a terminal.
         ServerValue::AttachBound(bound) => bound,
         ServerValue::UnboundReceipt(ReceiptReplay::CredentialAttach(receipt)) => receipt,
-        other => panic!(
-            "the clean retry after {CHURN_ITERATIONS} tears was neither a binding nor a receipt \
-             replay: {other:?}"
-        ),
+        other => {
+            return Err(format!(
+                "the clean retry after {CHURN_ITERATIONS} tears was neither a binding nor a \
+                 receipt replay: {other:?}"
+            )
+            .into());
+        }
     };
     assert_eq!(
         credential.participant_id(),

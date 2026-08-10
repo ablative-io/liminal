@@ -1,20 +1,27 @@
    Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.44s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.46s
      Running unittests src/lib.rs (target/debug/deps/liminal_sdk-141d97a61593d9b6)
 
-running 1 test
+running 4 tests
+test remote::framing::tests::the_response_deadline_outlives_a_single_receive_window ... ok
+Error: Connection { description: "failed to read frame from server: Resource temporarily unavailable (os error 35)" }
 
-thread 'remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno' (100436640) panicked at crates/liminal-sdk/src/remote/framing_tests.rs:249:5:
-the deadline ended the wait early: waited 24.474541ms against a 120ms budget
+thread 'remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno' (100870713) panicked at crates/liminal-sdk/src/remote/framing_tests.rs:263:5:
+the deadline ended the wait early: waited 23.460333ms against a 120ms budget
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test remote::framing::tests::a_closed_receive_window_is_a_wait_not_a_lost_connection ... FAILED
 test remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno ... FAILED
+Error: Connection { description: "failed to read frame from server: Resource temporarily unavailable (os error 35)" }
+test remote::framing::tests::a_real_socket_survives_a_reply_slower_than_its_receive_window ... FAILED
 
 failures:
 
 failures:
+    remote::framing::tests::a_closed_receive_window_is_a_wait_not_a_lost_connection
+    remote::framing::tests::a_real_socket_survives_a_reply_slower_than_its_receive_window
     remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.03s
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 68 filtered out; finished in 5.00s
 
 error: test failed, to rerun pass `-p liminal-sdk --lib`
 TRUE_EXIT=101
