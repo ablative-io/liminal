@@ -105,7 +105,16 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
             state.correlation = Some(correlation);
             Ok(RemoteReplayApplyOutcome::Refused { input, reason })
         } else {
-            persist(&mut state.store, &aggregate)?;
+            // Both failure modes drop the aggregate here exactly as before; the
+            // only change is that a STORE failure leaves its typed cause behind,
+            // so the `StateUnavailable` every later call reports can be
+            // attributed. A `ResumeEncode` refusal is passed through untouched:
+            // it is not store-originated and this lane does not reclassify it.
+            match persist(&mut state.store, &aggregate) {
+                Ok(()) => {}
+                Err(RemoteParticipantError::Storage(error)) => return Err(state.brick(error)),
+                Err(other) => return Err(other),
+            }
             state.aggregate = Some(aggregate);
             Ok(RemoteReplayApplyOutcome::Applied)
         }

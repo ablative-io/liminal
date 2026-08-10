@@ -101,11 +101,18 @@ pub enum RemoteParticipantError {
     #[error("client resume record restore failed: {0:?}")]
     ResumeRestore(ClientResumeRestoreError),
     /// The caller-owned durable store rejected a canonical record.
+    ///
+    /// The `SdkError` is exposed as this error's [`source`](core::error::Error::source)
+    /// so a caller can walk to the typed store failure instead of matching on
+    /// rendered text.
     #[error("client resume record persistence failed: {0}")]
-    Storage(SdkError),
+    Storage(#[source] SdkError),
     /// The real transport failed outside a typed fate-reporting operation.
+    ///
+    /// The `SdkError` is exposed as this error's [`source`](core::error::Error::source),
+    /// for the same reason as [`Storage`](RemoteParticipantError::Storage).
     #[error("participant transport failed: {0}")]
-    Transport(SdkError),
+    Transport(#[source] SdkError),
     /// A client-to-server request appeared on the SDK receive side.
     #[error("participant transport decoded a request in the client receive direction")]
     InvalidInboundDirection,
@@ -277,6 +284,27 @@ pub(super) struct RemoteParticipantState<S> {
     pub(super) correlation: Option<ClientResponseCorrelation>,
     pub(super) reconnect_attempt: Option<liminal_protocol::client::ReconnectInProgressAttempt>,
     pub(super) store: S,
+    /// The store failure that made the aggregate unreachable, if that is why.
+    ///
+    /// `take_aggregate` reports [`RemoteParticipantError::StateUnavailable`],
+    /// which names the CONDITION and carries no cause — and the cause is gone by
+    /// then, because the failure was returned to whoever made the failing call
+    /// and to nobody else. This retains it so the question "why is this handle
+    /// dead" has a typed answer for every later caller.
+    pub(super) unavailable: Option<SdkError>,
+}
+
+impl<S> RemoteParticipantState<S> {
+    /// Records a store failure as the reason the aggregate is about to become
+    /// unreachable, and names that failure for the caller.
+    ///
+    /// Every seam that drops the aggregate on a store failure goes through here,
+    /// so the retained cause cannot drift from the returned one: they are the
+    /// same value.
+    pub(super) fn brick(&mut self, error: SdkError) -> RemoteParticipantError {
+        self.unavailable = Some(error.clone());
+        RemoteParticipantError::Storage(error)
+    }
 }
 
 /// Remote participant entrypoint backed by protocol-crate state and canonical LPCR storage.
@@ -341,8 +369,36 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
                 correlation: None,
                 reconnect_attempt: None,
                 store,
+                unavailable: None,
             }),
         })
+    }
+
+    /// Returns the store failure that made this handle unavailable, if that is
+    /// why it is unavailable.
+    ///
+    /// [`RemoteParticipantError::StateUnavailable`] names a CONDITION and
+    /// carries no cause: a handle reports it on every call after a durability
+    /// failure bricked it, long after the failure itself was returned to the one
+    /// caller who happened to make the failing call. Every later caller sees an
+    /// unavailability it cannot attribute, and the only thing distinguishing a
+    /// store-originated hold from any other was the rendered text of an error
+    /// nobody still holds.
+    ///
+    /// A `Some` names the exact [`SdkError`] the caller's own store returned, so
+    /// a hold can be attributed by matching a typed value. A `None` means the
+    /// handle is either live or unavailable for a reason that did not originate
+    /// in the store — which is itself the discrimination this exists to provide.
+    ///
+    /// This is deliberately an accessor rather than a payload on
+    /// `StateUnavailable`. Carrying the source on the variant is the better
+    /// shape and remains the intended destination, but these enums are
+    /// exhaustive by a standing ruling so a consumer can `match` them and be
+    /// told when a case is added; changing that variant is therefore a breaking
+    /// change and not this lane's to make.
+    #[must_use]
+    pub fn unavailability_cause(&self) -> Option<SdkError> {
+        self.state.lock().unavailable.clone()
     }
 
     /// Runs `record_operation -> commit -> LPCR persist -> into_parts` exactly.
@@ -363,10 +419,9 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
                 let record = commit
                     .resume_record()
                     .map_err(RemoteParticipantError::ResumeEncode)?;
-                state
-                    .store
-                    .persist(&record.encode_canonical())
-                    .map_err(RemoteParticipantError::Storage)?;
+                if let Err(error) = state.store.persist(&record.encode_canonical()) {
+                    return Err(state.brick(error));
+                }
                 let (aggregate, operation) = commit.into_parts();
                 state.aggregate = Some(aggregate);
                 Ok(RemoteOperationRecordOutcome::Recorded(
@@ -658,11 +713,15 @@ pub(super) fn persist_retaining<S: ParticipantResumeStore>(
     aggregate: ClientParticipantAggregate,
 ) -> Result<ClientParticipantAggregate, RemoteParticipantError> {
     match aggregate.resume_record() {
-        Ok(record) => state
-            .store
-            .persist(&record.encode_canonical())
-            .map(|()| aggregate)
-            .map_err(RemoteParticipantError::Storage),
+        Ok(record) => match state.store.persist(&record.encode_canonical()) {
+            Ok(()) => Ok(aggregate),
+            // The aggregate is deliberately NOT re-seated: whether the bytes
+            // landed is unknown, so no further authority may be released. The
+            // cause is retained on the way past, because it is about to be the
+            // only thing that could ever explain the `StateUnavailable` every
+            // later call will report.
+            Err(error) => Err(state.brick(error)),
+        },
         Err(error) => {
             state.aggregate = Some(aggregate);
             Err(RemoteParticipantError::ResumeEncode(error))

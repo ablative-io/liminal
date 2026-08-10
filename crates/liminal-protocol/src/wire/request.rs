@@ -96,6 +96,36 @@ pub struct RecordAdmission {
     /// Presented nonzero credential generation.
     pub capability_generation: Generation,
     /// Client-selected identity of this record-admission request attempt.
+    ///
+    /// # It must be minted once per RECORD, not once per presentation
+    ///
+    /// This token is the client's half of ordinary-admission idempotence
+    /// (contract amendment A2, §0.13). The server deduplicates on the identity
+    /// triple (token, payload fingerprint, verified participant), so an
+    /// answer-lost re-present is answered with the original commit only if it
+    /// arrives carrying the SAME token.
+    ///
+    /// Mint it once when the record is staged, persist it beside the staged
+    /// bytes, and re-present that exact token after a lost answer — the
+    /// write-ahead discipline R-C0 already requires for the tokenized families,
+    /// applied one layer up.
+    ///
+    /// Deriving it per presentation from anything that can change between
+    /// attempts silently defeats this. That is not hypothetical: in the field
+    /// (2026-08-08, conversation 6) a client derived the token per presentation
+    /// with the CURRENT capability generation as an input, a recovery attach
+    /// rotated the generation 4 -> 6 between the two presentations, and the
+    /// same bytes arrived under two different tokens — committing a
+    /// byte-identical second copy at a new sequence.
+    ///
+    /// The server cannot close this from its side, and deliberately does not
+    /// try: two intent-distinct sends of the same body also carry distinct
+    /// tokens and MUST remain two commits, so any dedup keyed on payload bytes
+    /// alone would collapse a legitimate pair. Both halves are pinned in
+    /// `tests_record_admission_dedup`.
+    ///
+    /// Re-enrolling changes the verified participant and therefore the triple,
+    /// so it defeats dedup by design.
     pub record_admission_attempt_token: RecordAdmissionAttemptToken,
     /// Opaque application payload; it is never echoed in a response envelope.
     pub payload: Vec<u8>,

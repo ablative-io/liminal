@@ -1,0 +1,29 @@
+RED-2 (Leg A, end to end): the strand over real sockets, at the parent of its fix.
+Method: TARGETED REVERT of the single fixed file. Everything else -- the new e2e,
+the protocol pins -- is the branch tip's.
+sha256 inbound.rs now:      b4f41256fd2327a71d2b61c3ac87feb21464416d9202630beb7f9094deb0c28e
+sha256 inbound.rs @3a9b8ce:  b4f41256fd2327a71d2b61c3ac87feb21464416d9202630beb7f9094deb0c28e
+loadavg: 18:49  up 6 days, 33 mins, 4 users, load averages: 5.71 7.71 14.33
+
+   Compiling liminal-protocol v0.5.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+   Compiling liminal-server v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.54s
+     Running tests/participant_strand_recovery_e2e.rs (target/debug/deps/participant_strand_recovery_e2e-f721a1894fa1f0ed)
+
+running 1 test
+test a_torn_but_bound_attach_recovers_instead_of_stranding_the_client ... FAILED
+
+failures:
+
+---- a_torn_but_bound_attach_recovers_instead_of_stranding_the_client stdout ----
+Error: "#62 REPRODUCED: the SDK refused to FORM the request its own server just authorized — the stranded handle. BindingMismatch on CredentialAttach(CredentialAttachRequest { conversation_id: 22314, participant_id: 0, capability_generation: Generation(2), attach_secret: AttachSecret([42, 20, 17, 163, 125, 129, 158, 73, 95, 91, 117, 125, 19, 176, 85, 30, 85, 200, 122, 27, 110, 228, 214, 46, 211, 12, 62, 111, 64, 139, 200, 188]), attach_attempt_token: AttachAttemptToken([91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91]), accept_marker_delivery_seq: None })"
+
+
+failures:
+    a_torn_but_bound_attach_recovers_instead_of_stranding_the_client
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+
+error: test failed, to rerun pass `-p liminal-server --test participant_strand_recovery_e2e`
+RED TRUE EXIT=101

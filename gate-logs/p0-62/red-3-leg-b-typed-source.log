@@ -1,0 +1,51 @@
+RED-3 (Leg B): the false hold and the missing source chain, before either is wired.
+State: unavailability_cause() exists but nothing records into it; Storage/Transport
+declare no #[source]. SdkError already derives Clone (needed to compile the pins).
+loadavg: 18:55  up 6 days, 40 mins, 4 users, load averages: 11.61 9.75 12.86
+
+   Compiling liminal-protocol v0.5.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+   Compiling liminal-rs v0.5.4 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal)
+   Compiling liminal-sdk v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+warning: method `brick` is never used
+   --> crates/liminal-sdk/src/remote/participant.rs:304:19
+    |
+297 | impl<S> RemoteParticipantState<S> {
+    | --------------------------------- method in this implementation
+...
+304 |     pub(super) fn brick(&mut self, error: SdkError) -> RemoteParticipantError {
+    |                   ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `liminal-sdk` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.79s
+     Running unittests src/lib.rs (target/debug/deps/liminal_sdk-6c979104b9888cf3)
+
+running 9 tests
+test remote::participant::tests::replay::a_storage_error_exposes_its_store_failure_as_a_typed_source ... FAILED
+test remote::participant::tests::replay::failed_checkpoint_withholds_successor_authority ... ok
+test remote::participant::tests::replay::a_store_originated_unavailability_names_its_typed_cause ... FAILED
+test remote::participant::tests::replay::issued_tokenless_restore_reports_durable_abandonment ... ok
+test remote::participant::tests::replay::durable_leave_from_real_receive_supersedes_inflight_detach ... ok
+test remote::participant::tests::replay::in_progress_real_reconnect_restores_take_once_testimony ... ok
+test remote::participant::tests::replay::a_refused_detach_authority_checkpoints_and_restores_steerable ... ok
+test remote::participant::tests::replay::refused_detach_authority_never_destroys_live_participant_state ... ok
+test remote::participant::tests::replay::all_detach_terminal_arms_apply_and_survive_lpcr_restore ... ok
+
+failures:
+
+---- remote::participant::tests::replay::a_storage_error_exposes_its_store_failure_as_a_typed_source stdout ----
+Error: "#62 REPRODUCED: Storage declares no source, so the typed store error is reachable only by parsing rendered text"
+
+---- remote::participant::tests::replay::a_store_originated_unavailability_names_its_typed_cause stdout ----
+Error: "#62 REPRODUCED: the handle is bricked by a store failure and cannot say so -- the cause was returned once and lost, leaving StateUnavailable indistinguishable from every other hold"
+
+
+failures:
+    remote::participant::tests::replay::a_storage_error_exposes_its_store_failure_as_a_typed_source
+    remote::participant::tests::replay::a_store_originated_unavailability_names_its_typed_cause
+
+test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p liminal-sdk --lib`
+RED TRUE EXIT=101

@@ -1,0 +1,15 @@
+GREEN-2 (Leg A, end to end): the same e2e against the restored fix.
+inbound.rs byte-identical to the committed fix (git diff empty).
+
+   Compiling liminal-protocol v0.5.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+   Compiling liminal-server v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.44s
+     Running tests/participant_strand_recovery_e2e.rs (target/debug/deps/participant_strand_recovery_e2e-f721a1894fa1f0ed)
+
+running 1 test
+test a_torn_but_bound_attach_recovers_instead_of_stranding_the_client ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.99s
+
+GREEN TRUE EXIT=0

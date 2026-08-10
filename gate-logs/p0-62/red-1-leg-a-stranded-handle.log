@@ -1,0 +1,38 @@
+RED-1 (Leg A): the stranded handle, at the parent of its own fix.
+Tree: p0-62-stranded-handle with the pins added, inbound.rs UNCHANGED (byte-identical to 3a9b8ce).
+git rev-parse HEAD: 3a9b8cec4d0bf3335b08a4a9d2e4d6f36737acf6
+sha256 of inbound.rs at this tree: b4f41256fd2327a71d2b61c3ac87feb21464416d9202630beb7f9094deb0c28e  crates/liminal-protocol/src/client/inbound.rs
+sha256 of inbound.rs at 3a9b8ce:    b4f41256fd2327a71d2b61c3ac87feb21464416d9202630beb7f9094deb0c28e  -
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (target/debug/deps/liminal_protocol-801816fabb72c0b7)
+
+running 5 tests
+test client::p0_62_stranded_handle_tests::a_receipt_replay_never_reaches_the_arm_after_a_durable_leave ... ok
+test client::p0_62_stranded_handle_tests::the_pre_tear_credential_is_the_one_the_server_calls_stale ... ok
+test client::p0_62_stranded_handle_tests::a_foreign_participants_receipt_never_reaches_the_adopting_arm ... ok
+test client::p0_62_stranded_handle_tests::a_torn_but_bound_attach_recovers_from_its_receipt_replay ... FAILED
+test client::p0_62_stranded_handle_tests::an_applied_attach_receipt_can_only_ever_grant_the_next_generation ... FAILED
+
+failures:
+
+---- client::p0_62_stranded_handle_tests::a_torn_but_bound_attach_recovers_from_its_receipt_replay stdout ----
+Error: "#62 REPRODUCED: the rotated generation was dropped, the client is stranded one generation behind forever"
+
+---- client::p0_62_stranded_handle_tests::an_applied_attach_receipt_can_only_ever_grant_the_next_generation stdout ----
+
+thread 'client::p0_62_stranded_handle_tests::an_applied_attach_receipt_can_only_ever_grant_the_next_generation' (104635479) panicked at crates/liminal-protocol/src/client/p0_62_stranded_handle_tests.rs:348:5:
+assertion `left == right` failed: the applied grant must be exactly the successor of the retained generation
+  left: Some(Generation(4))
+ right: Some(Generation(5))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    client::p0_62_stranded_handle_tests::a_torn_but_bound_attach_recovers_from_its_receipt_replay
+    client::p0_62_stranded_handle_tests::an_applied_attach_receipt_can_only_ever_grant_the_next_generation
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 456 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p liminal-protocol --lib`
+RED TRUE EXIT=101
