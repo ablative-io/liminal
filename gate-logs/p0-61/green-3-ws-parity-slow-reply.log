@@ -1,0 +1,11 @@
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.48s
+     Running tests/ws_transport_parity.rs (target/debug/deps/ws_transport_parity-79ffb8ffa5358903)
+
+running 2 tests
+test a_slow_participant_reply_survives_the_receive_window_on_both_transports ... ok
+test a_correlated_reply_slower_than_the_receive_window_survives_on_both_transports ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 11.02s
+
+TRUE_EXIT=0
