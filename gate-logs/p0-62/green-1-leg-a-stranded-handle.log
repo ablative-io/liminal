@@ -1,0 +1,19 @@
+GREEN-1 (Leg A): the same five pins against the fix.
+git rev-parse HEAD (parent of the fix): 9ca24b47f32319296a20a3f9e0aa75a4468e5723
+
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.83s
+     Running unittests src/lib.rs (target/debug/deps/liminal_protocol-801816fabb72c0b7)
+
+running 5 tests
+test client::p0_62_stranded_handle_tests::the_pre_tear_credential_is_the_one_the_server_calls_stale ... ok
+test client::p0_62_stranded_handle_tests::a_receipt_replay_never_reaches_the_arm_after_a_durable_leave ... ok
+test client::p0_62_stranded_handle_tests::a_foreign_participants_receipt_never_reaches_the_adopting_arm ... ok
+test client::p0_62_stranded_handle_tests::an_applied_attach_receipt_can_only_ever_grant_the_next_generation ... ok
+test client::p0_62_stranded_handle_tests::a_torn_but_bound_attach_recovers_from_its_receipt_replay ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 456 filtered out; finished in 0.00s
+
+GREEN TRUE EXIT=0

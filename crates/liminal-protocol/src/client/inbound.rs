@@ -319,6 +319,10 @@ fn apply_correlated_value(aggregate: &mut ClientParticipantAggregate, value: &Se
             apply_attach_bound(aggregate, value);
             aggregate.detach_replay.apply_attach(value);
         }
+        ServerValue::UnboundReceipt(ReceiptReplay::CredentialAttach(value)) => {
+            apply_unbound_attach_receipt(aggregate, value);
+            aggregate.detach_replay.apply_attach(value);
+        }
         ServerValue::DetachCommitted(value) => {
             let attach_secret = match aggregate.binding {
                 ClientBindingState::Bound { attach_secret, .. }
@@ -372,7 +376,11 @@ fn apply_correlated_value(aggregate: &mut ClientParticipantAggregate, value: &Se
         | ServerValue::StaleOrUnknownReceipt(_)
         | ServerValue::MarkerNotDelivered(_)
         | ServerValue::MarkerMismatch(_)
-        | ServerValue::UnboundReceipt(_)
+        // Only the ENROLLMENT half stays inert. Its attach twin is adopted
+        // above; enrolment's own torn-but-bound recovery is the same shape but
+        // a different failure, and closing it here would be closing a failure
+        // this lane did not measure.
+        | ServerValue::UnboundReceipt(ReceiptReplay::Enrollment(_))
         | ServerValue::AckCommitted(_)
         | ServerValue::AckNoOp(_)
         | ServerValue::AckGap(_)
@@ -396,6 +404,45 @@ const fn apply_enroll_bound(
         generation: value.capability_generation(),
         attach_secret: value.attach_secret(),
         binding_epoch: value.origin_binding_epoch(),
+    };
+}
+
+/// Adopts the rotated credential from an attach receipt whose origin binding is
+/// no longer current.
+///
+/// The server replays this receipt to answer an attempt whose answer was lost,
+/// and it carries the two values the client cannot otherwise obtain: the
+/// successor capability generation and the newly minted attach secret. Without
+/// adopting them the client is stranded one generation behind forever — it can
+/// form only an attach the server refuses as `StaleAuthority`, while the attach
+/// the server would accept is refused locally as `BindingMismatch` (p0-61
+/// residue, task #62).
+///
+/// The result is [`ClientBindingState::Detached`], never `Bound`. An
+/// `UnboundReceipt` states exactly that the receipt no longer names its origin
+/// binding — the tear killed the connection that held it — so claiming `Bound`
+/// would assert a live binding the server has already released. `Detached`
+/// carries the credential forward and is the state a fresh attach may be formed
+/// from.
+///
+/// No identity, liveness or monotonicity guard is written here, and each
+/// omission is load-bearing rather than an oversight. [`decide_correlated_inbound`]
+/// refuses any value whose expected request the current binding does not accept
+/// before application, so a foreign participant's receipt and a receipt arriving
+/// after a durable Leave never reach this function; and that same gate forces
+/// the retained generation to equal the expected attach's presented generation,
+/// which [`AttachBound::ordinary`] guarantees is the exact predecessor of the
+/// granted one. A backward adoption is therefore unreachable, not merely
+/// guarded. All three are pinned in `p0_62_stranded_handle_tests`.
+const fn apply_unbound_attach_receipt(
+    aggregate: &mut ClientParticipantAggregate,
+    value: &AttachBound,
+) {
+    aggregate.binding = ClientBindingState::Detached {
+        conversation_id: value.conversation_id(),
+        participant_id: value.participant_id(),
+        generation: value.capability_generation(),
+        attach_secret: value.attach_secret(),
     };
 }
 
