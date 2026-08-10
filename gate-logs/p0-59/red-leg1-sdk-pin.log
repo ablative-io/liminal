@@ -1,0 +1,21 @@
+   Compiling liminal-protocol v0.4.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-59/crates/liminal-protocol)
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-59/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.05s
+     Running unittests src/lib.rs (target/debug/deps/liminal_sdk-141d97a61593d9b6)
+
+running 1 test
+test remote::participant::tests::replay::a_refused_detach_authority_checkpoints_and_restores_steerable ... FAILED
+
+failures:
+
+---- remote::participant::tests::replay::a_refused_detach_authority_checkpoints_and_restores_steerable stdout ----
+Error: Custom { kind: Other, error: "#59 REPRODUCED: the refusal could not be checkpointed: ResumeEncode(DecoupledDetachReplay)" }
+
+
+failures:
+    remote::participant::tests::replay::a_refused_detach_authority_checkpoints_and_restores_steerable
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p liminal-sdk --lib`
+RED LEG1 SDK TRUE EXIT=101

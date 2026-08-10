@@ -2,11 +2,12 @@ use std::io;
 use std::sync::Arc;
 use std::thread;
 
+use liminal_protocol::client::ClientOperationRecordRefusalReason;
 use liminal_protocol::wire::{
-    AuthorityStateTag, BindingStateTag, ClientDiscriminant, ClientRequest, DetachAttemptToken,
-    DetachCommitted, DetachInProgress, DetachRequest, DetachStaleAuthority, LeaveAttemptToken,
-    LeaveCommitted, ProtocolVersion, ServerDiscriminant, ServerValue, StaleAuthority,
-    decode_server_value_body,
+    AttachAttemptToken, AttachSecret, AuthorityStateTag, BindingStateTag, ClientDiscriminant,
+    ClientRequest, CredentialAttachRequest, DetachAttemptToken, DetachCommitted, DetachInProgress,
+    DetachRequest, DetachStaleAuthority, LeaveAttemptToken, LeaveCommitted, ProtocolVersion,
+    ServerDiscriminant, ServerValue, StaleAuthority, decode_server_value_body,
 };
 
 use super::support::{Action, Loopback, MemoryStore, PausedReconnectLoopback};
@@ -229,6 +230,84 @@ fn refused_detach_authority_never_destroys_live_participant_state() -> TestResul
     )?;
     loopback.finish()?;
     Ok(())
+}
+
+/// RED AT 8c8adec (P0 #59, leg 1): the refusal must CHECKPOINT, and the record
+/// it writes must restore into a participant the consumer can still steer.
+///
+/// Leg 2 keeps the handle alive through the encode refusal, which is the
+/// difference between a typed error and a dead kernel -- but it leaves the
+/// aggregate decoupled and every checkpoint from then on failing. This asserts
+/// the state the SDK is actually left in: the inbound is applied AND persisted,
+/// those bytes restore, and the restored participant answers the consumer's
+/// re-attach probe with a refusal it can act on rather than an error.
+///
+/// The probe presents the generation the broker just disclosed. The local
+/// binding has no credential at that generation, so the crate refuses with
+/// `BindingMismatch` -- the catchable outcome a fresh-state fallback keys on.
+/// Note this keys on FIRST-PRESENT refusals only; once the replay is settled, a
+/// re-presented detach is terminal by the consumer's own design, which is
+/// outside this crate's scope.
+///
+/// Kept separate from the leg-2 pin on purpose: that one asserts survival, this
+/// one asserts the state survived INTO. Either leg can fail alone.
+#[test]
+fn a_refused_detach_authority_checkpoints_and_restores_steerable() -> TestResult {
+    let token = DetachAttemptToken::new([10; 16]);
+    let (loopback, torn, config) = torn_rotation_state(token)?;
+    let store = MemoryStore::default();
+    let observed = store.clone();
+    let restored = RemoteParticipantHandle::restore(&config, store, &torn)?;
+    replay_into_rotated_broker(&restored)?;
+
+    let inbound = restored.receive().map_err(|error| {
+        io::Error::other(format!(
+            "#59 REPRODUCED: the refusal could not be checkpointed: {error:?}"
+        ))
+    })?;
+    assert!(
+        matches!(
+            inbound,
+            super::RemoteParticipantInbound::Applied {
+                value: ServerValue::StaleAuthority(_),
+                ..
+            }
+        ),
+        "the rotated broker's refusal must be applied, not retained"
+    );
+
+    let canonical = observed.bytes()?;
+    loopback.finish()?;
+    let reborn = RemoteParticipantHandle::restore(&config, MemoryStore::default(), &canonical)
+        .map_err(|error| {
+            io::Error::other(format!(
+                "#59 REPRODUCED: the checkpointed refusal does not restore: {error:?}"
+            ))
+        })?;
+    assert!(
+        matches!(
+            reborn.record_operation(stale_reattach())?,
+            super::RemoteOperationRecordOutcome::Refused {
+                reason: ClientOperationRecordRefusalReason::BindingMismatch,
+                ..
+            }
+        ),
+        "the restored participant must answer the re-attach probe with a catchable refusal"
+    );
+    Ok(())
+}
+
+/// The consumer's fresh-state probe: re-attach at the generation the broker
+/// disclosed, which the local binding has no credential for.
+fn stale_reattach() -> ClientRequest {
+    ClientRequest::CredentialAttach(CredentialAttachRequest {
+        conversation_id: CONVERSATION,
+        participant_id: PARTICIPANT,
+        capability_generation: generation(2).expect("generation two is nonzero"),
+        attach_secret: AttachSecret::new([2; 32]),
+        attach_attempt_token: AttachAttemptToken::new([11; 16]),
+        accept_marker_delivery_seq: None,
+    })
 }
 
 /// Builds the real torn state: a node whose durable resume record is ahead of

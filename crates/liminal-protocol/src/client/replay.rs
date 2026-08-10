@@ -1,6 +1,6 @@
 use super::{ClientParticipantAggregate, ClientResponseCorrelation};
 use crate::wire::{
-    AttachBound, DetachCommitted, DetachEnvelope, DetachInProgress, LeaveCommitted,
+    AttachBound, DetachCommitted, DetachEnvelope, DetachInProgress, LeaveCommitted, ServerValue,
     TerminalizedDetachCell,
 };
 
@@ -28,6 +28,38 @@ pub enum DetachReplayTerminal {
     DetachInProgress(DetachInProgress),
     /// Exact terminalized old-cell authority result.
     TerminalizedDetachCell(TerminalizedDetachCell),
+    /// The server refused the replayed detach's authority without answering it.
+    AuthorityRefused(DetachAuthorityRefused),
+}
+
+/// The exact server value that refused a replayed detach's authority.
+///
+/// This is the terminal for a correlated response that named the retained
+/// detach on the wire and then declined to act on it -- a rotated generation, a
+/// dropped binding, an unknown participant, a capacity or backpressure refusal,
+/// a retirement older than the replay. None of them answers the detach, and
+/// none of them can be retried at the presented generation, so the replay is
+/// over; but the reason is not interchangeable, and a consumer choosing between
+/// re-attaching, re-enrolling, and backing off needs to tell them apart.
+///
+/// The refusing value is therefore retained WHOLE rather than classified. The
+/// canonical record already nests a wire frame for the other terminals, so
+/// losslessness here costs one tag and no new format.
+///
+/// Only the settlement path constructs this, and only from a value the crate
+/// has already correlated to the retained detach, so the pairing cannot be
+/// forged through the public API. Restore re-checks it anyway.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetachAuthorityRefused {
+    pub(super) value: ServerValue,
+}
+
+impl DetachAuthorityRefused {
+    /// Borrows the exact refusing server value, retained without projection.
+    #[must_use]
+    pub const fn value(&self) -> &ServerValue {
+        &self.value
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +102,7 @@ impl SdkDetachReplayAggregate {
         }
     }
 
-    pub(super) const fn mark_initial_attempt_started(&mut self) {
+    pub(super) fn mark_initial_attempt_started(&mut self) {
         if let DetachReplayState::Recorded { status, .. } = &mut self.state {
             if matches!(status, DetachReplayStatus::Parked) {
                 *status = DetachReplayStatus::InFlight;

@@ -525,11 +525,12 @@ pub use reconnect::{
     resolve_lost_reconnect_authority,
 };
 pub use replay::{
-    ApplyAttachDecision, ApplyDetachOutcomeDecision, ApplyLeaveDecision, DetachReplayApplied,
-    DetachReplayOutcome, DetachReplayRefusal, DetachReplayRefusalReason, DetachReplayStatus,
-    DetachReplayTerminal, DetachTransportAttempt, DetachTransportAttemptDecision,
-    DetachTransportFate, DetachTransportFateDecision, SdkDetachReplayAggregate, apply_attach,
-    apply_detach_outcome, apply_leave_durable, transport_attempt_started, transport_fate,
+    ApplyAttachDecision, ApplyDetachOutcomeDecision, ApplyLeaveDecision, DetachAuthorityRefused,
+    DetachReplayApplied, DetachReplayOutcome, DetachReplayRefusal, DetachReplayRefusalReason,
+    DetachReplayStatus, DetachReplayTerminal, DetachTransportAttempt,
+    DetachTransportAttemptDecision, DetachTransportFate, DetachTransportFateDecision,
+    SdkDetachReplayAggregate, apply_attach, apply_detach_outcome, apply_leave_durable,
+    transport_attempt_started, transport_fate,
 };
 pub use resume::{
     ClientResumeRecord, ClientResumeRecordDecodeError, ClientResumeRecordEncodeError,
@@ -540,6 +541,8 @@ pub use resume::{
 mod authority_property_tests;
 #[cfg(test)]
 mod d1_flip_tests;
+#[cfg(test)]
+mod detach_authority_settlement_tests;
 #[cfg(test)]
 mod gen_skip_supersession_tests;
 #[cfg(test)]

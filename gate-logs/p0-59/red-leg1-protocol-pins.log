@@ -1,0 +1,33 @@
+   Compiling liminal-protocol v0.4.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-59/crates/liminal-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.30s
+     Running unittests src/lib.rs (target/debug/deps/liminal_protocol-fc1e1cbf0e0de881)
+
+running 5 tests
+test client::detach_authority_settlement_tests::a_refusal_never_settles_a_replay_it_does_not_name ... ok
+test client::detach_authority_settlement_tests::a_retirement_above_the_replay_still_supersedes_it ... ok
+test client::detach_authority_settlement_tests::an_answered_detach_keeps_its_own_terminal ... ok
+test client::detach_authority_settlement_tests::every_correlated_refusal_settles_the_replay_and_stays_persistable ... FAILED
+test client::detach_authority_settlement_tests::the_settled_terminal_retains_the_exact_refusing_value ... FAILED
+
+failures:
+
+---- client::detach_authority_settlement_tests::every_correlated_refusal_settles_the_replay_and_stays_persistable stdout ----
+
+thread 'client::detach_authority_settlement_tests::every_correlated_refusal_settles_the_replay_and_stays_persistable' (98818864) panicked at crates/liminal-protocol/src/client/detach_authority_settlement_tests.rs:145:9:
+#59 REPRODUCED: StaleAuthority::Detach(Live) cleared the expected detach and left the replay active
+
+---- client::detach_authority_settlement_tests::the_settled_terminal_retains_the_exact_refusing_value stdout ----
+
+thread 'client::detach_authority_settlement_tests::the_settled_terminal_retains_the_exact_refusing_value' (98818865) panicked at crates/liminal-protocol/src/client/detach_authority_settlement_tests.rs:177:13:
+#59 REPRODUCED: StaleAuthority::Detach(Live) did not settle into a typed authority refusal
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    client::detach_authority_settlement_tests::every_correlated_refusal_settles_the_replay_and_stays_persistable
+    client::detach_authority_settlement_tests::the_settled_terminal_retains_the_exact_refusing_value
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 451 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p liminal-protocol --lib`
+RED LEG1 PROTOCOL TRUE EXIT=101
