@@ -19,20 +19,20 @@ use crate::wire::{
     ServerValue,
 };
 
-type TestResult<T = ()> = Result<T, &'static str>;
+pub(super) type TestResult<T = ()> = Result<T, &'static str>;
 
-fn generation(value: u64) -> TestResult<Generation> {
+pub(super) fn generation(value: u64) -> TestResult<Generation> {
     Generation::new(value).ok_or("generation must be nonzero")
 }
 
-fn epoch(value: u64) -> TestResult<BindingEpoch> {
+pub(super) fn epoch(value: u64) -> TestResult<BindingEpoch> {
     Ok(BindingEpoch::new(
         ConnectionIncarnation::new(131, 132),
         generation(value)?,
     ))
 }
 
-fn bound_at(generation_value: u64) -> TestResult<ClientParticipantAggregate> {
+pub(super) fn bound_at(generation_value: u64) -> TestResult<ClientParticipantAggregate> {
     let mut aggregate = ClientParticipantAggregate::new();
     aggregate.binding = ClientBindingState::Bound {
         conversation_id: 141,
@@ -44,7 +44,7 @@ fn bound_at(generation_value: u64) -> TestResult<ClientParticipantAggregate> {
     Ok(aggregate)
 }
 
-fn replay_envelope(generation_value: u64, token: u8) -> TestResult<DetachEnvelope> {
+pub(super) fn replay_envelope(generation_value: u64, token: u8) -> TestResult<DetachEnvelope> {
     Ok(DetachEnvelope {
         conversation_id: 141,
         participant_id: 142,
@@ -53,7 +53,10 @@ fn replay_envelope(generation_value: u64, token: u8) -> TestResult<DetachEnvelop
     })
 }
 
-fn expected_exact_detach(generation_value: u64, token: u8) -> TestResult<ExpectedOperationState> {
+pub(super) fn expected_exact_detach(
+    generation_value: u64,
+    token: u8,
+) -> TestResult<ExpectedOperationState> {
     Ok(ExpectedOperationState {
         request: ClientRequest::Detach(DetachRequest {
             conversation_id: 141,
@@ -158,9 +161,9 @@ fn inbound_skip_attach_supersedes_and_the_new_detach_records() -> TestResult {
             ..
         }
     ));
-    let record = aggregate.resume_record().map_err(|_| {
-        "#43 REPRODUCED: inbound consumption minted the decoupled poison aggregate"
-    })?;
+    let record = aggregate
+        .resume_record()
+        .map_err(|_| "#43 REPRODUCED: inbound consumption minted the decoupled poison aggregate")?;
     record
         .restore()
         .map_err(|_| "superseded aggregate must restore")?;

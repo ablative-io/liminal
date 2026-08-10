@@ -474,5 +474,18 @@ fn terminal_matches(
                 && value.capability_generation() == request.capability_generation
                 && value.detach_attempt_token() == request.detach_attempt_token
         }
+        // A retained refusal is valid exactly when the crate would have
+        // correlated it to this detach in the first place. Reusing the
+        // correlation rule keeps one definition of "names this detach" instead
+        // of a second copy that can drift from it.
+        DetachReplayTerminal::AuthorityRefused(value) => super::correlation::matches_request(
+            value.value(),
+            &ClientRequest::Detach(crate::wire::DetachRequest {
+                conversation_id: request.conversation_id,
+                participant_id: request.participant_id,
+                capability_generation: request.capability_generation,
+                detach_attempt_token: request.detach_attempt_token,
+            }),
+        ),
     }
 }

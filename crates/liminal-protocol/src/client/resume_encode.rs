@@ -168,6 +168,9 @@ fn encode_replay(
                 DetachStaleAuthority::TerminalizedDetachCell(value.clone()),
             ))),
         ),
+        DetachReplayStatus::Terminal(DetachReplayTerminal::AuthorityRefused(value)) => {
+            (8, Some(value.value().clone()))
+        }
     };
     output.push(tag);
     put_u64(output, request.conversation_id);

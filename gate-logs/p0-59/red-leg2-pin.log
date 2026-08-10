@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running unittests src/lib.rs (target/debug/deps/liminal_sdk-141d97a61593d9b6)
+
+running 1 test
+Error: Custom { kind: Other, error: "#59 REPRODUCED: recover_expected_operation reported destroyed state after a pure encode refusal" }
+test remote::participant::tests::replay::refused_detach_authority_never_destroys_live_participant_state ... FAILED
+
+failures:
+
+failures:
+    remote::participant::tests::replay::refused_detach_authority_never_destroys_live_participant_state
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 66 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p liminal-sdk --lib`
+RED LEG2 PIN TRUE EXIT=101

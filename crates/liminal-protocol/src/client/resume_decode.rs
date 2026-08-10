@@ -142,7 +142,7 @@ fn decode_replay(
     if tag == 0 {
         return Ok(DetachReplayState::Empty);
     }
-    if !(1..=7).contains(&tag) {
+    if !(1..=8).contains(&tag) {
         return Err(ClientResumeRecordDecodeError::InvalidTag {
             section: ClientResumeRecordSection::DetachReplay,
             tag,
@@ -159,7 +159,7 @@ fn decode_replay(
         2 => DetachReplayStatus::InFlight,
         3 => DetachReplayStatus::Superseded,
         4 => DetachReplayStatus::LeaveSuperseded,
-        5..=7 => decode_terminal(reader, tag)?,
+        5..=8 => decode_terminal(reader, tag)?,
         _ => {
             return Err(ClientResumeRecordDecodeError::InvalidTag {
                 section: ClientResumeRecordSection::DetachReplay,
@@ -199,6 +199,26 @@ fn decode_terminal(
                 DetachStaleAuthority::TerminalizedDetachCell(value),
             )),
         ) => DetachReplayTerminal::TerminalizedDetachCell(value),
+        // Tag 8 retains the refusing value whole. The three values that have
+        // their own tags are rejected here so one state has exactly one
+        // encoding: without this, a `DetachCommitted` could arrive under tag 8
+        // and restore as a refusal of the very detach it committed.
+        (
+            8,
+            ServerValue::DetachCommitted(_)
+            | ServerValue::DetachInProgress(_)
+            | ServerValue::StaleAuthority(StaleAuthority::Detach(
+                DetachStaleAuthority::TerminalizedDetachCell(_),
+            )),
+        ) => {
+            return Err(ClientResumeRecordDecodeError::NestedCodec {
+                section: ClientResumeRecordSection::DetachReplay,
+                source: None,
+            });
+        }
+        (8, value) => DetachReplayTerminal::AuthorityRefused(super::DetachAuthorityRefused {
+            value: alloc::boxed::Box::new(value),
+        }),
         _ => {
             return Err(ClientResumeRecordDecodeError::NestedCodec {
                 section: ClientResumeRecordSection::DetachReplay,

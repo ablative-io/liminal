@@ -233,15 +233,67 @@ fn decide_inbound_inner(
         return inbound_refusal(aggregate, value, reason);
     }
 
-    // This clear stays coupled to the detach replay slot because every
-    // matching arm of `apply_correlated_value` supersedes or terminalizes the
-    // replay (attach supersession is generation-skip-aware), and any residual
-    // decoupling is refused at the next persist by
-    // `ClientResumeRecordEncodeError::DecoupledDetachReplay` instead of
-    // becoming a record no restore accepts.
-    aggregate.expected = None;
-    apply_correlated_value(&mut aggregate, &value);
+    retire_expected_operation(&mut aggregate, &value);
     ClientInboundDecision::Applied(ClientInboundApplied { aggregate, value })
+}
+
+/// Retires the expected slot and settles the detach replay in one statement.
+///
+/// The two are a coupled pair: an active replay without its exact expected
+/// detach is a state `resume_record` refuses to encode
+/// (`ClientResumeRecordEncodeError::DecoupledDetachReplay`) and no restore
+/// accepts. So the clear may not happen on its own.
+///
+/// This function used to be that bare clear, under a comment asserting every
+/// matching arm of `apply_correlated_value` supersedes or terminalizes the
+/// replay. The assertion was false. A correlated value reaches here only when
+/// its wire identity resolves to the expected request's key, and six values
+/// whose key is a detach refuse that detach's AUTHORITY without answering it --
+/// a rotated generation, a dropped binding, an unknown participant, a
+/// connection-capacity or observer-backpressure refusal, a retirement older
+/// than the replay. All six fell through `apply_correlated_value` untouched and
+/// left the replay active behind a cleared slot.
+///
+/// The mechanism is deliberately an OBSERVATION rather than a longer list of
+/// arms: whatever `apply_correlated_value` did or did not do, a replay left
+/// active is settled here into a terminal retaining the exact refusing value.
+/// A list is what was wrong before, and the list assembled while fixing it was
+/// itself wrong in both directions -- it named a value that cannot correlate to
+/// a detach (`ConversationOrderExhausted`, whose envelope has no detach
+/// variant) and missed one that can (`ObserverBackpressure::Detach`). A new
+/// correlatable refusal class therefore cannot reintroduce the decoupling,
+/// because nothing here enumerates the classes.
+fn retire_expected_operation(aggregate: &mut ClientParticipantAggregate, value: &ServerValue) {
+    let expected_detach = match aggregate
+        .expected
+        .as_ref()
+        .map(|expected| &expected.request)
+    {
+        Some(crate::wire::ClientRequest::Detach(request)) => Some(request.clone()),
+        _ => None,
+    };
+    aggregate.expected = None;
+    apply_correlated_value(aggregate, value);
+    if let Some(request) = expected_detach {
+        let envelope = crate::wire::DetachEnvelope {
+            conversation_id: request.conversation_id,
+            participant_id: request.participant_id,
+            capability_generation: request.capability_generation,
+            detach_attempt_token: request.detach_attempt_token,
+        };
+        aggregate
+            .detach_replay
+            .settle_refused_authority(&envelope, value);
+        debug_assert!(
+            !aggregate.detach_replay.is_active()
+                || aggregate.detach_replay.request() != Some(&envelope),
+            "retiring an expected detach must leave its own replay settled"
+        );
+    }
+    debug_assert!(
+        aggregate.expected.is_none(),
+        "the expected slot must be retired by this statement"
+    );
 }
 
 const fn inbound_refusal(
