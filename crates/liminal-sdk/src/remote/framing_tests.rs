@@ -294,3 +294,186 @@ fn the_response_deadline_outlives_a_single_receive_window() {
          receive window ({IO_TIMEOUT:?})"
     );
 }
+
+/// A stall past one real receive window but well inside a pump caller's own
+/// budget: the reply is slow, not absent.
+const STALL_PAST_A_PUMP_WINDOW: Duration = Duration::from_secs(8);
+
+/// RED PIN (p0-63, direction (a)) — silence is an outcome, not a failure.
+///
+/// The pump door must answer a quiet connection with `Ok(None)` inside the
+/// budget its caller named. Before this lane the only participant read was
+/// `receive_participant`, which waits out [`RESPONSE_DEADLINE`] = 60 s because
+/// its caller is owed a reply — correct there, and the reason a drain loop on an
+/// idle connection blew a 30 s boot gate in the field.
+///
+/// The bound asserted is deliberately far below `RESPONSE_DEADLINE` rather than
+/// merely below it: a pump read that quietly inherited the reply-owed deadline
+/// would still be "under 60 s" on any implementation that returned at all.
+#[test]
+fn a_quiet_pump_read_reports_silence_within_the_callers_budget() -> Result<(), SdkError> {
+    const BUDGET: Duration = Duration::from_millis(120);
+
+    let mut connection = Connection {
+        stream: StallingStream::silent(),
+        buffer: Vec::new(),
+        open_conversations: BTreeSet::new(),
+    };
+
+    let started = Instant::now();
+    let outcome = connection.receive_optional_within(BUDGET)?;
+    let waited = started.elapsed();
+
+    if let Some(frame) = outcome {
+        return Err(fixture_failure(&format!(
+            "a silent peer produced a frame: {frame:?}"
+        )));
+    }
+    assert!(
+        waited >= BUDGET,
+        "the pump read reported silence before its budget was spent: waited {waited:?} \
+         against a {BUDGET:?} budget"
+    );
+    assert!(
+        waited < RESPONSE_DEADLINE / 10,
+        "the pump read waited {waited:?} for a {BUDGET:?} budget — it is inheriting the \
+         reply-owed response deadline ({RESPONSE_DEADLINE:?}) instead of its own bound"
+    );
+    Ok(())
+}
+
+/// A zero budget is a poll of what already decoded, and must never reach the
+/// socket: `setsockopt` refuses a zero read deadline with `EINVAL`, so an
+/// implementation that passed the budget straight down would turn the cheapest
+/// possible pump call into a transport error.
+#[test]
+fn a_zero_budget_polls_without_arming_a_read() -> Result<(), SdkError> {
+    let (listener, address) = bind_fake_server()?;
+    let ack = frame_bytes(&connect_ack())?;
+    let server = std::thread::spawn(move || -> Result<(), SdkError> {
+        let (mut socket, _peer) = listener.accept().map_err(|source| SdkError::Connection {
+            description: format!("fake server accept failed: {source}"),
+        })?;
+        let mut buffer = Vec::new();
+        // The handshake.
+        read_and_discard_one(&mut socket, &mut buffer)?;
+        socket
+            .write_all(&ack)
+            .map_err(|source| SdkError::Connection {
+                description: format!("fake server handshake write failed: {source}"),
+            })?;
+        // The post-poll request, proving the connection still works.
+        read_and_discard_one(&mut socket, &mut buffer)?;
+        socket
+            .write_all(&ack)
+            .map_err(|source| SdkError::Connection {
+                description: format!("fake server second write failed: {source}"),
+            })?;
+        let mut scratch = [0_u8; 512];
+        while socket.read(&mut scratch).unwrap_or(0) > 0 {}
+        Ok(())
+    });
+
+    // A real socket, so a zero deadline would reach a real `setsockopt`.
+    let mut connection = Connection::connect_with_auth(&address, &[])?;
+    let polled = connection.receive_optional_within(Duration::ZERO)?;
+    assert!(
+        polled.is_none(),
+        "a zero-budget poll of an empty buffer produced a frame: {polled:?}"
+    );
+
+    // The connection is still usable afterwards: the poll neither armed a
+    // window it failed to restore nor consumed anything.
+    connection.send(&connect_ack())?;
+    let replied = connection.receive_optional_within(Duration::from_secs(10))?;
+    assert!(
+        matches!(replied, Some(Frame::ConnectAck { .. })),
+        "the connection did not survive a zero-budget poll: {replied:?}"
+    );
+    drop(connection);
+    server.join().ok();
+    Ok(())
+}
+
+/// BOTH-WAYS PROOF (p0-63, direction (c)) — the pump window is a GRAIN, the
+/// caller's budget is the BOUND.
+///
+/// The failure this forecloses is the mirror of the one the lane fixes: making
+/// a bounded read return on the first closed receive window would hand every
+/// caller a 5 s ceiling, and a caller using this door to await a correlated
+/// answer would then get the 2026-08-10 outage back through the new API.
+///
+/// A real socket under the real [`IO_TIMEOUT`], against a server that answers
+/// after [`STALL_PAST_A_PUMP_WINDOW`] — longer than one receive window and
+/// longer than [`PARTICIPANT_PUMP_WINDOW`], but well inside the 30 s budget the
+/// caller names. The reply must arrive.
+#[test]
+fn a_pump_read_spends_the_callers_budget_not_one_receive_window() -> Result<(), SdkError> {
+    const CALLER_BUDGET: Duration = Duration::from_secs(30);
+
+    assert!(
+        STALL_PAST_A_PUMP_WINDOW > IO_TIMEOUT
+            && STALL_PAST_A_PUMP_WINDOW > crate::PARTICIPANT_PUMP_WINDOW,
+        "the fixture no longer crosses a closed window, so it would pass against a read \
+         that gave up on the first one"
+    );
+
+    let (listener, address) = bind_fake_server()?;
+    let ack = frame_bytes(&connect_ack())?;
+    let server = std::thread::spawn(move || -> Result<(), SdkError> {
+        let (mut socket, _peer) = listener.accept().map_err(|source| SdkError::Connection {
+            description: format!("fake server accept failed: {source}"),
+        })?;
+        let mut buffer = Vec::new();
+        // The handshake, answered promptly.
+        read_and_discard_one(&mut socket, &mut buffer)?;
+        socket
+            .write_all(&ack)
+            .map_err(|source| SdkError::Connection {
+                description: format!("fake server handshake write failed: {source}"),
+            })?;
+        // The slow reply: several closed receive windows, then the frame.
+        read_and_discard_one(&mut socket, &mut buffer)?;
+        std::thread::sleep(STALL_PAST_A_PUMP_WINDOW);
+        socket
+            .write_all(&ack)
+            .map_err(|source| SdkError::Connection {
+                description: format!("fake server slow write failed: {source}"),
+            })?;
+        let mut scratch = [0_u8; 512];
+        while socket.read(&mut scratch).unwrap_or(0) > 0 {}
+        Ok(())
+    });
+
+    let mut connection = Connection::connect_with_auth(&address, &[])?;
+    connection.send(&connect_ack())?;
+    let started = Instant::now();
+    let replied = connection.receive_optional_within(CALLER_BUDGET)?;
+    let waited = started.elapsed();
+
+    assert!(
+        matches!(replied, Some(Frame::ConnectAck { .. })),
+        "a reply slower than one receive window was reported as silence after {waited:?}: \
+         {replied:?} — the bounded read is ending on the window instead of the budget"
+    );
+    assert!(
+        waited >= IO_TIMEOUT,
+        "the fixture did not actually cross a closed receive window: waited {waited:?}"
+    );
+    drop(connection);
+    server.join().ok();
+    Ok(())
+}
+
+/// The pump window must sit strictly below the reply-owed deadline, or the two
+/// doors would be one door and the lane would have changed nothing. Pins the
+/// ordering the split rests on rather than either literal value.
+#[test]
+fn the_pump_window_is_shorter_than_the_reply_owed_deadline() {
+    assert!(
+        crate::PARTICIPANT_PUMP_WINDOW < RESPONSE_DEADLINE,
+        "the pump window ({:?}) must be shorter than the reply-owed response deadline \
+         ({RESPONSE_DEADLINE:?})",
+        crate::PARTICIPANT_PUMP_WINDOW
+    );
+}
