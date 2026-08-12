@@ -63,14 +63,35 @@ mechanically required. The identity gate is a bound on permanent ordinals, not
 on retention, and refusing to mint a *new* identity is not refusing an honest
 arrival its own history.
 
-## 3. Values ratify at Tom's desk
+## 3. Values — set at the seat, premises beside them
 
 **The build ships MECHANISM ONLY.** The TTL durations, the two window sizes and
 the three tripwire thresholds all survive as configured numbers, and they stay
 config-owned: no in-tree constants, no serde defaults, every field required
-(`config/types.rs:567@77e4845` — the house ships no defaults). The concrete
-deployed values ratify at Tom's desk before lock. Nothing in this lane proposes
-a number.
+(`config/types.rs:567@77e4845` — the house ships no defaults).
+
+*History of this section:* the original ruling routed the concrete values to
+Tom's desk for ratification before lock. Tom's word of 2026-08-13 (relayed by
+the sequencer) struck that gate: the values are a technical call at this seat,
+and "configured values with written rationale IS the lock." This section is
+that lock. A minted value owns its premises — what it is derived from, when,
+and what growth re-derives it.
+
+| Field | Value | Premise | Re-derivation trigger |
+|---|---|---|---|
+| `attach_receipt_ttl_ms` | 3,600,000 (1h) | Deployed estate value, unchanged. Bounds the secret-bearing receipt window; long enough for any observed reconnect/recovery cycle (field recoveries settle in seconds–minutes), short enough that a leaked receipt body ages out within an operator's working hour. | A field recovery observed to need a receipt beyond 1h. |
+| `receipt_provenance_ttl_ms` | 7,200,000 (2h) | Deployed estate value, unchanged. Must be ≥ receipt TTL (validated order); 2× gives classification a full receipt-lifetime of hindsight after the receipt itself expires. | A recovering client observed presenting a receipt older than 2h that deserved an exact terminal reason. |
+| `max_live_attach_receipts_per_participant` (window) | 8 | Deployed estate value, semantics now a displacement window. A participant legitimately holds 2 live receipts (enrollment + current attach); 8 = 4× headroom for rotation bursts. Under displacement, exceeding it costs classification precision, never admission. | Displacement counters showing routine steady-state displacement in this scope for honest clients. |
+| `max_receipt_provenance_per_participant` (window) | 256 | Deployed estate value (raised 64→256 on 2026-08-06 after the boot-wedge). The worst observed crash-loop specimen minted 234 generations in one replay burst; 256 covers it. Under displacement the number no longer gates boot — a burst past 256 displaces oldest fingerprints (coarser classification, counted loudly) instead of wedging. | The displacement counter firing on a burst that a *recovering* client then paid for in lost exact-reason classification. |
+| `live_receipt_server_report_threshold` | 1,024 | The value the old design considered server live-receipt capacity (`max_live_attach_receipts_server`, deleted). Crossing what used to wall is exactly the churn-storm signal the tripwire exists to report. | Estate growth: more than ~128 routinely-live participants (1,024 / 8). |
+| `receipt_provenance_server_report_threshold` | 4,096 | The old server provenance cap's value, same reasoning: the threshold at which the old design would have begun refusing third parties is precisely the level worth a loud report. | Estate growth: routine in-window provenance approaching 4,096 without any crash loop present. |
+| `receipt_provenance_per_conversation_report_threshold` | 256 | The old per-conversation cap's value. The fossil specimen showed a single crash-looping participant can pace ~468 inserts through one 2h window — this threshold fires roughly halfway through such a burst, early enough to matter. | A legitimate (non-crash-loop) conversation observed crossing 256 in-window. |
+
+Derived 2026-08-13 at the seat, from: the deployed estate config read at the
+sequencer's bytes (2026-08-12), the 64/64 boot-wedge specimen and its 08-06
+raise, and the fossil churn specimen (234 generations / 468 inserts, single
+replay burst). The premises are the lock; changing a value without rewriting
+its premise row is the silent-fallback failure this lane exists to end.
 
 ## 4. Design decisions this lane owned
 
@@ -289,3 +310,4 @@ report, not through negotiated capability state.
 | Rev | Date | Author | Change |
 |---|---|---|---|
 | r1 | 2026-08-13 | seat/lane p0-39 | Initial design record for the ruled hybrid: TTL-only shared pools with reporting tripwires, per-participant displacement windows, the delete-and-rename config decision with its deployment consequence, clock-free replay-equivalent displacement ordering, the pinned classification degradation, and the visibility surface that replaces the wall. |
+| r2 | 2026-08-13 | seat (Hermes) | §3 rewritten: the values-to-Tom ratification gate struck by Tom's own word (relayed 2026-08-13); values set at the seat with premises and re-derivation triggers beside them — configured values with written rationale is the lock. All seven values derived; none changed from deployed/prior numbers. |
