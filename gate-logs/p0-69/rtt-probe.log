@@ -1,0 +1,49 @@
+=== per-record RTT probe -- board #68, lane p0-69 (RELEASE, headline run) ===
+
+wall clock start : 2026-08-12T17:45:18Z UTC
+host             : Darwin 25.3.0 arm64
+cpu              : Apple M1 Max
+logical cores    : 10
+physical memory  : 32 GiB
+load average     : 6.95 8.96 11.17  <-- SHARED BOX
+rev measured     : 339e81a504709321f248a7c102677178b4391ca1
+branch           : p0-69-golden-trace  (off origin/main 339e81a)
+toolchain        : rustc 1.97.1 (8bab26f4f 2026-07-14)
+command          : cargo test --release -p liminal-server --test participant_record_rtt_probe -- --ignored --nocapture --test-threads=1
+
+    Finished `release` profile [optimized] target(s) in 2.23s
+     Running tests/participant_record_rtt_probe.rs (target/release/deps/participant_record_rtt_probe-401695c7c668eda2)
+
+running 1 test
+test per_record_rtt_on_both_consumption_profiles ... --- per-record RTT probe (board #68) ---
+started        : unix 1786556721
+platform       : macos
+arch           : aarch64
+build profile  : RELEASE (optimized, debug_assertions off)
+warmup/measured: 100 / 1000 per profile
+payload        : 64 bytes
+clients        : 1, steady state, no concurrency
+durability     : on-disk store; ack follows append+flush
+flush site     : crates/liminal-server/src/server/participant/production/log.rs:228-250 @ 339e81a
+
+PROFILE            = the measured per-record commit round trip
+PROFILE (control)  = same path, AckNoOp, no durable append/flush
+
+RTT tcp      n=1000  min=  62026.0us  median=  99029.5us  mean= 174288.9us  p99= 527988.9us  max= 707833.2us
+RTT tcp/ctl  n=1000  min=     65.1us  median=    153.0us  mean=    178.3us  p99=    603.0us  max=   1467.9us
+RTT loopback n=1000  min=  45441.5us  median=  87586.5us  mean=  88394.5us  p99= 168222.0us  max= 246279.0us
+RTT loopback/ctl n=1000  min=     12.6us  median=     31.4us  mean=    286.0us  p99=   6648.3us  max=  20128.8us
+
+transport delta (median, record) : tcp - loopback = +11442.9us
+transport delta (median, control): tcp - loopback = +121.5us
+durability cost (median)         : tcp +98876.5us   loopback +87555.1us
+durability share of the median   : tcp 99.8%   loopback 100.0%
+
+temp store dir : /var/folders/87/tdf6vfls1fj_4ydz_y6sk3580000gn/T/.tmpDkgeMN (auto-removed)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 309.42s
+
+
+wall clock end   : 2026-08-12T17:50:30Z UTC
+load average end : 10.15 10.40 11.31

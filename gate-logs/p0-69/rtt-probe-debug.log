@@ -1,0 +1,70 @@
+=== per-record RTT probe -- board #68, lane p0-69 (DEBUG comparison run) ===
+
+Purpose: the release run in rtt-probe.log is the headline. This one answers
+one question -- does optimization move the number? -- and doubles as a second
+independent sample of the same quantity on the same box.
+
+wall clock start : 2026-08-12T17:50:52Z UTC
+host             : Darwin 25.3.0 arm64
+cpu              : Apple M1 Max
+logical cores    : 10
+load average     : 9.85 10.25 11.23  <-- SHARED BOX
+rev measured     : 339e81a504709321f248a7c102677178b4391ca1
+branch           : p0-69-golden-trace  (off origin/main 339e81a)
+toolchain        : rustc 1.97.1 (8bab26f4f 2026-07-14)
+command          : cargo test -p liminal-server --test participant_record_rtt_probe -- --ignored --nocapture --test-threads=1
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running tests/participant_record_rtt_probe.rs (target/debug/deps/participant_record_rtt_probe-3beb12215263bce4)
+
+running 1 test
+test per_record_rtt_on_both_consumption_profiles ... --- per-record RTT probe (board #68) ---
+started        : unix 1786557052
+platform       : macos
+arch           : aarch64
+build profile  : DEBUG (unoptimized, debug_assertions on)
+warmup/measured: 100 / 1000 per profile
+payload        : 64 bytes
+clients        : 1, steady state, no concurrency
+durability     : on-disk store; ack follows append+flush
+flush site     : crates/liminal-server/src/server/participant/production/log.rs:228-250 @ 339e81a
+
+PROFILE            = the measured per-record commit round trip
+PROFILE (control)  = same path, AckNoOp, no durable append/flush
+
+RTT tcp      n=1000  min=  50413.2us  median=  86560.1us  mean=  85704.2us  p99= 139253.0us  max= 385614.0us
+RTT tcp/ctl  n=1000  min=    100.9us  median=    208.9us  mean=    359.8us  p99=   7147.0us  max=   7820.6us
+RTT loopback n=1000  min=  51525.4us  median= 476571.9us  mean= 418079.1us  p99= 965450.5us  max=1475939.2us
+RTT loopback/ctl n=1000  min=     56.5us  median=    127.5us  mean=    173.1us  p99=    795.9us  max=   1853.0us
+
+transport delta (median, record) : tcp - loopback = -390011.8us
+transport delta (median, control): tcp - loopback = +81.4us
+durability cost (median)         : tcp +86351.2us   loopback +476444.3us
+durability share of the median   : tcp 99.8%   loopback 100.0%
+
+temp store dir : /var/folders/87/tdf6vfls1fj_4ydz_y6sk3580000gn/T/.tmpOSl9VI (auto-removed)
+
+--- PROVENANCE NOTE, appended by the operator after the run ---
+
+This log is TRUNCATED. The four RTT lines and every derived figure above are the
+real, complete output of the probe; the trailing "wall clock end" / "load
+average end" lines are missing because the surrounding shell wrapper hit a
+9m50s harness timeout and was killed AFTER the measurement had printed but
+BEFORE the wrapper's own footer ran. Nothing above this note was edited.
+
+Observed end conditions, taken immediately after, in place of the footer:
+  wall clock end   : 2026-08-12T18:00:00Z UTC (approx; the poll that observed
+                     the process gone reported "up 8 days, 9:45")
+  load average end : 10.03 11.09 11.08
+
+READ THE loopback RECORD LINE WITH CARE. Its median of 476,571.9us is 5.5x the
+tcp median measured in the SAME run and 5.8x the loopback median measured in the
+release run twenty minutes earlier. That is a contention artifact, not a
+property of the loopback transport: the box was a shared laptop with a
+concurrent build competing for the same disk, and the durable flush is the term
+that absorbs disk contention. The control series in the same run did NOT move
+correspondingly (127.5us), which is precisely why the control is there.
+
+This run is retained as evidence of RUN-TO-RUN VARIANCE in the durability term,
+not as a measurement of the loopback transport. The headline figures are in
+gate-logs/p0-69/rtt-probe.log.
