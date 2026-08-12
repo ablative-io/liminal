@@ -1,0 +1,12 @@
+   Compiling liminal-server v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-37/crates/liminal-server)
+   Compiling liminal-sdk v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-37/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.34s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-5117af88e6fe0556)
+
+running 3 tests
+test server::participant::production::tests_37_observed_provenance::the_just_minted_attach_receipt_holds_no_provenance_slot ... ok
+test server::participant::production::tests_37_observed_provenance::r_c0_token_phase_classification_is_unchanged_by_observed_provenance_retention ... ok
+test server::participant::production::tests_37_observed_provenance::unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 694 filtered out; finished in 1.23s
+

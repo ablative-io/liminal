@@ -1,0 +1,21 @@
+   Compiling liminal-server v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-37/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.67s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-5117af88e6fe0556)
+
+running 13 tests
+test server::participant::production::tests_capacity::enrollment_live_receipt_server_scope_refuses_and_survives_restart ... ok
+test server::participant::production::tests_capacity_attach::attach_live_receipt_server_scope_refusal ... ok
+test server::participant::production::tests_capacity_attach::attach_live_receipt_participant_scope_refusal ... ok
+test server::participant::production::tests_capacity::enrollment_identity_server_scope_refuses_and_survives_restart ... ok
+test server::participant::production::tests_capacity::enrollment_provenance_server_scope_refusal ... ok
+test server::participant::production::tests_capacity::enrollment_provenance_conversation_scope_refusal_is_scoped ... ok
+test server::participant::production::tests_capacity::enrollment_mixed_full_and_over_limit_refuses_the_earlier_full_scope ... ok
+test server::participant::production::tests_capacity::enrollment_over_limit_scope_refuses_with_true_numbers ... ok
+test server::participant::production::tests_capacity_attach::attach_mixed_full_and_over_limit_refuses_the_earlier_full_scope ... ok
+test server::participant::production::tests_capacity_attach::attach_over_limit_scope_refuses_with_true_numbers ... ok
+test server::participant::production::tests_capacity_attach::full_provenance_participant_scope_refuses_and_in_window_unknown_is_stale_authority ... ok
+test server::participant::production::tests_capacity_attach::attach_provenance_scope_refusals_follow_the_fixed_order ... ok
+test server::participant::production::tests_capacity_attach::expired_provenance_prunes_freeing_capacity_and_degrading_exact_old_tokens ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 684 filtered out; finished in 5.95s
+

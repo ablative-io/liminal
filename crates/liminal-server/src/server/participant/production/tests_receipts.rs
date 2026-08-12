@@ -115,6 +115,62 @@ pub(super) fn generation(value: u64) -> Result<Generation, Box<dyn Error>> {
     Generation::new(value).ok_or_else(|| "zero generation in test fixture".into())
 }
 
+/// One enrolled participant whose enrollment fingerprint is RETAINED, because
+/// possession of the secret that receipt minted has been proven.
+pub(super) struct ProvenEnrollment {
+    pub(super) participant_id: u64,
+    /// Secret minted by the proving attach (generation 2).
+    pub(super) attach_secret: AttachSecret,
+}
+
+/// Enrolls one participant and proves possession of the secret its enrollment
+/// receipt minted — the event that makes that fingerprint occupy a stage-8
+/// provenance slot.
+///
+/// Board #37: provenance is retained only for receipts whose delivery was
+/// OBSERVED, and a committed credential attach IS the proof of delivery for
+/// the receipt whose secret it presented (only a fresh attempt token verified
+/// against `slot.attach_secret` reaches a commit). A bare `enroll` therefore
+/// leaves NOTHING occupying the provenance scopes; every fixture that needs a
+/// retained fingerprint has to earn one through this helper.
+///
+/// Leaves the participant bound at generation 2 holding exactly one retained
+/// fingerprint (its enrollment's — the attach receipt just minted is itself
+/// still unproven).
+pub(super) fn enroll_proving_provenance(
+    handler: &ProductionParticipantHandler,
+    incarnation: ConnectionIncarnation,
+    conversation_id: u64,
+    tokens: [[u8; 16]; 3],
+) -> Result<ProvenEnrollment, Box<dyn Error>> {
+    let [enrollment_token, detach_token, attach_token] = tokens;
+    let receipt = enroll(handler, incarnation, conversation_id, enrollment_token)?;
+    let participant_id = receipt.participant_id();
+    detach(
+        handler,
+        incarnation,
+        conversation_id,
+        participant_id,
+        GEN_ONE,
+        detach_token,
+    )?;
+    let bound = attach(
+        handler,
+        incarnation,
+        attach_request(
+            conversation_id,
+            participant_id,
+            GEN_ONE,
+            receipt.attach_secret(),
+            attach_token,
+        ),
+    )?;
+    Ok(ProvenEnrollment {
+        participant_id,
+        attach_secret: bound.attach_secret(),
+    })
+}
+
 /// A deadline-provenance replay of an attach token carries the RESULT
 /// generation (presented + 1), not the presented one.
 #[test]

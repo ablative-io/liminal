@@ -1,0 +1,26 @@
+   Compiling liminal-server v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-37/crates/liminal-server)
+   Compiling liminal-sdk v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-37/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.37s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-5117af88e6fe0556)
+
+running 3 tests
+test server::participant::production::tests_37_observed_provenance::unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one ... FAILED
+test server::participant::production::tests_37_observed_provenance::the_just_minted_attach_receipt_holds_no_provenance_slot ... FAILED
+test server::participant::production::tests_37_observed_provenance::r_c0_token_phase_classification_is_unchanged_by_observed_provenance_retention ... ok
+
+failures:
+
+---- server::participant::production::tests_37_observed_provenance::unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one stdout ----
+Error: "enrollment did not bind: ReceiptCapacityExceeded(Enrollment { request: EnrollmentEnvelope { conversation_id: 802, enrollment_token: EnrollmentToken([114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114]) }, scope: ProvenanceServer, limit: 1, occupied: 1 })"
+
+---- server::participant::production::tests_37_observed_provenance::the_just_minted_attach_receipt_holds_no_provenance_slot stdout ----
+Error: "attach did not bind: ReceiptCapacityExceeded(CredentialAttach { request: AttachEnvelope { conversation_id: 803, participant_id: 0, capability_generation: Generation(1), attach_attempt_token: AttachAttemptToken([121, 121, 121, 121, 121, 121, 121, 121, 121, 121, 121, 121, 121, 121, 121, 121]), accept_marker_delivery_seq: None }, scope: ProvenanceParticipant, limit: 1, occupied: 1 })"
+
+
+failures:
+    server::participant::production::tests_37_observed_provenance::the_just_minted_attach_receipt_holds_no_provenance_slot
+    server::participant::production::tests_37_observed_provenance::unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 694 filtered out; finished in 0.89s
+
+error: test failed, to rerun pass `-p liminal-server --lib`

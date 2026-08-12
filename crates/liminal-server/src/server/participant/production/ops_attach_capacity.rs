@@ -35,25 +35,50 @@ impl ConversationAuthority {
         let provenance_participant_occupied = slot.provenance_occupancy(now)?;
         let provenance_conversation_occupied = self.provenance_occupancy(now)?;
         let token = request.attach_attempt_token.into_bytes();
+        let mut inserts = vec![OccupancyEntry {
+            expires_at: deadlines.receipt_expires_at(),
+            conversation_id: self.conversation_id,
+            participant_id: request.participant_id,
+            kind: ResourceKind::AttachReceipt,
+            token,
+        }];
+        // Board #37: this attach is itself the proof of delivery for the
+        // receipt it SUPERSEDES — only a fresh attempt token verified against
+        // `slot.attach_secret` reaches a commit, and that secret was minted by
+        // and delivered in exactly that predecessor. So the provenance
+        // fingerprint this operation causes to be retained belongs to the
+        // predecessor, never to the receipt being minted here (whose own
+        // possession is still unproven and may never be proven).
+        //
+        // Exactly one entry is added, as before: `slot.attach.is_some()`
+        // implies `enrollment_receipt_ended.is_some()` (both are written only
+        // by `install_attach_receipt`), so the arms are mutually exclusive and
+        // the crate selector's "admit one provenance" algebra is unchanged.
+        //
+        // Each key is byte-identical to the one `capacity_contribution`
+        // re-derives from the post-commit slot, so a later replay fold is
+        // idempotent and cannot double count.
+        if let Some(previous) = slot.attach.as_ref() {
+            inserts.push(OccupancyEntry {
+                expires_at: previous.provenance_expires_at,
+                conversation_id: self.conversation_id,
+                participant_id: request.participant_id,
+                kind: ResourceKind::AttachProvenance,
+                token: previous.token.into_bytes(),
+            });
+        } else if slot.enrollment_receipt_ended.is_none() {
+            inserts.push(OccupancyEntry {
+                expires_at: slot.enrollment_provenance_expires_at,
+                conversation_id: self.conversation_id,
+                participant_id: request.participant_id,
+                kind: ResourceKind::EnrollmentProvenance,
+                token: self.enrollment_token_bytes(request.participant_id)?,
+            });
+        }
         let effects = ReservationEffects {
             conversation_id: self.conversation_id,
             identity_reserved: false,
-            inserts: vec![
-                OccupancyEntry {
-                    expires_at: deadlines.receipt_expires_at(),
-                    conversation_id: self.conversation_id,
-                    participant_id: request.participant_id,
-                    kind: ResourceKind::AttachReceipt,
-                    token,
-                },
-                OccupancyEntry {
-                    expires_at: deadlines.provenance_expires_at(),
-                    conversation_id: self.conversation_id,
-                    participant_id: request.participant_id,
-                    kind: ResourceKind::AttachProvenance,
-                    token,
-                },
-            ],
+            inserts,
         };
         // Receipts this commit will retire early, applied only at confirm.
         let mut retire = Vec::new();
