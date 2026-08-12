@@ -42,22 +42,23 @@ impl ConversationAuthority {
         let effects = ReservationEffects {
             conversation_id: self.conversation_id,
             identity_reserved: true,
-            inserts: vec![
-                OccupancyEntry {
-                    expires_at: deadlines.receipt_expires_at(),
-                    conversation_id: self.conversation_id,
-                    participant_id: self.next_participant,
-                    kind: ResourceKind::EnrollmentReceipt,
-                    token,
-                },
-                OccupancyEntry {
-                    expires_at: deadlines.provenance_expires_at(),
-                    conversation_id: self.conversation_id,
-                    participant_id: self.next_participant,
-                    kind: ResourceKind::EnrollmentProvenance,
-                    token,
-                },
-            ],
+            // Board #37: enrollment creates the receipt body but NO retained
+            // provenance. Nothing has yet verified against the secret this
+            // receipt mints, so its delivery is unobserved; the fingerprint
+            // starts occupying only when the first credential attach proves
+            // possession, and that attach reserves it (`ops_attach_capacity`).
+            //
+            // The provenance SCOPES are still checked below, unchanged: the
+            // frozen R-D1 seven-scope order is contract surface and not this
+            // lane's to move. Checking a scope this operation no longer fills
+            // can only refuse early, never admit past a signed cap.
+            inserts: vec![OccupancyEntry {
+                expires_at: deadlines.receipt_expires_at(),
+                conversation_id: self.conversation_id,
+                participant_id: self.next_participant,
+                kind: ResourceKind::EnrollmentReceipt,
+                token,
+            }],
         };
         server_capacity.admit(now, effects, |server| {
             let counters = match enrollment_scope_counters(

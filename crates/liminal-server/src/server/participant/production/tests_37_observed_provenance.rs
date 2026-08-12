@@ -26,8 +26,8 @@
 use std::error::Error;
 
 use liminal_protocol::wire::{
-    AttachSecret, ConnectionIncarnation, ReceiptCapacityExceeded, ReceiptCapacityScope, ServerValue,
-    StaleAuthority,
+    AttachSecret, ConnectionIncarnation, ReceiptCapacityExceeded, ReceiptCapacityScope,
+    ServerValue, StaleAuthority,
 };
 
 use super::ProductionParticipantHandler;

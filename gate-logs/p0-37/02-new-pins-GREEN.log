@@ -1,0 +1,138 @@
+   Compiling liminal-server v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-37/crates/liminal-server)
+   Compiling liminal-sdk v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-37/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.72s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-5117af88e6fe0556)
+
+running 3 tests
+test server::participant::production::tests_37_observed_provenance::the_just_minted_attach_receipt_holds_no_provenance_slot ... ok
+test server::participant::production::tests_37_observed_provenance::r_c0_token_phase_classification_is_unchanged_by_observed_provenance_retention ... ok
+test server::participant::production::tests_37_observed_provenance::unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 694 filtered out; finished in 1.23s
+
+     Running unittests src/main.rs (target/debug/deps/liminal_server-7876b184f4b709b7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/admission_refusal_visibility.rs (target/debug/deps/admission_refusal_visibility-489abaaa41d8e3eb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/cluster_two_node.rs (target/debug/deps/cluster_two_node-5530dd2740358b58)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/embedded_metrics_are_live.rs (target/debug/deps/embedded_metrics_are_live-5c312974c4df9935)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/loopback_parity_e2e.rs (target/debug/deps/loopback_parity_e2e-3ddf5fbbf8d97ead)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/loopback_sdk_e2e.rs (target/debug/deps/loopback_sdk_e2e-e4ee7c39560ca594)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/participant_churn_convergence_e2e.rs (target/debug/deps/participant_churn_convergence_e2e-f34f96e1e98b5dda)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/participant_quiet_pump_e2e.rs (target/debug/deps/participant_quiet_pump_e2e-472a3316fc68448a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/participant_strand_recovery_e2e.rs (target/debug/deps/participant_strand_recovery_e2e-5144060e4f40ed09)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/pipelined_close.rs (target/debug/deps/pipelined_close-8c8b2a3ee41b0286)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/push_flush_e2e.rs (target/debug/deps/push_flush_e2e-1218dd28bad290f2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/sdk_tcp_e2e.rs (target/debug/deps/sdk_tcp_e2e-a461414b35199319)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+     Running tests/sdk_ws_e2e.rs (target/debug/deps/sdk_ws_e2e-c55c87d26d9aedba)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/server_conversation_supervisor.rs (target/debug/deps/server_conversation_supervisor-fd8cf9a18db375aa)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/subscription_e2e.rs (target/debug/deps/subscription_e2e-e2ee4140e2108a6f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-a1bd7b0d11c8420d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5552ef340458f291)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/teardown_delivery_e2e.rs (target/debug/deps/teardown_delivery_e2e-f70253fe4aeab17d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/tracing_output_e2e.rs (target/debug/deps/tracing_output_e2e-eddcd7ddb6ae732e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/trybuild_gate.rs (target/debug/deps/trybuild_gate-27307522071a900f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/ws_transport_e2e.rs (target/debug/deps/ws_transport_e2e-89672bb339e16f03)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+

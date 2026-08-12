@@ -591,8 +591,14 @@ pub struct ParticipantConfig {
     /// 3 refuse rotation while the enrollment receipt is still live.
     pub max_live_attach_receipts_per_participant: u64,
     /// Server-wide cap on retained non-secret provenance fingerprints
-    /// (stage-8 scope `ProvenanceServer`). A fingerprint exists from its
-    /// operation's commit through its own provenance deadline.
+    /// (stage-8 scope `ProvenanceServer`).
+    ///
+    /// Board #37 (ruling 2026-08-12): a fingerprint OCCUPIES from the moment
+    /// the client proves it possesses the secret its receipt minted through
+    /// that receipt's own provenance deadline — not from the minting commit.
+    /// A receipt whose delivery was never observed classifies through its
+    /// window but consumes none of this cap, so an enrol-and-crash cycle
+    /// leaves no provenance residue behind it.
     pub max_receipt_provenance_server: u64,
     /// Per-conversation provenance-fingerprint cap (stage-8 scope
     /// `ProvenanceConversation`).

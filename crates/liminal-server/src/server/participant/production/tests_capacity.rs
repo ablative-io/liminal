@@ -20,7 +20,7 @@ use crate::config::types::ParticipantConfig;
 
 use super::ProductionParticipantHandler;
 use super::tests::{dispatch, open_disk_store_for_tests, test_participant_config};
-use super::tests_receipts::enroll;
+use super::tests_receipts::{enroll, enroll_proving_provenance};
 
 /// Deployment-shaped config with one capacity knob turned down.
 pub(super) fn capacity_config(mutate: impl FnOnce(&mut ParticipantConfig)) -> ParticipantConfig {
@@ -164,6 +164,10 @@ fn enrollment_live_receipt_server_scope_refuses_and_survives_restart() -> Result
 /// Server-scope provenance capacity: one retained enrollment fingerprint
 /// fills the server cap, so a second enrollment on another conversation
 /// refuses with `ProvenanceServer` (live-receipt scopes pass first).
+///
+/// Board #37: the fingerprint has to be EARNED. A bare enrollment retains
+/// nothing — possession of the secret it minted is unproven — so the fixture
+/// proves it with a rotation before the cap can be full.
 #[test]
 fn enrollment_provenance_server_scope_refusal() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
@@ -173,7 +177,7 @@ fn enrollment_provenance_server_scope_refusal() -> Result<(), Box<dyn Error>> {
     let config = capacity_config(|c| c.max_receipt_provenance_server = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
 
-    enroll(&handler, incarnation, 721, [21; 16])?;
+    enroll_proving_provenance(&handler, incarnation, 721, [[21; 16], [121; 16], [221; 16]])?;
     let refused = dispatch(&handler, incarnation, enrollment_request(722, [22; 16]))?;
     assert_enrollment_receipt_refusal(
         &refused,
@@ -199,8 +203,18 @@ fn enrollment_over_limit_scope_refuses_with_true_numbers() -> Result<(), Box<dyn
     {
         let store = open_disk_store_for_tests(&data_dir)?;
         let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
-        enroll(&handler, incarnation, 751, [61; 16])?;
-        enroll(&handler, incarnation, 752, [62; 16])?;
+        enroll_proving_provenance(
+            &handler,
+            incarnation,
+            751,
+            [[61; 16], [161; 16], [0xC1; 16]],
+        )?;
+        enroll_proving_provenance(
+            &handler,
+            incarnation,
+            752,
+            [[62; 16], [162; 16], [0xC2; 16]],
+        )?;
     }
 
     // RESTART with the server provenance cap lowered beneath the two
@@ -235,8 +249,21 @@ fn enrollment_mixed_full_and_over_limit_refuses_the_earlier_full_scope()
     {
         let store = open_disk_store_for_tests(&data_dir)?;
         let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
-        enroll(&handler, incarnation, 761, [64; 16])?;
-        enroll(&handler, incarnation, 762, [65; 16])?;
+        // Board #37: both fingerprints must be EARNED, or the later
+        // provenance scope would not be over-limit at all and this test would
+        // stop exercising the model boundary it is named for.
+        enroll_proving_provenance(
+            &handler,
+            incarnation,
+            761,
+            [[64; 16], [164; 16], [0xC4; 16]],
+        )?;
+        enroll_proving_provenance(
+            &handler,
+            incarnation,
+            762,
+            [[65; 16], [165; 16], [0xC5; 16]],
+        )?;
     }
 
     // RESTART: identity Server exactly full in model, ProvenanceServer
@@ -281,7 +308,7 @@ fn enrollment_provenance_conversation_scope_refusal_is_scoped() -> Result<(), Bo
     let config = capacity_config(|c| c.max_receipt_provenance_per_conversation = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
 
-    enroll(&handler, incarnation, 731, [31; 16])?;
+    enroll_proving_provenance(&handler, incarnation, 731, [[31; 16], [131; 16], [231; 16]])?;
     let refused = dispatch(
         &handler,
         ConnectionIncarnation::new(74, 2),

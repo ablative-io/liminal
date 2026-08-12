@@ -20,7 +20,9 @@ use liminal_protocol::wire::{
 use super::ProductionParticipantHandler;
 use super::tests::{dispatch, open_disk_store_for_tests, test_participant_config};
 use super::tests_capacity::capacity_config;
-use super::tests_receipts::{GEN_ONE, attach, attach_request, detach, enroll, generation};
+use super::tests_receipts::{
+    GEN_ONE, attach, attach_request, detach, enroll, enroll_proving_provenance, generation,
+};
 
 /// Asserts one exact credential-attach `ReceiptCapacityExceeded` row.
 fn assert_attach_receipt_refusal(
@@ -165,14 +167,21 @@ fn attach_provenance_scope_refusals_follow_the_fixed_order() -> Result<(), Box<d
         let store = open_disk_store_for_tests(&data_dir)?;
         let handler = ProductionParticipantHandler::new(store, capacity_config(mutate))?;
 
-        let receipt = enroll(&handler, incarnation, conversation_id, [47; 16])?;
-        let participant_id = receipt.participant_id();
+        // Board #37: the rotation that PROVES possession of the enrollment
+        // secret is what retains the fingerprint, so the cap of 1 is filled by
+        // that first rotation and the SECOND one meets the full scope.
+        let proven = enroll_proving_provenance(
+            &handler,
+            incarnation,
+            conversation_id,
+            [[47; 16], [147; 16], [247; 16]],
+        )?;
         detach(
             &handler,
             incarnation,
             conversation_id,
-            participant_id,
-            GEN_ONE,
+            proven.participant_id,
+            generation(2)?,
             [48; 16],
         )?;
         let refused = dispatch(
@@ -180,9 +189,9 @@ fn attach_provenance_scope_refusals_follow_the_fixed_order() -> Result<(), Box<d
             incarnation,
             attach_request(
                 conversation_id,
-                participant_id,
-                GEN_ONE,
-                receipt.attach_secret(),
+                proven.participant_id,
+                generation(2)?,
+                proven.attach_secret,
                 [49; 16],
             ),
         )?;
@@ -210,31 +219,17 @@ fn full_provenance_participant_scope_refuses_and_in_window_unknown_is_stale_auth
     let handler = ProductionParticipantHandler::new(store, config)?;
     let conversation_id = 746;
 
-    let receipt = enroll(&handler, incarnation, conversation_id, [50; 16])?;
-    let participant_id = receipt.participant_id();
-    detach(
+    let proven = enroll_proving_provenance(
         &handler,
         incarnation,
         conversation_id,
-        participant_id,
-        GEN_ONE,
-        [51; 16],
+        [[50; 16], [51; 16], [52; 16]],
     )?;
-    let first = attach(
-        &handler,
-        incarnation,
-        attach_request(
-            conversation_id,
-            participant_id,
-            GEN_ONE,
-            receipt.attach_secret(),
-            [52; 16],
-        ),
-    )?;
-    assert_eq!(first.capability_generation(), generation(2)?);
+    let participant_id = proven.participant_id;
 
-    // The participant's in-window fingerprints (enrollment + rotation) fill
-    // the cap: the second rotation refuses at ProvenanceParticipant.
+    // Board #37: a second rotation proves possession of the FIRST rotation's
+    // secret too, so the participant now holds two retained fingerprints
+    // (enrollment + rotation one) and fills the cap of 2.
     detach(
         &handler,
         incarnation,
@@ -243,15 +238,37 @@ fn full_provenance_participant_scope_refuses_and_in_window_unknown_is_stale_auth
         generation(2)?,
         [53; 16],
     )?;
-    let refused = dispatch(
+    let second = attach(
         &handler,
         incarnation,
         attach_request(
             conversation_id,
             participant_id,
             generation(2)?,
-            first.attach_secret(),
+            proven.attach_secret,
             [54; 16],
+        ),
+    )?;
+    assert_eq!(second.capability_generation(), generation(3)?);
+
+    // The third rotation meets the full scope.
+    detach(
+        &handler,
+        incarnation,
+        conversation_id,
+        participant_id,
+        generation(3)?,
+        [0x53; 16],
+    )?;
+    let refused = dispatch(
+        &handler,
+        incarnation,
+        attach_request(
+            conversation_id,
+            participant_id,
+            generation(3)?,
+            second.attach_secret(),
+            [0x54; 16],
         ),
     )?;
     assert_attach_receipt_refusal(
@@ -285,7 +302,7 @@ fn full_provenance_participant_scope_refuses_and_in_window_unknown_is_stale_auth
         )
         .into());
     };
-    assert_eq!(current_generation, generation(2)?);
+    assert_eq!(current_generation, generation(3)?);
     Ok(())
 }
 
@@ -307,10 +324,23 @@ fn attach_over_limit_scope_refuses_with_true_numbers() -> Result<(), Box<dyn Err
         let store = open_disk_store_for_tests(&data_dir)?;
         let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
         let incarnation = ConnectionIncarnation::new(82, 1);
-        let receipt = enroll(&handler, incarnation, conversation_id, [61; 16])?;
-        participant_id = receipt.participant_id();
-        secret = receipt.attach_secret();
-        enroll(&handler, incarnation, 749, [62; 16])?;
+        // Board #37: both fingerprints are earned, so the restart below really
+        // does restore an occupancy of 2 from durable bytes — which is what
+        // makes the lowered cap out-of-model rather than merely tight.
+        let proven = enroll_proving_provenance(
+            &handler,
+            incarnation,
+            conversation_id,
+            [[61; 16], [161; 16], [0xC1; 16]],
+        )?;
+        participant_id = proven.participant_id;
+        secret = proven.attach_secret;
+        enroll_proving_provenance(
+            &handler,
+            incarnation,
+            749,
+            [[62; 16], [162; 16], [0xC2; 16]],
+        )?;
     }
 
     // RESTART with the server provenance cap lowered beneath the two
@@ -318,10 +348,19 @@ fn attach_over_limit_scope_refuses_with_true_numbers() -> Result<(), Box<dyn Err
     let store = open_disk_store_for_tests(&data_dir)?;
     let config = capacity_config(|c| c.max_receipt_provenance_server = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
+    // The restart already left the binding detached, so the client reconnects
+    // straight into a rotation at its current generation.
+    let reconnect = ConnectionIncarnation::new(82, 2);
     let refused = dispatch(
         &handler,
-        ConnectionIncarnation::new(82, 2),
-        attach_request(conversation_id, participant_id, GEN_ONE, secret, [63; 16]),
+        reconnect,
+        attach_request(
+            conversation_id,
+            participant_id,
+            generation(2)?,
+            secret,
+            [63; 16],
+        ),
     )?;
     assert_attach_receipt_refusal(
         &refused,
@@ -351,25 +390,46 @@ fn attach_mixed_full_and_over_limit_refuses_the_earlier_full_scope() -> Result<(
         let store = open_disk_store_for_tests(&data_dir)?;
         let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
         let incarnation = ConnectionIncarnation::new(83, 1);
-        let receipt = enroll(&handler, incarnation, conversation_id, [64; 16])?;
-        participant_id = receipt.participant_id();
-        secret = receipt.attach_secret();
-        enroll(&handler, incarnation, 751, [65; 16])?;
+        // Board #37: earned fingerprints, so the LATER provenance scope is
+        // genuinely over-limit below. Without this the model boundary would
+        // vanish and the test would pass for the wrong reason.
+        let proven = enroll_proving_provenance(
+            &handler,
+            incarnation,
+            conversation_id,
+            [[64; 16], [164; 16], [0xC4; 16]],
+        )?;
+        participant_id = proven.participant_id;
+        secret = proven.attach_secret;
+        enroll_proving_provenance(
+            &handler,
+            incarnation,
+            751,
+            [[65; 16], [165; 16], [0xC5; 16]],
+        )?;
     }
 
-    // RESTART: LiveReceiptServer exactly full in model (both enrollment
-    // receipts are still inside their 60s window), ProvenanceServer
-    // over-limit out of model.
+    // RESTART: LiveReceiptServer exactly full in model (both rotations' attach
+    // receipts are still inside their 60s window), ProvenanceServer over-limit
+    // out of model.
     let store = open_disk_store_for_tests(&data_dir)?;
     let config = capacity_config(|c| {
         c.max_live_attach_receipts_server = 2;
         c.max_receipt_provenance_server = 1;
     });
     let handler = ProductionParticipantHandler::new(store, config)?;
+    // The restart already left the binding detached.
+    let reconnect = ConnectionIncarnation::new(83, 2);
     let refused = dispatch(
         &handler,
-        ConnectionIncarnation::new(83, 2),
-        attach_request(conversation_id, participant_id, GEN_ONE, secret, [66; 16]),
+        reconnect,
+        attach_request(
+            conversation_id,
+            participant_id,
+            generation(2)?,
+            secret,
+            [66; 16],
+        ),
     )?;
     assert_attach_receipt_refusal(
         &refused,

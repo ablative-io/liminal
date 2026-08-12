@@ -87,7 +87,13 @@ impl ConversationAuthority {
                         token: *token,
                     });
                 }
-                if now < slot.enrollment_provenance_expires_at {
+                // Board #37: an enrollment fingerprint occupies only once the
+                // client PROVED possession of the secret that receipt minted,
+                // and the receipt's own end is that proof — it is set by the
+                // first attach, which had to verify against this secret.
+                if slot.enrollment_receipt_ended.is_some()
+                    && now < slot.enrollment_provenance_expires_at
+                {
                     entries.push(OccupancyEntry {
                         expires_at: slot.enrollment_provenance_expires_at,
                         conversation_id: self.conversation_id,
@@ -113,15 +119,10 @@ impl ConversationAuthority {
                         token: attach.token.into_bytes(),
                     });
                 }
-                if now < attach.provenance_expires_at {
-                    entries.push(OccupancyEntry {
-                        expires_at: attach.provenance_expires_at,
-                        conversation_id: self.conversation_id,
-                        participant_id: *participant_id,
-                        kind: ResourceKind::AttachProvenance,
-                        token: attach.token.into_bytes(),
-                    });
-                }
+                // Board #37: the CURRENT attach receipt's fingerprint does not
+                // occupy. Nothing has verified against the secret it minted —
+                // if anything had, that attach would have retired it into
+                // `attach_provenance`, which is counted below.
             }
             for (token, record) in &slot.attach_provenance {
                 if now < record.provenance_expires_at {
@@ -159,10 +160,29 @@ impl Slot {
     }
 
     /// In-window provenance-fingerprint occupancy for this participant (the
-    /// stage-8 `ProvenanceParticipant` scope). Fingerprints exist from their
-    /// operation's commit through their own provenance deadline: the
-    /// enrollment fingerprint, the current attach receipt's fingerprint, and
-    /// every retained record of a retired rotation.
+    /// stage-8 `ProvenanceParticipant` scope).
+    ///
+    /// # Board #37: occupancy is DELIVERY-OBSERVED provenance
+    ///
+    /// A fingerprint occupies only once the client has proven it possesses
+    /// the secret its receipt minted (ruling 2026-08-12). Only credential
+    /// attach is secret-bearing against the slot's current secret, and a
+    /// committed attach necessarily supersedes the receipt that minted it, so
+    /// the proof is structural: the retired records in `attach_provenance`
+    /// are exactly the attach fingerprints whose possession was proven, and
+    /// `enrollment_receipt_ended` is set by the one attach that proved the
+    /// enrollment secret.
+    ///
+    /// The unproven pair — the current attach receipt and an unended
+    /// enrollment receipt — therefore counts zero. That is not an unbounded
+    /// hole: each is a FIXED FIELD on a slot that exists anyway, so the
+    /// unproven population is bounded by the identity cap, while the
+    /// genuinely unbounded population (`attach_provenance` grows once per
+    /// committed rotation) is exactly what these scopes still bound.
+    ///
+    /// ⚠ Occupancy is not classification. Every fingerprint still classifies
+    /// through its own window in `ops_attach_lookup`; this function decides
+    /// only what consumes a signed stage-8 slot.
     ///
     /// # Errors
     ///
@@ -177,14 +197,10 @@ impl Slot {
             StateError::invariant("participant provenance occupancy exceeds the u64 domain")
         })?;
         retained
-            .checked_add(u64::from(now < self.enrollment_provenance_expires_at))
-            .and_then(|total| {
-                total.checked_add(u64::from(
-                    self.attach
-                        .as_ref()
-                        .is_some_and(|attach| now < attach.provenance_expires_at),
-                ))
-            })
+            .checked_add(u64::from(
+                self.enrollment_receipt_ended.is_some()
+                    && now < self.enrollment_provenance_expires_at,
+            ))
             .ok_or_else(|| {
                 StateError::invariant("participant provenance occupancy exceeds the u64 domain")
             })
