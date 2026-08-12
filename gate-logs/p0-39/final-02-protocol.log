@@ -1,0 +1,635 @@
+   Compiling liminal-protocol v0.5.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-39/crates/liminal-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.47s
+     Running unittests src/lib.rs (target/debug/deps/liminal_protocol-f15b42261c68a4ff)
+
+running 464 tests
+test algebra::capacity_tests::byte_budget_walk_preserves_the_printed_totals ... ok
+test algebra::capacity_tests::baseline_and_zero_debt_admission_match_case_21 ... ok
+test algebra::capacity_tests::recovery_charge_moves_from_k_to_baseline_once ... ok
+test algebra::capacity_tests::exact_q_supersession_reaches_the_mandatory_bound ... ok
+test algebra::capacity_tests::baseline_rejects_more_credits_than_identities ... ok
+test algebra::capacity_tests::required_capacity_uses_entry_before_byte_precedence ... ok
+test algebra::capacity_tests::marker_credit_keeps_the_baseline_constant ... ok
+test algebra::capacity_tests::retained_baseline_feeds_mandatory_capacity_without_narrowing ... ok
+test algebra::capacity_tests::startup_equality_enrollment_borrows_its_actual_charge ... ok
+test algebra::capacity_tests::widened_overflow_is_a_capacity_failure_not_a_wrapped_success ... ok
+test algebra::floor_tests::a_late_cursor_zero_member_never_lowers_the_floor ... ok
+test algebra::floor_tests::a_marker_at_the_retained_floor_pins_it_where_it_stands ... ok
+test algebra::floor_tests::a_measurement_the_frontier_moved_past_is_subsumed ... ok
+test algebra::floor_tests::an_admissible_floor_is_bounded_by_the_current_high_watermark ... ok
+test algebra::floor_tests::an_empty_marker_set_passes_the_computed_floor_through_unchanged ... ok
+test algebra::floor_tests::final_leave_substitutes_candidate_watermark_for_empty_membership ... ok
+test algebra::floor_tests::multiple_claims_match_the_document_floor_walk ... ok
+test algebra::floor_tests::one_past_maximum_is_representable ... ok
+test algebra::floor_tests::the_clamp_target_is_the_marker_itself_and_not_one_below_it ... ok
+test algebra::floor_tests::the_marker_clamp_lowers_where_cap_floor_raises ... ok
+test algebra::floor_tests::the_remint_never_raises_the_measured_floor ... ok
+test client::d1_flip_tests::item_3_unsealed_record_answer_requires_response_authority ... ok
+test client::d1_flip_tests::item_1_exact_record_token_applies_and_clears_expected ... ok
+test client::d1_flip_tests::item_2_different_record_token_is_ambiguous_and_retains_authority ... ok
+test client::detach_authority_settlement_tests::a_retirement_above_the_replay_still_supersedes_it ... ok
+test client::detach_authority_settlement_tests::a_refusal_never_settles_a_replay_it_does_not_name ... ok
+test client::d1_flip_tests::item_5_named_r1_record_fixtures_fail_staged_canonical_decode ... ok
+test client::d1_flip_tests::item_7_restored_observer_abandonment_only_blocks_fresh_observer ... ok
+test client::d1_flip_tests::item_7_two_cycle_record_resume_keeps_expected_and_lost_testimony ... ok
+test client::detach_authority_settlement_tests::an_answered_detach_keeps_its_own_terminal ... ok
+test client::d1_flip_tests::item_4_all_eleven_record_outcomes_codec_round_trip_exact_token ... ok
+test client::gen_skip_supersession_tests::coupled_active_replay_still_encodes_and_restores ... ok
+test client::gen_skip_supersession_tests::decoupled_aggregate_refuses_to_encode_in_both_directions ... ok
+test client::detach_authority_settlement_tests::every_correlated_refusal_settles_the_replay_and_stays_persistable ... ok
+test client::gen_skip_supersession_tests::generation_skipping_attach_supersedes_active_replay ... ok
+test client::detach_authority_settlement_tests::the_settled_terminal_retains_the_exact_refusing_value ... ok
+test client::gen_skip_supersession_tests::inbound_skip_attach_supersedes_and_the_new_detach_records ... ok
+test client::p0_62_stranded_handle_tests::a_foreign_participants_receipt_never_reaches_the_adopting_arm ... ok
+test client::p0_62_stranded_handle_tests::a_receipt_replay_never_reaches_the_arm_after_a_durable_leave ... ok
+test client::p0_62_stranded_handle_tests::a_torn_but_bound_attach_recovers_from_its_receipt_replay ... ok
+test client::p0_62_stranded_handle_tests::an_applied_attach_receipt_can_only_ever_grant_the_next_generation ... ok
+test client::p0_62_stranded_handle_tests::the_pre_tear_credential_is_the_one_the_server_calls_stale ... ok
+test client::r2_tests::detach_loss_resolves_to_parked_and_reissues_exactly_once ... ok
+test client::r2_tests::pending_abandonment_gates_tokenless_admission_only ... ok
+test client::r2_tests::pending_operation_testimony_gates_every_correlation_path ... ok
+test client::r2_tests::pending_reconnect_testimony_gates_redemption_and_attempt_fate ... ok
+test client::r2_tests::restored_issued_operation_rejects_prior_process_correlation ... ok
+test client::r2_tests::restore_refuses_testimony_and_abandonment_coupling_mismatches ... ok
+test client::r2_tests::restore_refuses_abandonment_beside_tokenless_expected ... ok
+test client::r2_tests::restored_issued_permit_rejects_prior_process_permit ... ok
+test client::r2_tests::same_envelope_re_record_over_terminal_replay_refuses ... ok
+test client::r2_tests::same_envelope_re_record_refuses_every_inactive_status_and_admits_parked ... ok
+test client::r2_tests::testimony_round_trips_distinctly_for_every_kind ... ok
+test client::r2_tests::tokenless_abandonment_survives_encode_without_take ... ok
+test client::r2_tests::unissued_tokenless_abandonment_take_releases_nothing ... ok
+test client::resume_tests::already_dead_refuses_inbound_without_losing_value ... ok
+test client::resume_tests::codec_reports_envelope_errors_and_restore_invariants ... ok
+test client::resume_tests::continuous_ack_remains_outside_resume_slot ... ok
+test client::resume_tests::restored_permit_is_released_once_and_failure_parks_without_timer ... ok
+test client::resume_tests::resume_round_trips_all_reconnect_machine_states ... ok
+test client::resume_tests::resume_round_trips_every_binding_and_expected_operation ... ok
+test client::review_tests::b1_resume_preserves_issued_permit_testimony ... ok
+test client::resume_tests::resume_round_trips_every_replay_status_and_terminal_payload ... ok
+test client::review_tests::b2_restored_attempt_has_typed_process_loss_exit ... ok
+test client::resume_tests::resume_round_trips_every_expected_operation_and_continuous_ack ... ok
+test client::review_tests::b3_commit_seal_record_restores_before_authority_release ... ok
+test client::review_tests::b4_cold_restored_expected_operation_is_released_once ... ok
+test client::review_tests::b4_restored_issued_operation_has_typed_process_loss_exit ... ok
+test client::review_tests::b5_detach_has_exactly_one_initial_send_authority ... ok
+test client::review_tests::d1_sequential_record_a_response_after_b_is_refused_by_exact_token ... ok
+test client::review_tests::m10_retired_terminalizes_binding_and_future_operations ... ok
+test client::review_tests::m6_binding_state_gates_outbound_and_inbound ... ok
+test client::review_tests::m7_sequential_observer_a_response_after_b_cannot_apply ... ok
+test client::review_tests::m9_terminal_and_superseded_replay_yield_to_new_generation_detach ... ok
+test client::review_tests::m8_detach_and_resume_preserve_attach_secret ... ok
+test client::rider_tests::canonical_decode_rejects_token_bearing_abandonment ... ok
+test client::rider_tests::canonical_restore_rejects_token_bearing_abandonment ... ok
+test client::round3_tests::refused_detach_admission_preserves_authorization_counter ... ok
+test client::round3_tests::active_replay_without_matching_expected_detach_refuses_restore ... ok
+test client::round3_tests::same_identity_wrong_secret_attach_and_leave_refuse ... ok
+test client::round4_tests::in_flight_refusal_preserves_authorization_counter ... ok
+test client::round4_tests::inbound_wrong_secret_refuses_with_authority_retained ... ok
+test client::round4_tests::tokenless_restore_is_typed_abandoned_and_never_released ... ok
+test client::round4_tests::active_replay_requires_exact_expected_detach_full_matrix ... ok
+test client::round4_tests::expected_detach_requires_active_matching_replay_full_matrix ... ok
+test client::tests::operation_barrier_enforces_cardinality_and_exact_correlation ... ok
+test client::tests::abort_and_continuous_ack_release_no_speculative_slot ... ok
+test client::tests::replay_start_fate_replay_and_nonmatching_attach_preserve_authority ... ok
+test client::tests::replay_durable_leave_and_all_terminal_payloads_are_distinct ... ok
+test lifecycle::admission::capacity_tests::a_participant_window_admits_at_every_occupancy_and_never_exceeds_its_size ... ok
+test lifecycle::admission::capacity_tests::a_window_of_one_still_lands_every_arrival ... ok
+test lifecycle::admission::capacity_tests::already_tracked_semantic_conversation_consumes_zero_capacity_at_full_limit ... ok
+test lifecycle::admission::capacity_tests::binding_slot_selectors_return_exact_origin_specific_outcomes ... ok
+test lifecycle::admission::capacity_tests::capacity_counter_requires_a_nonzero_bounded_state ... ok
+test lifecycle::admission::capacity_tests::credential_attach_always_admits_and_a_full_window_displaces ... ok
+test lifecycle::admission::capacity_tests::credential_attach_with_headroom_lands_without_displacing ... ok
+test lifecycle::admission::capacity_tests::enrollment_runtime_capacity_refuses_only_the_two_identity_scopes_in_order ... ok
+test lifecycle::admission::capacity_tests::enrollment_success_carries_the_identity_counters_and_both_reserved_windows ... ok
+test lifecycle::admission::capacity_tests::first_untracked_semantic_conversation_returns_exact_capacity_refusal ... ok
+test lifecycle::admission::capacity_tests::fresh_participant_counters_reject_nonempty_restored_state ... ok
+test lifecycle::admission::capacity_tests::no_receipt_occupancy_can_make_enrollment_refuse ... ok
+test lifecycle::admission::observer_tests::checked_one_past_maximum_progress_is_representable ... ok
+test lifecycle::admission::observer_tests::every_eligible_operation_constructs_its_exact_refusal ... ok
+test lifecycle::admission::observer_tests::equality_passes_and_returns_the_exact_opaque_permit ... ok
+test lifecycle::admission::observer_tests::lower_floor_passes_without_recalculating_it ... ok
+test lifecycle::admission::observer_tests::refusal_echoes_inputs_without_exposing_a_commit_permit ... ok
+test lifecycle::admission::order_tests::case_43_exact_claim_shortfall_selects_order_exhaustion ... ok
+test lifecycle::admission::order_tests::checked_planners_reject_claim_counter_overflow ... ok
+test lifecycle::admission::order_tests::closure_projection_endows_one_order_pair_and_rejects_a_second ... ok
+test lifecycle::admission::order_tests::empty_ledger_owns_all_values_and_enrollment_allocates_zero ... ok
+test lifecycle::admission::order_tests::exhausted_maximum_has_no_next_value ... ok
+test lifecycle::admission::order_tests::fenced_recovery_consumes_ro_and_transfers_ra_without_allocating ... ok
+test lifecycle::admission::order_tests::fenced_recovery_requires_the_coupled_ro_ra_pair ... ok
+test lifecycle::admission::order_tests::final_major_is_legal_only_when_no_claim_survives ... ok
+test lifecycle::admission::order_tests::optional_planners_apply_exact_deltas_and_preserve_recovery_claims ... ok
+test lifecycle::admission::order_tests::restore_rejects_claims_beyond_the_counter_suffix ... ok
+test lifecycle::admission::record_tests::bytes_fail_after_entries_pass ... ok
+test lifecycle::admission::record_tests::entries_precede_bytes_when_both_components_fail ... ok
+test lifecycle::admission::record_tests::equality_passes_and_carries_the_exact_charge ... ok
+test lifecycle::admission::sequence_tests::case_21_supersession_projects_the_exact_exhausted_budget ... ok
+test lifecycle::admission::sequence_tests::case_26_exact_seventeen_value_suffix_is_admissible ... ok
+test lifecycle::admission::sequence_tests::case_31_enrollment_and_record_fixed_points_both_exhaust ... ok
+test lifecycle::admission::sequence_tests::case_47_derives_all_four_canonical_budgets ... ok
+test lifecycle::admission::sequence_tests::case_54_shutdown_reserve_is_derived_as_six ... ok
+test lifecycle::admission::sequence_tests::checked_planners_report_counter_overflow_before_admission ... ok
+test lifecycle::admission::sequence_tests::checked_wide_derived_sum_never_wraps ... ok
+test lifecycle::admission::sequence_tests::closure_projection_endows_one_sequence_pair_and_rejects_a_second ... ok
+test lifecycle::admission::sequence_tests::fenced_recovery_consumes_rs_and_transfers_rt_into_t ... ok
+test lifecycle::admission::sequence_tests::fenced_recovery_requires_the_coupled_sequence_pair ... ok
+test lifecycle::admission::sequence_tests::optional_planners_apply_exact_primitive_claim_deltas ... ok
+test lifecycle::admission::sequence_tests::maximum_boundary_allows_only_a_zero_resulting_reserve ... ok
+test lifecycle::admission::sequence_tests::optional_planners_preserve_an_existing_recovery_pair ... ok
+test lifecycle::admission::sequence_tests::restore_rejects_an_unowned_suffix_and_reports_derived_budget ... ok
+test lifecycle::aggregate_commit_tests::aggregate_decision_requires_genesis_validation_first ... ok
+test lifecycle::aggregate_commit_tests::aggregate_decision_refuses_a_foreign_shell_and_returns_the_commit_intact ... ok
+test lifecycle::aggregate_commit_tests::detached_aggregate_commit_crashes_safely_and_replays_to_live_state ... ok
+test lifecycle::aggregate_commit_tests::enrolled_aggregate_commit_crashes_safely_and_replays_to_live_state ... ok
+test lifecycle::aggregate_commit_tests::attached_aggregate_commit_crashes_safely_and_replays_to_live_state ... ok
+test lifecycle::aggregate_commit_tests::ordinary_fate_aggregate_commit_crashes_safely_and_replays_to_live_state ... ok
+test lifecycle::aggregate_commit_tests::nonzero_debt_ack_event_records_the_committed_cursor_fact_key ... ok
+test lifecycle::aggregate_commit_tests::nonzero_debt_ack_aggregate_commit_crashes_safely_and_replays_to_live_state ... ok
+test lifecycle::attach_tests::active_same_participant_attach_records_supersession ... ok
+test lifecycle::attach_tests::clear_closure_admission_reaches_ordinary_binding_authority ... ok
+test lifecycle::attach_tests::fenced_recovery_composes_pending_detach_and_sets_both_marker_fields ... ok
+test lifecycle::aggregate_commit_tests::recovered_fate_aggregate_commit_crashes_safely_and_replays_to_live_state ... ok
+test lifecycle::attach_tests::ordinary_attach_cannot_claim_marker_acceptance ... ok
+test lifecycle::aggregate_commit_tests::left_aggregate_commit_returns_the_frontiers_through_the_barrier ... ok
+test lifecycle::aggregate_commit_tests::left_aggregate_commit_crashes_safely_and_replays_to_live_state ... ok
+test lifecycle::attach_tests::supersession_cannot_coexist_with_a_committed_detach_cell ... ok
+test lifecycle::binding_tests::binding_terminal_order_fixes_phase_and_derives_index_from_id ... ok
+test lifecycle::binding_tests::detached_fates_have_only_detached_causes ... ok
+test lifecycle::binding_tests::detached_binding_transition_projects_terminal_sequence_only_when_committed ... ok
+test lifecycle::binding_tests::died_binding_transition_projects_terminal_sequence_only_when_committed ... ok
+test lifecycle::binding_tests::died_fates_have_only_died_causes ... ok
+test lifecycle::binding_tests::pending_commit_preserves_identity_order_and_cause ... ok
+test lifecycle::binding_tests::restart_cause_is_derived_from_old_binding_epoch ... ok
+test lifecycle::claim_frontier_tests::allocated_high_excludes_old_candidate_major_but_future_candidate_owns_union ... ok
+test lifecycle::claim_frontier_tests::candidate_and_retained_sequence_order_must_follow_admission_order ... ok
+test lifecycle::claim_frontier_tests::candidate_cells_accept_exactly_two_i_and_reject_the_third ... ok
+test lifecycle::claim_frontier_tests::case_25_clear_headroom_constructs_the_same_exact_claim_owners ... ok
+test lifecycle::claim_frontier_tests::case_25_equality_debt_constructs_exact_initial_frontier ... ok
+test lifecycle::claim_frontier_tests::case_56_shape_derives_prefate_recovery_from_candidate_while_pc_is_current ... ok
+test lifecycle::claim_frontier_tests::compact_product_accessors_enforce_the_validated_rank_extent ... ok
+test lifecycle::claim_frontier_tests::duplicate_scan_selects_exact_lowest_tuple_across_record_and_candidate ... ok
+test lifecycle::claim_frontier_tests::endpoint_sweep_reports_first_expanded_collision_inside_compact_ranges ... ok
+test lifecycle::claim_frontier_tests::complete_retained_corpus_accepts_end_and_stores_only_marker_anchors ... ok
+test lifecycle::claim_frontier_tests::immutable_marker_requires_m_owner_and_typed_compacted_cause ... ok
+test lifecycle::claim_frontier_tests::exact_detached_dcr_is_the_only_postfate_recovery_authority ... ok
+test lifecycle::claim_frontier_tests::initial_frontier_crash_replay_is_deterministic ... ok
+test lifecycle::claim_frontier_tests::initial_frontier_rejects_each_attached_charge_dimension_mismatch ... ok
+test lifecycle::claim_frontier_tests::numeric_frontiers_precede_duplicate_candidate_diagnosis ... ok
+test lifecycle::claim_frontier_tests::marker_drain_core_consumes_m_and_tuple_without_advancing_allocated_high ... ok
+test lifecycle::claim_frontier_tests::recovery_selector_rejects_missing_and_detached_prefate_authority ... ok
+test lifecycle::claim_frontier_tests::released_marker_history_allows_multiple_old_records_for_one_participant ... ok
+test lifecycle::closure_accounting_tests::ordinary_required_capacity_uses_canonical_widened_addition_order ... ok
+test lifecycle::closure_accounting_tests::equality_passes_with_componentwise_successor_maximum_and_exact_cycle_charge ... ok
+test lifecycle::claim_frontier_tests::order_candidates_reject_duplicate_major_groups_and_below_high_keys ... ok
+test lifecycle::closure_accounting_tests::recovery_fence_uses_unchanged_state_and_zero_delta_before_numeric_checks ... ok
+test lifecycle::closure_accounting_tests::remaining_precedence_is_delivered_then_churn_then_entries_then_bytes ... ok
+test lifecycle::closure_accounting_tests::restore_rejects_mixed_clear_state_and_unencodable_or_impossible_values ... ok
+test lifecycle::conversation_tests::abort_recovers_the_exact_unmodified_prestate ... ok
+test lifecycle::conversation_tests::canonical_decode_rejects_truncation_unknown_codec_kind_and_length ... ok
+test lifecycle::conversation_tests::decision_holds_state_until_commit_and_encodes_stable_header ... ok
+test lifecycle::conversation_tests::every_lifecycle_operation_round_trips_encode_decode_replay ... ok
+test lifecycle::conversation_tests::left_bodies_round_trip_every_optional_field_combination ... ok
+test lifecycle::conversation_tests::left_decode_rejects_unassigned_flags_and_invalid_results ... ok
+test lifecycle::conversation_tests::operation_abort_recovers_the_exact_unmodified_prestate ... ok
+test lifecycle::conversation_tests::operation_decision_refuses_foreign_conversation_provenance_for_every_kind ... ok
+test lifecycle::conversation_tests::operation_decision_refuses_ordinal_exhaustion ... ok
+test lifecycle::conversation_tests::operation_decision_requires_genesis_validation_first ... ok
+test lifecycle::conversation_tests::operation_decode_rejects_a_generation_one_attach ... ok
+test lifecycle::conversation_tests::operation_decode_rejects_non_canonical_lengths ... ok
+test lifecycle::conversation_tests::operation_decode_rejects_zero_generations_and_non_genesis_enrollment ... ok
+test lifecycle::conversation_tests::operation_events_replay_in_committed_order_after_genesis ... ok
+test lifecycle::conversation_tests::operation_replay_requires_genesis_validation_first ... ok
+test lifecycle::conversation_tests::ordinal_exhaustion_refuses_before_commit_and_replay_mutation ... ok
+test lifecycle::conversation_tests::repeated_genesis_decision_refuses_and_preserves_committed_state ... ok
+test lifecycle::conversation_tests::replay_is_deterministic_and_matches_commit_consumption ... ok
+test lifecycle::conversation_tests::replay_requires_exact_conversation_ordinal_and_body_precondition ... ok
+test lifecycle::cursor_facts_tests::binding_epoch_authority_failure_preserves_cursors_and_facts ... ok
+test lifecycle::cursor_facts_tests::cumulative_ack_selector_never_mutates_on_noop_gap_or_regression ... ok
+test lifecycle::cursor_facts_tests::nonzero_ack_rejects_testimony_from_another_durable_prestate ... ok
+test lifecycle::cursor_facts_tests::nonzero_ack_uses_durable_endpoint_membership_not_conversation_contiguity ... ok
+test lifecycle::cursor_facts_tests::recipient_obligation_testimony_requires_a_sorted_live_index ... ok
+test lifecycle::cursor_facts_tests::two_bound_participants_ack_the_same_retained_suffix_during_nonzero_debt ... ok
+test lifecycle::detach_tests::a_current_binding_rejects_committed_and_invalid_terminalized_cells ... ok
+test lifecycle::detach_tests::a_new_detach_cannot_replace_an_accepted_pending_cell ... ok
+test lifecycle::detach_tests::committed_attach_terminalized_replay_retains_old_epoch ... ok
+test lifecycle::detach_tests::every_pending_replay_branch_validates_the_paired_finalization ... ok
+test lifecycle::detach_tests::exact_token_without_exact_verifier_cannot_produce_terminalized_result ... ok
+test lifecycle::detach_tests::pending_replay_commits_only_the_real_drain_sequence ... ok
+test lifecycle::detach_tests::pending_replay_equal_progress_is_stable_without_a_drain ... ok
+test lifecycle::detach_tests::pending_replay_requires_drain_and_rewrites_a_repeated_refusal_epoch ... ok
+test lifecycle::edge_tests::cursor_ack_orderings_are_atomic_and_boundary_checked ... ok
+test lifecycle::edge_tests::cursor_storage_fate_supersession_and_leave_preserve_typestate ... ok
+test lifecycle::edge_tests::detached_cursor_release_is_leave_only_and_unrelated_facts_are_safe ... ok
+test lifecycle::edge_tests::detached_marker_release_is_leave_only ... ok
+test lifecycle::edge_tests::detached_recovery_fence_proof_binds_every_authority_field ... ok
+test lifecycle::edge_tests::fenced_recovery_fate_preserves_op_authority_until_exact_completion ... ok
+test lifecycle::edge_tests::detached_recovery_leave_requires_exact_private_k_claim ... ok
+test lifecycle::edge_tests::marker_delivery_derives_progress_and_covers_every_invalidator ... ok
+test lifecycle::edge_tests::fenced_recovery_fate_preserves_or_covers_pc_with_exact_cursor_authority ... ok
+test lifecycle::edge_tests::observer_completion_binds_exact_event_and_strict_successor ... ok
+test lifecycle::edge_tests::observer_marker_independent_and_binding_orderings_are_closed ... ok
+test lifecycle::edge_tests::only_clear_closure_state_admits_an_ordinary_detached_attach ... ok
+test lifecycle::edge_tests::ordinary_binding_fate_requires_attach_and_exact_terminal_provenance ... ok
+test lifecycle::edge_tests::physical_completion_requires_its_exact_compaction_range ... ok
+test lifecycle::edge_tests::physical_progress_classes_preserve_or_cover_and_refusals_do_neither ... ok
+test lifecycle::edge_tests::recovery_claim_provenance_covers_marker_delivery_progress_and_post_fate_dcr ... ok
+test lifecycle::enrollment_closure_tests::ample_headroom_keeps_initial_enrollment_clear_and_marker_free ... ok
+test lifecycle::edge_tests::strict_successor_set_contains_six_kinds_and_excludes_direct_recovery ... ok
+test lifecycle::enrollment_closure_tests::case_25_startup_equality_begins_debt_without_a_recovery_quartet ... ok
+test lifecycle::enrollment_closure_tests::initial_allocator_binding_and_attached_shape_are_checked ... ok
+test lifecycle::enrollment_tests::allocation_proof_is_bound_to_the_request_conversation ... ok
+test lifecycle::enrollment_tests::enrollment_consumes_allocated_slot_and_derives_every_fixed_value ... ok
+test lifecycle::enrollment_tests::exhausted_sentinel_cannot_become_a_participant ... ok
+test lifecycle::incarnation_tests::allocating_max_once_atomically_sets_exhaustion ... ok
+test lifecycle::incarnation_tests::case_42_non_max_collision_skips_before_publication ... ok
+test lifecycle::incarnation_tests::case_42_seeded_ordinal_exhaustion_is_idempotent ... ok
+test lifecycle::incarnation_tests::case_42_server_max_returns_exact_unchanged_exhaustion ... ok
+test lifecycle::incarnation_tests::complete_reference_collection_must_fit_its_declared_bound ... ok
+test lifecycle::incarnation_tests::fresh_server_allocates_zero_then_checked_increments ... ok
+test lifecycle::incarnation_tests::referenced_max_sets_exhaustion_without_publishing_a_pair ... ok
+test lifecycle::incarnation_tests::restore_rejects_both_exhaustion_bit_mismatches ... ok
+test lifecycle::incarnation_tests::same_connection_rotation_changes_generation_not_incarnation ... ok
+test lifecycle::incarnation_tests::startup_checked_increment_is_a_deterministic_fsync_intent ... ok
+test lifecycle::lookup_tests::absent_identity_precedes_impossible_cell_bytes ... ok
+test lifecycle::lookup_tests::attach_token_tombstone_and_provenance_precede_presented_authority ... ok
+test lifecycle::lookup_tests::committed_leave_token_exception_has_fixed_internal_order ... ok
+test lifecycle::lookup_tests::detach_ordinary_order_is_stale_then_no_binding_then_authorized ... ok
+test lifecycle::lookup_tests::detach_exact_resolution_and_pending_different_token_precede_binding ... ok
+test lifecycle::lookup_tests::detach_tombstone_precedes_exact_committed_cell ... ok
+test lifecycle::lookup_tests::different_leave_token_gets_retired_and_detached_live_leave_is_authorized ... ok
+test lifecycle::lookup_tests::enrollment_mapping_resolves_live_and_tombstoned_identities_before_status ... ok
+test lifecycle::lookup_tests::enrollment_receipt_and_provenance_are_phase_specific ... ok
+test lifecycle::lookup_tests::every_generic_binding_request_has_total_phase_one_through_five_order ... ok
+test lifecycle::lookup_tests::exact_attach_receipt_reports_current_bound_or_unbound_status ... ok
+test lifecycle::lookup_tests::live_attach_receipt_checks_secret_then_generation_then_marker ... ok
+test lifecycle::lookup_tests::fresh_attach_runs_presented_tombstone_unknown_stale_then_authorized ... ok
+test lifecycle::lookup_tests::terminalized_exact_token_precedes_current_generation_and_binding ... ok
+test lifecycle::lookup_tests::terminalized_exact_token_rejects_request_conversation_mismatch ... ok
+test lifecycle::lookup_tests::terminalized_replay_does_not_reflect_another_identity_binding ... ok
+test lifecycle::membership_tests::bound_leave_derives_active_epoch_and_moves_generic_fingerprints ... ok
+test lifecycle::membership_tests::committed_detach_cell_must_match_retained_terminal_and_derives_sequence ... ok
+test lifecycle::membership_tests::empty_cell_and_no_history_derives_none_without_caller_option ... ok
+test lifecycle::membership_tests::separately_committed_death_is_history_even_with_empty_detach_cell ... ok
+test lifecycle::membership_tests::pending_terminal_requires_typed_no_intervening_composition ... ok
+test lifecycle::obligation_dispatch::tests::debt_dispatch_invariant_never_falls_back_or_fabricates_wire_refusal ... ok
+test lifecycle::membership_tests::terminalized_cell_uses_retained_history_because_fix_one_drops_sequence ... ok
+test lifecycle::obligation_dispatch::tests::nonzero_debt_permits_testified_below_floor_and_defers_above_high_watermark ... ok
+test lifecycle::observer_recovery_tests::accepted_batch_preserves_order_and_arms_only_equal_epochs ... ok
+test lifecycle::observer_recovery_tests::empty_batch_is_an_empty_commit ... ok
+test lifecycle::observer_recovery_tests::first_request_order_duplicate_precedes_capacity_and_progress_lookup ... ok
+test lifecycle::observer_recovery_tests::later_epoch_failure_produces_no_partial_arm_plan ... ok
+test lifecycle::observer_recovery_tests::over_limit_beats_duplicate_without_progress_lookup ... ok
+test lifecycle::observer_recovery_tests::request_order_capacity_precedes_unknown_and_ahead ... ok
+test lifecycle::observer_recovery_tests::tracked_conversation_adds_zero_occupancy ... ok
+test lifecycle::observer_recovery_tests::unknown_and_ahead_are_selected_by_request_index ... ok
+test lifecycle::observer_recovery_transaction_tests::abort_installs_no_arm_and_commit_installs_the_whole_plan ... ok
+test lifecycle::observer_recovery_transaction_tests::aborted_advance_leaves_progress_and_arm_untouched ... ok
+test lifecycle::observer_recovery_transaction_tests::aborted_track_leaves_the_conversation_untracked ... ok
+test lifecycle::observer_recovery_transaction_tests::advance_requires_a_known_conversation_and_strict_progress ... ok
+test lifecycle::observer_recovery_transaction_tests::advancing_past_an_installed_arm_fires_it_exactly_once ... ok
+test lifecycle::observer_recovery_transaction_tests::committed_track_is_readable_and_recoverable ... ok
+test lifecycle::observer_recovery_transaction_tests::refused_recovery_returns_the_aggregate_unchanged ... ok
+test lifecycle::observer_recovery_transaction_tests::replaying_a_committed_recovery_is_idempotent ... ok
+test lifecycle::observer_recovery_transaction_tests::restore_round_trips_and_rejects_every_corruption_class ... ok
+test lifecycle::observer_recovery_transaction_tests::track_registers_once_and_refuses_duplicates_unchanged ... ok
+test lifecycle::operation_event_tests::attached_operation_repeats_the_attach_commits_attached_record ... ok
+test lifecycle::operation_event_tests::binding_fate_operation_repeats_the_ordinary_fates_committed_facts ... ok
+test lifecycle::operation_event_tests::binding_fate_operation_repeats_the_recovered_fates_committed_facts ... ok
+test lifecycle::operation_event_tests::detached_operation_records_the_committed_cells_own_attempt_token ... ok
+test lifecycle::operation_event_tests::enrolled_operation_repeats_the_enrollment_commits_attached_record ... ok
+test lifecycle::operation_event_tests::nonzero_debt_ack_operation_repeats_the_ack_commits_request ... ok
+test lifecycle::operation_event_tests::left_operation_repeats_the_retired_identitys_committed_result ... ok
+test lifecycle::operations::binding_fate_f8_tests::a_non_owner_transition_failure_stays_outside_the_owner_transition_carrier ... ok
+test lifecycle::operations::binding_fate_f8_tests::a_retained_charge_refusal_carries_its_own_cause ... ok
+test lifecycle::operations::binding_fate_f8_tests::a_retained_unacked_marker_pins_the_measured_floor ... ok
+test lifecycle::operations::binding_fate_f8_tests::the_retired_precedence_pole_backstop_names_itself_if_it_ever_fires ... ok
+test lifecycle::operations::binding_fate_finalizer_tests::a_floor_subsumed_while_the_finalizer_waited_installs_as_a_no_op ... ok
+test lifecycle::operations::binding_fate_finalizer_tests::an_uncontested_finalizer_floor_installs_unchanged ... ok
+test lifecycle::operations::binding_fate_finalizer_tests::a_marker_retained_while_the_finalizer_waited_pins_the_installed_floor ... ok
+test lifecycle::operations::binding_fate_tests::ordinary_binding_fate_projects_measured_resulting_floor ... ok
+test lifecycle::operations::binding_fate_tests::recovered_binding_fate_projects_measured_resulting_floor ... ok
+test lifecycle::operations::binding_terminal_tests::terminal_disposition_selector_commits_or_pends_from_protocol_state ... ok
+test lifecycle::operations::enrollment_operation_tests::allocator_mismatch_does_not_mint_commit_values ... ok
+test lifecycle::operations::enrollment_operation_tests::receipt_deadlines_validate_precedence_and_widen_before_addition ... ok
+test lifecycle::operations::enrollment_operation_tests::crash_replay_from_identical_prestate_is_identical ... ok
+test lifecycle::operations::enrollment_operation_tests::allocator_identity_domain_mismatch_does_not_mint_commit_values ... ok
+test lifecycle::operations::enrollment_operation_tests::case_25_success_returns_one_atomic_commit ... ok
+test lifecycle::operations::enrollment_operation_tests::stage_six_and_eight_refusals_are_ordered_and_nonmutating ... ok
+test lifecycle::operations::enrollment_operation_tests::token_replay_precedes_every_capacity_and_never_allocates ... ok
+test lifecycle::operations::live_frontier_reconcile_tests::reconcile_leaves_an_in_step_unaccepted_marker_alone ... ok
+test lifecycle::operations::live_frontier_reconcile_tests::reconcile_never_touches_the_derived_ahead_direction ... ok
+test lifecycle::operations::live_frontier_reconcile_tests::reconcile_retires_the_orphaned_anchor_and_is_idempotent ... ok
+test lifecycle::operations::marker_ack_tests::commit_advances_exactly_once_and_crash_replay_is_idempotent ... ok
+test lifecycle::operations::marker_ack_tests::exact_delivery_uses_authorized_cursor_and_epoch_and_retains_proof ... ok
+test lifecycle::operations::marker_ack_tests::marker_ack_commit_exposes_ruled_q3_persistence_census ... ok
+test lifecycle::operations::marker_ack_tests::marker_refusals_and_exact_accepted_replay_are_typed_and_nonmutating ... ok
+test lifecycle::operations::marker_ack_tests::opaque_update_validates_identity_generation_and_from_cursor_before_mutation ... ok
+test lifecycle::operations::marker_ack_tests::wrong_receiving_epoch_is_no_binding_before_marker_proof ... ok
+test lifecycle::operations::marker_ack_tests::shared_lookup_precedence_runs_before_marker_proof ... ok
+test lifecycle::operations::marker_drain_tests::already_materialized_marker_edge_cannot_coexist_with_pending_candidate ... ok
+test lifecycle::operations::marker_drain_tests::detached_candidate_appends_and_selects_exact_dmr ... ok
+test lifecycle::operations::marker_drain_tests::drain_consumes_next_marker_and_returns_one_atomic_authority_commit ... ok
+test lifecycle::operations::marker_drain_tests::drained_detached_marker_cannot_be_reused_as_delivered_recovery_proof ... ok
+test lifecycle::operations::marker_drain_tests::op_and_pc_remain_strict_while_bound_marker_appends ... ok
+test lifecycle::operations::marker_proof_tests::credential_attach_input_requires_some_marker_and_preserves_its_distinct_envelope ... ok
+test lifecycle::operations::marker_proof_tests::case_34_marker_ack_matrix_uses_the_frozen_total_precedence ... ok
+test lifecycle::operations::marker_drain_tests::marker_drain_acceptance_tests::marker_commit_projects_typed_history_compacted_without_debug_parse ... ok
+test lifecycle::operations::marker_drain_tests::missing_candidate_is_an_invariant_fault_and_replay_is_deterministic ... ok
+test lifecycle::operations::marker_proof_tests::exact_delivery_mints_an_opaque_operation_bound_permit ... ok
+test lifecycle::operations::marker_proof_tests::selection_is_nonmutating_and_crash_replay_is_identical ... ok
+test lifecycle::operations::marker_proof_tests::wrong_participant_epoch_marker_or_generation_never_counts_as_exact_delivery ... ok
+test lifecycle::operations::nonzero_participant_ack_tests::aggregate_commit_rejects_unrelated_and_split_restored_prestates ... ok
+test lifecycle::operations::nonzero_participant_ack_tests::aggregate_invariant_checks_are_ordered_and_nonmutating ... ok
+test lifecycle::operations::nonzero_participant_ack_tests::common_lookup_precedes_episode_validation_and_never_mutates ... ok
+test lifecycle::operations::nonzero_participant_ack_tests::nonzero_debt_ack_moves_the_same_committed_cursor_through_live_frontier_ownership ... ok
+test lifecycle::operations::nonzero_participant_ack_tests::noop_gap_and_regression_return_wire_values_without_mutating_episode ... ok
+test lifecycle::operations::nonzero_participant_ack_tests::oracle::nonzero_debt_obligation_and_scalar_refusal_cannot_diverge ... ok
+test lifecycle::operations::nonzero_participant_ack_tests::oracle::nonzero_debt_obligation_and_scalar_commit_cannot_diverge ... ok
+test lifecycle::operations::nonzero_participant_ack_tests::oracle::nonzero_debt_sparse_gap_never_selects_scalar_fallback ... ok
+test lifecycle::operations::ordinary_record_projection_tests::compacted_accepted_marker_releases_credit_without_planning_a_replacement ... ok
+test lifecycle::operations::nonzero_participant_ack_tests::oracle::two_participants_ack_same_retained_suffix_through_total_wrapper ... ok
+test lifecycle::operations::ordinary_record_projection_tests::compacted_credit_owner_can_receive_one_new_marker_in_the_same_fixed_point ... ok
+test lifecycle::operations::ordinary_record_projection_tests::consuming_wrapper_rejects_a_disconnected_keyed_charge ... ok
+test lifecycle::operations::ordinary_record_projection_tests::current_credited_marker_uses_marker_max_and_keeps_accepted_credit ... ok
+test lifecycle::operations::ordinary_record_projection_tests::consuming_capacity_walk_wrapper_relays_exact_owners_and_seals_marker_prefix ... ok
+test lifecycle::operations::ordinary_record_projection_tests::consuming_wrapper_releases_compacted_credit_then_reovertakes_same_participant ... ok
+test lifecycle::operations::ordinary_record_projection_tests::hard_observer_blocks_the_exact_capacity_walk_floor ... ok
+test lifecycle::operations::ordinary_record_projection_tests::keyed_charge_mismatch_is_rejected_before_any_derived_total_is_used ... ok
+test lifecycle::operations::ordinary_record_projection_tests::mandatory_candidate_wins_before_optional_projection_or_counter_planning ... ok
+test lifecycle::operations::ordinary_record_projection_tests::ordinary_capacity_walk_derives_floor_marker_and_both_ledgers ... ok
+test lifecycle::operations::ordinary_record_projection_tests::two_overtaken_participants_receive_ascending_exact_marker_candidates ... ok
+test lifecycle::operations::ordinary_record_projection_tests::unaccepted_marker_prevents_capacity_search_crossing_its_sequence ... ok
+test lifecycle::operations::ordinary_record_projection_tests::uncredited_historical_marker_contributes_its_exact_charge_not_marker_max ... ok
+test lifecycle::operations::participant_ack_tests::commit_advances_exactly_once_and_crash_replay_is_idempotent ... ok
+test lifecycle::operations::participant_ack_tests::all_four_ack_relations_select_exact_wire_outcomes ... ok
+test lifecycle::operations::participant_ack_tests::durable_obligation_context_mismatch_is_typed_invariant_not_ack_gap ... ok
+test lifecycle::operations::participant_ack_tests::durable_obligation_endpoint_skips_internal_gaps_but_rejects_gap_endpoint ... ok
+test lifecycle::operations::participant_ack_tests::opaque_update_validates_identity_generation_and_from_cursor_before_mutation ... ok
+test lifecycle::operations::participant_ack_tests::refusals_and_noop_never_mutate_membership ... ok
+test lifecycle::operations::participant_ack_tests::shared_lookup_precedence_is_preserved_before_ack_relations ... ok
+test lifecycle::operations::participant_ack_tests::wrong_receiving_epoch_is_no_binding_before_ack_relations ... ok
+test lifecycle::operations::record_admission_selector_acceptance_tests::record_selector_names_marker_closure_refusal_and_preserves_owner ... ok
+test lifecycle::operations::record_admission_selector_acceptance_tests::record_selector_names_order_exhaustion_and_preserves_owner ... ok
+test lifecycle::operations::record_admission_tests::classify_record_admission_binding_covers_the_lookup_rows_and_only_those ... ok
+test lifecycle::operations::record_admission_tests::case_31_sequence_exhaustion_returns_exact_budget_and_unchanged_replay ... ok
+test lifecycle::operations::record_admission_tests::capacity_walk_total_operation_commits_full_payload_and_replays_identically ... ok
+test lifecycle::operations::record_admission_tests::observer_fixed_point_refusal_maps_through_shared_selector_without_mutation ... ok
+test lifecycle::operations::record_admission_tests::into_persistence_parts_moves_the_complete_atomic_set_exactly_once ... ok
+test lifecycle::operations::record_admission_tests::projected_marker_drains_first_and_replays_with_complete_unchanged_input ... ok
+test lifecycle::operations::record_admission_tests::case_32_size_dimensions_preserve_state_and_lookup_precedes_size ... ok
+test lifecycle::operations::record_admission_tests::untracked_semantic_conversation_refusal_carries_exact_envelope_and_limit ... ok
+test lifecycle::storage_tests::binding_terminals_restore_only_from_valid_cause_partitions ... ok
+test lifecycle::storage_tests::all_four_detach_cells_restore_with_atomic_binding_pair_checks ... ok
+test lifecycle::storage_tests::case_56_joint_restore_keeps_prefate_candidate_quartet_while_pc_is_current ... ok
+test lifecycle::storage_tests::cursor_episode_restores_variable_participant_facts_and_rejects_bad_pairs ... ok
+test lifecycle::storage_tests::all_seven_stored_edges_restore_and_opaque_variants_require_exact_provenance ... ok
+test lifecycle::storage_tests::historical_causal_rows_require_exact_owned_lifecycle_history ... ok
+test lifecycle::storage_tests::live_membership_rejects_terminal_identity_and_generation_drift ... ok
+test lifecycle::storage_tests::fenced_and_recovered_authorities_restore_only_from_exact_epoch_provenance ... ok
+test lifecycle::storage_tests::retired_tombstone_validates_complete_permanent_leave_result ... ok
+test lifecycle::storage_tests::recovered_origin_cannot_execute_ordinary_pcp_or_cursor_release ... ok
+test lifecycle::storage_tests::total_restore_of_replayed_enrollment_equals_live_state ... ok
+test lifecycle::storage_tests::total_restore_refuses_a_duplicated_participant_identity ... ok
+test lifecycle::storage_tests::total_restore_refuses_binding_origins_from_another_history ... ok
+test lifecycle::storage_tests::total_restore_refuses_cross_conversation_component_splices ... ok
+test lifecycle::storage_tests::post_fenced_active_quartet_resolves_from_old_history_under_current_storage ... ok
+test lifecycle::storage_tests::joint_cold_restore_uses_historical_old_epoch_across_fenced_recovery ... ok
+test lifecycle::storage_tests::producer_emitted_enrollment_and_superseding_origins_replay_through_total_restore ... ok
+test outcome::internal_tests::binding_recovery_carries_only_unclean_restart_cause ... ok
+test outcome::internal_tests::candidate_phase_values_match_canonical_order ... ok
+test lifecycle::storage_tests::total_restore_seals_ordinary_cursor_and_fate_authority ... ok
+test outcome::internal_tests::fix_two_corruption_taxonomy_keeps_non_occurrence_reasons ... ok
+test outcome::keepalive_tests::accepted_socket_phase_has_exactly_the_three_runtime_reason_shapes ... ok
+test outcome::keepalive_tests::platform_name_round_trips_without_loss ... ok
+test outcome::keepalive_tests::startup_phase_has_exactly_the_five_startup_reason_shapes ... ok
+test outcome::local_tests::park_capacity_has_only_the_five_legal_pairs ... ok
+test outcome::local_tests::park_order_exhaustion_fixes_counter_and_value ... ok
+test outcome::parking_tests::all_eighteen_parked_configuration_dimensions_are_constructible ... ok
+test outcome::parking_tests::all_nine_configuration_shape_dimensions_are_constructible ... ok
+test outcome::parking_tests::handshake_failure_keeps_both_limits_and_all_widened_operands ... ok
+test outcome::startup_tests::all_nine_capability_nonzero_fields_are_named ... ok
+test outcome::startup_tests::capability_deadline_order_is_a_flat_tagged_body ... ok
+test outcome::startup_tests::connection_exhaustion_encodes_only_the_two_valid_payload_shapes ... ok
+test outcome::startup_tests::retention_has_only_the_three_fix_two_dimensions ... ok
+test reason_code::band_tests::roster_reason_codes_collide_with_neither_neighbouring_band ... ok
+test reason_code::band_tests::roster_reason_codes_hold_their_wire_values ... ok
+test reason_code::band_tests::roster_reason_codes_lie_inside_the_reserved_server_band ... ok
+test wire::authority_tests::credential_attach_constructors_stay_inside_the_register_rows ... ok
+test wire::authority_tests::enrollment_constructors_stay_inside_the_register_rows ... ok
+test wire::authority_tests::enrollment_receipt_expired_public_form_matches_the_sealed_lookup_wrapper ... ok
+test wire::authority_tests::lifecycle_matrix::detach_constructors_stay_inside_the_register_rows ... ok
+test wire::authority_tests::lifecycle_matrix::leave_constructors_stay_inside_the_register_rows ... ok
+test wire::authority_tests::lifecycle_matrix::marker_ack_constructors_stay_inside_the_register_rows ... ok
+test wire::authority_tests::lifecycle_matrix::narrow_constructors_embed_the_exact_origin_arm ... ok
+test wire::authority_tests::lifecycle_matrix::participant_ack_constructors_stay_inside_the_register_rows ... ok
+test wire::authority_tests::records_matrix::bound_values_move_out_intact ... ok
+test wire::authority_tests::records_matrix::observer_recovery_constructors_stay_inside_the_register_rows ... ok
+test wire::authority_tests::records_matrix::record_admission_constructors_stay_inside_the_register_rows ... ok
+test wire::codec_tests::fixed_request_and_delivery_sizes_match_the_contract ... ok
+test wire::codec_tests::all_client_requests_round_trip ... ok
+test wire::codec_tests::header_and_prefix_are_network_order_and_exact ... ok
+test wire::codec_tests::inbound_gate_authentication_precedes_capability ... ok
+test wire::codec_tests::inbound_gate_framing_precedes_version ... ok
+test wire::codec_tests::inbound_gate_maps_unknown_and_selected_body_failures ... ok
+test wire::codec_tests::inbound_gate_size_precedes_framing ... ok
+test wire::codec_tests::inbound_gate_uses_the_pre_capability_constant_before_allocation ... ok
+test wire::codec_tests::inbound_gate_version_precedes_discriminant ... ok
+test wire::codec_tests::malformed_sdk_transport_rejection_does_not_receive_the_exception ... ok
+test wire::codec_tests::non_participant_outer_type_bypasses_every_participant_gate_stage ... ok
+test wire::codec_tests::sdk_transport_rejection_bypasses_local_authentication_and_capability ... ok
+test wire::codec_tests::recovery_count_is_bounded_before_allocation ... ok
+test wire::codec_tests::server_push_acceptance_tests::all_push_record_kinds_round_trip ... ok
+test wire::codec_tests::short_output_reports_exact_requirement ... ok
+test wire::codec_tests::server_push_acceptance_tests::server_push_direction_and_codec_round_trip_all_record_kinds ... ok
+test wire::codec_tests::trailing_truncated_and_zero_generation_classes_are_stable ... ok
+test wire::codec_tests::validated_frame_limit_enforces_the_explicit_complete_frame_range ... ok
+test wire::codec_tests::wrong_direction_and_unassigned_values_are_unknown ... ok
+test wire::server_codec_tests::closure_churn_count_and_limit_use_u64_wire_widths ... ok
+test wire::server_codec_tests::all_37_server_values_round_trip_with_contiguous_tags ... ok
+test wire::server_codec_tests::decoder_rejects_impossible_duplicate_success_fields ... ok
+test wire::server_codec_tests::decoder_rejects_invalid_terminal_generation_and_order_relations ... ok
+test wire::server_codec_tests::duplicate_success_fields_are_derived_by_typed_constructors ... ok
+test wire::server_codec_tests::decoder_rejects_invalid_order_backpressure_and_receipt_relations ... ok
+test wire::server_codec_tests::invalid_tags_missing_trailing_and_zero_generation_are_classified ... ok
+test wire::server_codec_tests::recovery_count_routes_before_unread_suffix ... ok
+test wire::server_codec_tests::terminalized_detach_wire_arm_retains_old_epoch ... ok
+test wire::server_codec_tests::all_37_server_values_round_trip_as_complete_frames ... ok
+test wire::server_codec_tests::every_originating_request_pair_has_exact_routing ... ok
+test wire::server_codec_tests::unsupported_body_version_is_preserved ... ok
+test wire::tags_tests::attempt_and_authority_registries_are_origin_specific ... ok
+test wire::tags_tests::capacity_and_edge_registries_are_exact ... ok
+test wire::tags_tests::client_registry_is_exactly_eight_contiguous_values ... ok
+test wire::tags_tests::receipt_marker_ack_and_recovery_reason_registries_are_exact ... ok
+test wire::tags_tests::close_cause_payload_does_not_change_its_tag ... ok
+test wire::tags_tests::transport_and_decode_registries_are_exact ... ok
+test wire::tags_tests::close_cause_registry_is_exact ... ok
+test wire::tags_tests::pushed_and_record_registries_preserve_their_explicit_bases ... ok
+test wire::tags_tests::server_registry_is_exactly_thirty_seven_contiguous_values ... ok
+test lifecycle::conversation_tests::any_prefix_replay_produces_a_valid_shell_state ... ok
+test client::authority_property_tests::exhaustive_small_scope_send_authority_conservation ... ok
+test lifecycle::observer_recovery_transaction_tests::interleavings_never_split_arm_installation_and_durable_replay_converges ... ok
+
+test result: ok. 464 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/acceptance_01_25.rs (target/debug/deps/acceptance_01_25-f5b5318e420284d1)
+
+running 25 tests
+test acceptance_03_failed_admissions_do_not_consume_sequence ... ok
+test acceptance_08_silence_never_advances_replay ... ok
+test acceptance_04_all_participants_observe_one_conversation_sequence ... ok
+test acceptance_02_crash_before_ack_redelivers_identical_key ... ok
+test acceptance_07_conversation_demux_has_independent_cursors ... ok
+test acceptance_05_replay_live_cutover_is_lossless_and_ordered ... ok
+test acceptance_01_same_session_duplicate_guard ... ok
+test acceptance_10_member_replay_detach_reattach_leave_and_floor ... ok
+test acceptance_09_enrollment_replay_is_stable_and_expiry_cannot_ghost_mint ... ok
+test acceptance_11_generation_race_has_one_rotation_and_one_handoff_pair ... ok
+test acceptance_12_retired_replays_never_disclose_secret_or_remint ... ok
+test acceptance_06_history_compaction_marker_accept_decline_and_replay ... ok
+test acceptance_15_sdk_generation_monotonicity_deadlines_and_receipt_cap ... ok
+test acceptance_16_four_worked_floor_cases ... ok
+test acceptance_14_unbound_receipt_never_grants_new_connection_authority ... ok
+test acceptance_13_leave_authority_decode_replay_and_serialized_races ... ok
+test acceptance_17_expired_winner_and_stale_loser_are_exactly_classified ... ok
+test acceptance_20_lost_credential_recovery_is_terminal_and_preserves_identity ... ok
+test acceptance_19_backpressure_wakes_once_but_acks_never_park ... ok
+test acceptance_18_identity_ordinals_and_capacity_scope_precedence ... ok
+test acceptance_21_reachable_joint_generation_sequence_boundary ... ok
+test acceptance_22_old_enrollment_token_becomes_known_not_reminted ... ok
+test acceptance_24_pending_finalization_crash_recovery_is_atomic ... ok
+test acceptance_23_backpressure_progress_cycles_are_event_driven_and_nonmutating ... ok
+test acceptance_25_configuration_matrix_and_generated_capacity_boundary ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/acceptance_26_44.rs (target/debug/deps/acceptance_26_44-884f50fae096ba79)
+
+running 19 tests
+test case_30_candidate_order_controls_marker_and_terminal_append_order ... ok
+test case_26_entry_sequence_equality_snapshot ... ok
+test case_32_sdk_parking_and_static_record_size_boundaries ... ok
+test case_37_uniform_marker_plan_position_and_capacity_arithmetic ... ok
+test case_36_attach_receipt_superseded_before_deadline ... ok
+test case_35_atomic_detach_and_terminalized_replay_without_fabricated_epoch ... ok
+test case_31_sequence_exhaustion_is_atomic_in_both_arms ... ok
+test case_33_observer_recovery_list_selector_and_sizes ... ok
+test case_27_reconnect_race_and_connection_capacity ... ok
+test case_34_ack_and_marker_proof_selector ... ok
+test case_40_parking_renegotiation_selects_first_incompatible_dimension ... ok
+test case_38_delayed_ack_is_keyed_to_explicit_identity_and_generation ... ok
+test case_39_total_unknown_stale_unbound_and_retired_precedence ... ok
+test case_29_post_leave_enrollment_and_credential_token_replay ... ok
+test case_41_pending_detach_replay_and_progress_race ... ok
+test case_28_detach_replay_terminalization_and_leave_precedence ... ok
+test case_42_binding_slot_handoff_and_incarnation_exhaustion ... ok
+test case_43_reachable_park_and_transaction_order_exhaustion ... ok
+test case_44_dcr_leave_fence_and_typed_cursor_release_suffix ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/acceptance_45_51.rs (target/debug/deps/acceptance_45_51-9bd3f7987a594406)
+
+running 9 tests
+test acceptance_case_51_detached_attach_exhaustion_and_cursor_only_recovery_fence ... ok
+test acceptance_case_49_undelivered_marker_is_leave_only_and_never_fenced_recovery ... ok
+test acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_races ... ok
+test acceptance_case_47_canonical_sequence_budgets_and_gap_free_boundary_histories ... ok
+test acceptance_case_45_uniform_marker_episode_and_per_participant_occurrences ... ok
+test fenced_marker_source_retains_exact_frontier_facts_without_minting ... ok
+test attach_commit_splits_operational_state_and_one_noncloneable_fate_token ... ok
+test acceptance_case_48_marker_ack_and_fenced_recovery_converge_for_both_observer_orders ... ok
+test acceptance_case_50_reconnect_permits_are_single_use_and_wait_inventory_is_total ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/acceptance_52_56.rs (target/debug/deps/acceptance_52_56-024ca42ca296bbdd)
+
+running 5 tests
+test acceptance_case_52_one_shot_recovery_phase_latch_and_handshake_limits ... ok
+test acceptance_case_53_verifier_precedence_receipt_provenance_and_terminalized_detach ... ok
+test acceptance_case_56_sequence_equality_and_pcp_ordering_without_occurrence_array ... ok
+test acceptance_case_54_multi_binding_shutdown_families_and_participant_scoped_progress ... ok
+test acceptance_case_55_adjacent_and_intervening_positional_leave_crash_replay ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/algebra_fixtures.rs (target/debug/deps/algebra_fixtures-1302273bdfbb571a)
+
+running 6 tests
+test byte_budget_recovery_and_leave_releases_restore_full_k ... ok
+test byte_budget_walk_tests_every_removal_candidate ... ok
+test multi_binding_debt_walk_respects_q_and_full_k ... ok
+test required_capacity_component_copies_have_exact_debts ... ok
+test startup_equality_checks_both_one_below_components ... ok
+test three_member_admission_walk_is_marker_credit_neutral ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conversation_restore.rs (target/debug/deps/conversation_restore-aa2e28308f582002)
+
+running 5 tests
+test public_total_restore_refuses_frontier_participants_without_capsules ... ok
+test public_total_restore_refuses_cross_conversation_tombstones ... ok
+test public_restore_cannot_conjure_binding_authority_without_a_producer_origin ... ok
+test public_total_restore_refuses_duplicate_participants ... ok
+test public_total_restore_validates_a_settled_conversation ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/properties.rs (target/debug/deps/properties-6b2f9f0f0541ad2c)
+
+running 4 tests
+test crash_replay_of_storage_selectors_is_identical ... ok
+test crash_replay_of_ack_transition_is_identical ... ok
+test the_marker_clamp_lowers_and_the_installed_floor_stays_inside_its_interval ... ok
+test ack_interleavings_are_serializable_and_monotone ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests liminal_protocol
+
+running 42 tests
+test crates/liminal-protocol/src/client.rs - client::LostAuthorityTestimony (line 314) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/conversation.rs - lifecycle::conversation::ConversationEvent (line 281) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/admission/sequence.rs - lifecycle::admission::sequence::SequenceLedger (line 140) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/conversation.rs - lifecycle::conversation::ConversationCommit (line 490) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/admission/order.rs - lifecycle::admission::order::OrderLedger (line 116) - compile fail ... ok
+test crates/liminal-protocol/src/client/reconnect.rs - client::reconnect::ReconnectAttemptPermit (line 106) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/aggregate_commit.rs - lifecycle::aggregate_commit::AggregateOperationCommit (line 58) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/claim_frontier.rs - lifecycle::claim_frontier::HistoricalCausalFactRestore (line 356) - compile fail ... ok
+test crates/liminal-protocol/src/client/reconnect.rs - client::reconnect::ReconnectAttemptPermit (line 99) - compile fail ... ok
+test crates/liminal-protocol/src/client/barrier.rs - client::barrier::ClientPendingOperationRecord (line 110) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/edge.rs - lifecycle::edge::OrdinaryBindingAuthority (line 803) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/edge.rs - lifecycle::edge::CursorProgressContinuous (line 377) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/edge.rs - lifecycle::edge::MarkerDelivery (line 94) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/edge.rs - lifecycle::edge::OrdinaryBindingAuthority (line 832) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/edge.rs - lifecycle::edge::OrdinaryBindingAuthority (line 824) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/edge.rs - lifecycle::edge::OrdinaryBindingAuthority (line 814) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/conversation.rs - lifecycle::conversation::ParticipantConversation (line 44) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/enrollment.rs - lifecycle::enrollment::BindingOrigin (line 187) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/cursor_facts.rs - lifecycle::cursor_facts::RecipientAckObligations (line 45) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/edge.rs - lifecycle::edge::ParticipantCursorProgress (line 481) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/enrollment.rs - lifecycle::enrollment::BindingOrigin (line 197) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/enrollment.rs - lifecycle::enrollment::BindingOrigin (line 205) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/membership.rs - lifecycle::membership::PreparedLeaveAuthority (line 596) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/observer_recovery.rs - lifecycle::observer_recovery::ObserverProgressProjection (line 16) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/membership.rs - lifecycle::membership::PreparedLeaveAuthority (line 592) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/observer_recovery.rs - lifecycle::observer_recovery::ObserverRecoveryAggregate (line 143) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operation_event.rs - lifecycle::operation_event::AttachedOperation::new (line 144) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operation_event.rs - lifecycle::operation_event::LeftOperation::new (line 374) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operation_event.rs - lifecycle::operation_event::DetachedOperation::new (line 246) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operation_event.rs - lifecycle::operation_event::DetachedOperation::new (line 260) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operations/live_frontier.rs - lifecycle::operations::live_frontier::LiveFrontierOwner (line 56) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operations/live_frontier.rs - lifecycle::operations::live_frontier::LiveFrontierOwner (line 48) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operations/marker_proof.rs - lifecycle::operations::marker_proof::MarkerProofState::new (line 119) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operations/marker_drain.rs - lifecycle::operations::marker_drain::MarkerDrainCommit (line 98) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operations/marker_drain.rs - lifecycle::operations::marker_drain::MarkerDeliveryProjection (line 66) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/operations/marker_drain.rs - lifecycle::operations::marker_drain::MarkerDeliveryProjection (line 55) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/storage.rs - lifecycle::storage::OrdinaryBindingAuthorityRestore (line 1058) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/storage.rs - lifecycle::storage::FencedAttachCommitRestore (line 1579) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/storage.rs - lifecycle::storage::MarkerDeliveryRestore (line 1097) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/storage.rs - lifecycle::storage::OrdinaryBindingFateRestore (line 1481) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/storage.rs - lifecycle::storage::ParticipantConversationState (line 121) - compile fail ... ok
+test crates/liminal-protocol/src/lifecycle/storage.rs - lifecycle::storage::RecoveredBindingFateRestore (line 1649) - compile fail ... ok
+
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+

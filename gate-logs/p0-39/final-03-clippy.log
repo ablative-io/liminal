@@ -1,0 +1,9 @@
+    Checking unicode-ident v1.0.24
+   Compiling wasm-bindgen-shared v0.2.125
+    Checking liminal-sdk v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-39/crates/liminal-sdk)
+    Checking liminal-rs v0.5.5 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-39/crates/liminal)
+   Compiling wasm-bindgen-macro-support v0.2.125
+   Compiling wasm-bindgen-macro v0.2.125
+    Checking wasm-bindgen v0.2.125
+    Checking liminal-ts-wasm v0.3.0 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-39/sdks/liminal-ts/wasm-src)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.07s
