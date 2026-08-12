@@ -804,6 +804,99 @@ which requests are refused.
    row; the build must document the observed stage order at its sites and
    pin it, so the order is a measured property rather than an accident.
 
+### 0.17 R18 amendment A6 — the receipt-capacity hybrid: TTL-bounded shared pools, displacement windows per participant (2026-08-13)
+
+**Status: PROPOSED, authored by lane p0-39 under the sequencer's ruling on
+Tom's governing sentence — *"no configured number refuses an honest arrival."*
+Neither key turned. The build exists and is gated (branch `p0-39-caps-hybrid`
+off `77e4845`; design record `docs/design/P0-39-RECEIPT-CAPACITY-HYBRID.md`),
+so this amendment is a description of shipped, pinned behaviour awaiting
+ratification, not a proposal in the abstract. Reviewer-of-record key and
+independent second key both outstanding; the seat runs the key process.**
+
+**Honesty line:** this amendment changes NO wire bytes. Every registry variant
+keeps its assigned value and every refusal row keeps its schema; five scopes
+simply stop being emitted. It DOES change server behaviour (that is its whole
+point) and it DOES break configuration compatibility, both stated explicitly
+below rather than left to a reader to infer.
+
+**The two failures being repaired.** They are different, which is why the
+answer is a hybrid and not one uniform rule.
+
+1. The SHARED pools (`LiveReceiptServer`, `ProvenanceServer`,
+   `ProvenanceConversation`) are pooled across parties, so an honest third
+   party that has consumed nothing meets a number somebody else's churn
+   filled. It cannot have caused that refusal, cannot observe it, and cannot
+   act on it.
+2. The PER-PARTICIPANT pools (`LiveReceiptParticipant`,
+   `ProvenanceParticipant`) wedge their own owner: a participant's own
+   committed rotations fill its own window and the (N+1)th attach of that same
+   participant is refused — on a cold boot, out of replayed durable state, at
+   reconnect. In the live-receipt case the refused attach is the very
+   operation that would have ENDED the receipt doing the refusing.
+
+**The ruled shape.** Shared pools stop being admission gates entirely;
+retention there is bounded by the TTL windows alone, with a reporting tripwire
+in place of a wall. Per-participant numbers become WINDOW SIZES: at a full
+window the oldest in-window entry is displaced and the arrival always lands.
+Identity capacity is untouched and remains a gate.
+
+**Row-by-row disposition.** Every behaviour-only row that survives is kept; no
+row is deleted, and rows for refusals that are no longer produced are marked
+historically emitted rather than removed, so the register stays readable
+against older deployments and older captures.
+
+| Row | Disposition |
+|---|---|
+| :2176-2180 (five caps exist, "with signed defaults advertised in negotiated participant capability state") | The caps survive as configured numbers; three become reporting thresholds and two become window sizes. The ADVERTISEMENT MANDATE is **STRUCK** — see the evidence row below. The "signed defaults" phrasing is also corrected: liminal ships no defaults, and every `ParticipantConfig` field is required (`config/types.rs:567@77e4845`). Surviving informational values disclose through deployment configuration and the server's metrics surface, never through negotiated capability state. |
+| :2184-2193 (nine-field zero-validation order) | Shrinks to the surviving fields, in the same relative order: `attach_receipt_ttl_ms`, `receipt_provenance_ttl_ms`, `live_receipt_server_report_threshold`, `max_live_attach_receipts_per_participant`, `receipt_provenance_server_report_threshold`, `receipt_provenance_per_conversation_report_threshold`, `max_receipt_provenance_per_participant`, `max_retired_identity_slots_server`, then the conversation identity limit. Still nine fields; three renamed because their old names said *maximum* and would now be describing a threshold that refuses nothing. Zero remains rejected for every one of them. The TTL-ordering rule that follows all nine is unchanged. |
+| :2202-2206 (fixed five-scope check order; first full scope returns `ReceiptCapacityExceeded`) | **No longer reachable on any receipt scope.** No receipt scope refuses, so no order among them can be observed. `ReceiptCapacityScope` and `EnrollmentReceiptCapacityScope` remain ASSIGNED AND DEFINED in the `u16_registry!` (`wire/tags.rs:340-364`) — deleting or reordering a variant is wire-breaking and is not done — and become *defined but unemitted*. The `ReceiptCapacityExceeded` refusal type stays defined with its schema intact. |
+| :2207-2210 (R-C0 retention: "the non-secret fingerprint remains only through its provenance deadline"; both cleanups admitted deadline events plus request-time checks, never a sweep) | The retention sentence GAINS, for the per-participant scopes only: *"…or until displaced by a newer fingerprint of the same participant."* The never-a-sweep rule is unchanged and is strengthened in practice: displacement is performed at insert time inside the committing operation, under the same admitted clock read, and no background eviction task exists. |
+| :2217-2221 (bounded retirement identity) | **Unchanged.** Identity capacity is out of this amendment's scope: signed server-wide and per-conversation `max_retired_identity_slots` still gate, still test `Server` before `Conversation`, still return `IdentityCapacityExceeded` at the first full set, and slots are still never cleaned up. |
+| :2223-2231 (seven-scope selector; per-participant scopes "provably pass and are not advertised as enrollment refusal scopes") | The enrollment selector shrinks to identity `Server` then identity `Conversation` — the complete refusable set. The sentence about the two per-participant scopes provably passing at enrollment SURVIVES and is now true of every receipt scope on this arm: none of them has a refusal arm. |
+| :2244-2245 ("A fresh token absent from this lifetime index may enroll normally until the reserved identity cap") | **Unchanged, and now exactly true.** The identity cap is the only cap that can stop a fresh enrollment; before this amendment the sentence understated the refusal surface by three shared receipt scopes. |
+| :6188-6189 (enrollment-attach retryability rows for `ReceiptCapacityExceeded` and `IdentityCapacityExceeded`) | The `ReceiptCapacityExceeded` row is marked **historically emitted; no longer emitted on this arm** and is KEPT with its schema, so a capture or a deployment predating this amendment stays readable against the register. The `IdentityCapacityExceeded` row is unchanged. |
+| :6196 (credential-attach `ReceiptCapacityExceeded` row) | Same disposition: historically emitted, no longer emitted, row kept. |
+| :6717-6719 (socket answers `«RECEIPT-LIFETIME»`, `«RETIRED-IDENTITY-BOUND»`) | `«RECEIPT-LIFETIME»`'s answer changes from "signed receipt TTL/count … caps bound both bodies and classifiers" to: TTL bounds every scope; per-participant COUNT bounds retention by displacement rather than refusal; shared counts bound nothing and report. Its closure evidence gains the displacement-order, bound-exactness, replay-equivalence and degradation tests, and loses "cap exhaustion" (unconstructible on the receipt scopes). `«RETIRED-IDENTITY-BOUND»` is **unchanged**, including its "pre-mint capacity refusal" evidence, which is an identity refusal. |
+
+**Evidence row — the advertisement mandate was never built.** Re-measured at
+this lane's bytes, and the sizing pass's phrasing corrected in the process.
+`NegotiatedParticipantCapability` (`wire/codec.rs:85-88@77e4845`) carries
+exactly two fields, `protocol_version` and `max_frame_bytes`; none of the nine
+values is advertised in negotiated participant capability state, because that
+state has no room for one. A grep corroborates but must be quoted accurately:
+seven of the nine names have zero occurrences in
+`crates/liminal-protocol/{src,tests}`, while `attach_receipt_ttl_ms` and
+`receipt_provenance_ttl_ms` occur twelve times each — ONLY as deadline-algebra
+function parameters and validation-error fields, never in capability state. So
+"zero occurrences of the nine" is false as written, though the claim it reaches
+for is true. Positive control, so the absence is a measurement rather than a
+broken instrument: `ReceiptCapacityScope` returns 54 hits over the same trees.
+
+**Disclosed consequence (accepted, not hidden).** A displaced fingerprint stops
+answering with its exact terminal reason and falls through to the coarser
+classification: a displaced enrollment fingerprint answers `EnrollmentKnown`
+instead of `ReceiptExpired`, and a displaced attach fingerprint answers
+`StaleOrUnknownReceipt` — never `StaleAuthority`, which would falsely assert
+that no commit occurred. This is the price of never refusing. It is documented,
+pinned on both arms, and bounded by the deployment's own window size.
+
+**Configuration compatibility BREAKS, deliberately and loudly.** Three fields
+are deleted (`max_live_attach_receipts_server`, `max_receipt_provenance_server`,
+`max_receipt_provenance_per_conversation`) and three added
+(`live_receipt_server_report_threshold`,
+`receipt_provenance_server_report_threshold`,
+`receipt_provenance_per_conversation_report_threshold`). A stale deployment
+file fails to load twice over — `deny_unknown_fields` on the removed keys, and
+the no-defaults rule on the required new ones — with a typed error naming the
+field each time. A retained-but-ignored field would have been a silent fallback
+wearing a schema; that is the failure this shape refuses.
+
+**Values are NOT ratified by this amendment.** The build ships mechanism only.
+Every TTL, window size and reporting threshold remains a deployment decision,
+and the concrete deployed numbers ratify at Tom's desk before lock.
+
+
 ## 1. The verified gap
 
 The evidence base was re-verified rather than copied:
