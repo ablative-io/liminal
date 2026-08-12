@@ -690,6 +690,26 @@ are corrected in this text rather than defended: "credentialed by
 construction" was measured TRUE for attach/detach and FALSE for enrollment;
 "the prober joins visibly" is STRUCK — it is false for exactly the
 requests that read settlement state (see the seam-position statement).
+KEY 1 of 2 TURNED ON r3: reviewer-of-record key by Waffles the Terrible on
+this section as written at `7891897`, verified at `c4272bf` (meridian
+`8527f23f`; the intervening commit's single hunk sits inside S0.17, so
+S0.16 is byte-identical between the two revs — his measurement). Verified
+fresh at his hands: the decisive no-membership-predicate fact
+(wire/request.rs:11-16 + the replay-dedup lookup), the seam-position
+statement arm by arm, attach's two membership predicates, and all r2
+survivals — with the initial-enrollment premise upgraded from argued to
+measured by the scope statement. His judgment on the one disclosure the
+text adds (a typed label on a stranger-reachable refusal at baseline
+timing): lawful as written — the bare-close alternative fails R-D1's own
+no-improvised-rows text for the honest subsequent-enroller. HIS ADJACENCY
+DECLARATION (first under the trial adopted 2026-08-13): boards #104
+(refused-enrolment mailbox residue — consumer-side, does not bear), #195
+(killed-mid-attach identity orphan — reached by kill not refusal, does not
+bear on presentation, BUT one build-lane flag rides it: condition 2's
+persist-the-waiting-state retry discipline must not extend #195's orphan
+window, and the build must say so at its pin), #12 (polling-law retirement
+— sharpened by the scope resolution, no conflict). Independent second key:
+Vesper Lynd, full read at her turn — her #170 ruling remains her gate.
 This is the contract surface board #14's lane report explicitly blocked on
 (`presented_refusal.rs`'s `detach()` constructor sits `#[expect(dead_code)]`
 naming exactly this amendment as its unblocking condition, `presented_refusal.rs:91@c3c7c7f`),
