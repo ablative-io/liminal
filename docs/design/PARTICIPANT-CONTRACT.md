@@ -666,8 +666,9 @@ participant silence permanent.
 
 ### 0.16 R18 amendment A5 — lawful presentation for the frontier-Precedence refusal family (2026-08-12)
 
-**Status: PROPOSED at r3 — the KEY PROCESS RESTARTED on this text
-(2026-08-13; prior keys do not carry across a text change). r2 history:
+**Status: RATIFIED (2026-08-13) — the two-key gate is closed on r3 of this
+text. The KEY PROCESS RESTARTED on r3 (2026-08-13; prior keys do not carry
+across a text change). r2 history:
 reviewer-of-record key was granted by Waffles the Terrible against r2 =
 `f22a3a5` (2026-08-12, meridian record `1798b396`, verified at his hands:
 citation re-key, seam attachment with inheritance sentence, all three
@@ -708,8 +709,45 @@ DECLARATION (first under the trial adopted 2026-08-13): boards #104
 bear on presentation, BUT one build-lane flag rides it: condition 2's
 persist-the-waiting-state retry discipline must not extend #195's orphan
 window, and the build must say so at its pin), #12 (polling-law retirement
-— sharpened by the scope resolution, no conflict). Independent second key:
-Vesper Lynd, full read at her turn — her #170 ruling remains her gate.
+— sharpened by the scope resolution, no conflict). KEY 2 of 2 TURNED ON r3: independent
+second key by Vesper Lynd, 2026-08-13, on this section as written at
+`63e74f6`. Her gate was her own #170 ruling and it is discharged BY THE
+r2→r3 REWORK, not by argument: Cally Ray's axis split (obligation 3 is a
+WHO-RECEIVES control; #170 is a WHAT-THE-REFUSAL-SAYS control; the prober
+IS the refused party, so connection-scoping is a no-op on #170's axis) was
+accepted as correct and is answered structurally. Her question — does A5
+bound the RANGE in a refusal to the presenter's own scope, or license
+whatever the refused party can read off their own refusal — is answered:
+A5 licenses NOTHING unconditionally. The only frontier-derived content in
+the family, `refused_epoch`, is reachable ONLY through wrappers carrying a
+measured membership predicate, and the wrapper that has none carries no
+epoch and no wake. Re-derived at second-key hands at `63e74f6` rather than
+accepted: attach's two predicates (slot-for-this-conversation →
+`participant_unknown`, then credential lookup with secret proof admitting
+only `AuthorizedFresh`, `ops_attach.rs:79-91`); detach strictly stronger;
+enrollment's four refusal arms all returning at `:110/:120/:133/:148`
+ahead of `ensure_genesis` at `:155`, with `ops_enroll.rs` measured
+BYTE-IDENTICAL between `f1d4bd1` and `63e74f6` so the amendment's
+citations are fresh, not stale; and the `DrainFirst` clearing write at
+`ops_frontier.rs:225`. `refused_epoch` is load-bearing, not decorative —
+the stage-11 retry discipline matches the refusal's epoch against
+`MarkerSettled`'s, so removing the field would remove the match. RESIDUAL
+ACCEPTED, NOT WAIVED: the stranger-reachable arm still gains a typed label
+where a bare close stood, so a party holding a conversation id can read a
+settlement-in-progress bit, trace-free, at their own poll cadence; what
+r3 removes is the TIMING channel, restoring the pre-amendment baseline.
+The residual is a CONTENT bit at baseline timing, and out-of-scope (d)
+(board #71, `enrollment_token` as capability) is the structural fix that
+dissolves it rather than trading around it. PROCESS NOTE, recorded so the
+asymmetry is not imported across amendments: the second-key holder's
+standing concern that refusal costs a rework of live code while agreement
+costs nothing was TRUE of A6 (already landed at merge `f73d72b`) and is
+FALSE here — A5 is unbuilt and blocks a build (`presented_refusal.rs`'s
+`detach()` sits `#[expect(dead_code)]` naming this amendment), so
+ratifying AUTHORIZES a build rather than blessing shipped behaviour.
+Cally Ray's adjacency questions are recorded as having done their work:
+they forced the membership-predicate split into the open and her wake
+objection was adopted before either key-holder reached it.
 This is the contract surface board #14's lane report explicitly blocked on
 (`presented_refusal.rs`'s `detach()` constructor sits `#[expect(dead_code)]`
 naming exactly this amendment as its unblocking condition, `presented_refusal.rs:91@c3c7c7f`),
