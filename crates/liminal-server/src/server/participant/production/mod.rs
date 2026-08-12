@@ -99,6 +99,9 @@ mod tests_12_attach_marker_census;
 mod tests_14_attach_presentation;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests_37_observed_provenance;
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_binding;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
