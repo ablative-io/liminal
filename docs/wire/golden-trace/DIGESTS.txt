@@ -1,0 +1,30 @@
+# (rev, path, sha256) for the participant-wire golden trace and its evidence
+#
+# A digest cannot be invalidated, only ORPHANED: the key is the TRIPLE.
+# A bare (path, digest) pair says nothing once the path's content moves, so
+# every row below names the exact revision at which that path holds that
+# content. Verify a row with:
+#
+#   git show <rev>:<path> | shasum -a 256
+#
+# The revs are the commits that introduced each artifact on branch
+# p0-69-golden-trace, itself cut from origin/main 339e81a.
+#
+# rev                                       path                                                    sha256
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/admitter.c2s.bin                 f17b2bd1f8d3df932dfcabca499ae01d466ae218a652f2b808af50c6624f40e5
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/admitter.s2c.bin                 af1815bda03e508692a73c27a70cf01ca55e651ffaecfa4147a2dc20e0e09fd0
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/observer.c2s.bin                 a1615be6b42eb1ee2a0b88684989ef4e5d5316ca87135887bb2313639985836b
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/observer.s2c.bin                 1fd749611262d3ce77e546cb521b352faa0d5e27283ba8ff826c9a3710c71a35
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/frames.jsonl                     13a45c366e14411c395292f11b30639dd2eace54a351d1b84ca1165e60302ac9
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/session.hex                      7928a4983d52bd32fec557126178ff348547f411a20277238415a1b332da9a84
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/decompose.py                     312e2c03db68a49bc26f574ae7517e32572a6898b74c1ed08f2f235b734323cd
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/WALKTHROUGH.md                   59949faf4b31b41df083c28c784cc295dbce6bd619521d986e1f5d6cc7f774e1
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/README.md                        757de74ff07ba1987c2f48bc59de8a3fccb45fd88fcc182a157b113851b5cf63
+35223dfd6ee6bab5ecba7e70661cff915dbf1666  crates/liminal-server/tests/golden_trace_participant_wire.rs  5c415c5715d90e9897a168a169b54b9e199b278574e9762ebc25fb861e9aa06d
+#
+# The RTT probe (board #68) and its banked runs, introduced one commit later:
+d87eb5434a5fa3ba23dd7c6b543263d7157aba64  crates/liminal-server/tests/participant_record_rtt_probe.rs  884b53c73233b1070d8457765b4f9a0bdf65c10e8adde75138c1b9a33363483d
+d87eb5434a5fa3ba23dd7c6b543263d7157aba64  docs/perf/participant-record-rtt.md                     751c7b2851484e91501e19658ead73d6ca24e53faaa1a85b60d4c6ec83262f9d
+d87eb5434a5fa3ba23dd7c6b543263d7157aba64  gate-logs/p0-69/rtt-probe.log                           11ff5a460d8a00d1e255d2fe8aff539426a8b66e1cad65ee77a13f44c671a8ef
+d87eb5434a5fa3ba23dd7c6b543263d7157aba64  gate-logs/p0-69/rtt-probe-debug.log                     f0c6d628822babaf906d04eba47a582546127a3530a2075bd4b9ab1209e6e06d
+d87eb5434a5fa3ba23dd7c6b543263d7157aba64  gate-logs/p0-69/adjacent-suites.log                     0102587d99aa398a3a6c734c142370768cb4b62ebf2ef6401150a66b6e7a2974

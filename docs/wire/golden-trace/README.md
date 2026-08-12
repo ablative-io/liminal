@@ -33,7 +33,14 @@ ranges, against what is committed here:
 ```sh
 cargo test -p liminal-server --test golden_trace_participant_wire
 python3 docs/wire/golden-trace/decompose.py
-sha256sum -c <(awk '{print $3"  "$2}' DIGESTS.txt)   # or shasum -a 256 on macOS
+```
+
+`DIGESTS.txt` is keyed `(rev, path, sha256)` — a bare `(path, digest)` pair says
+nothing once a path's content moves, so each row names the revision at which
+that path holds that content. Check any row against its own rev:
+
+```sh
+git show <rev>:<path> | shasum -a 256
 ```
 
 ## Regenerate it
