@@ -26,8 +26,7 @@ use std::sync::Arc;
 
 use liminal::durability::bridge::block_on;
 use liminal_protocol::wire::{
-    AttachAttemptToken, AttachBound, ClientRequest, ConnectionIncarnation,
-    CredentialAttachRequest,
+    AttachAttemptToken, AttachBound, ClientRequest, ConnectionIncarnation, CredentialAttachRequest,
     DetachAttemptToken, DetachRequest, EnrollBound, EnrollmentRequest, EnrollmentToken, Generation,
     LeaveAttemptToken, LeaveRequest, MarkerAck, ParticipantAck, RecordAdmission,
     RecordAdmissionAttemptToken, ServerValue,
@@ -259,7 +258,11 @@ impl Walk {
         Ok(self)
     }
 
-    fn send(&self, connection: ConnectionIncarnation, request: ClientRequest) -> Result<ServerValue, Box<dyn Error>> {
+    fn send(
+        &self,
+        connection: ConnectionIncarnation,
+        request: ClientRequest,
+    ) -> Result<ServerValue, Box<dyn Error>> {
         dispatch(&self.handler, connection, request)
     }
 }
@@ -441,9 +444,18 @@ fn every_live_commit_path_matches_a_cold_replay_of_its_own_bytes() -> Result<(),
     // Without this, every comparison over a thin log is vacuously true.
     let census = &walk.census;
     assert!(census.genesis >= 1, "no genesis row: {census:?}");
-    assert!(census.enrolled >= 2, "fewer than two enrollments: {census:?}");
-    assert!(census.attached >= 2, "fewer than two attach rows: {census:?}");
-    assert!(census.detached_owing >= 1, "no owing detach row: {census:?}");
+    assert!(
+        census.enrolled >= 2,
+        "fewer than two enrollments: {census:?}"
+    );
+    assert!(
+        census.attached >= 2,
+        "fewer than two attach rows: {census:?}"
+    );
+    assert!(
+        census.detached_owing >= 1,
+        "no owing detach row: {census:?}"
+    );
     assert!(
         census.record_admission >= 14,
         "fewer than fourteen admissions: {census:?}"

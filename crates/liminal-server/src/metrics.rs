@@ -337,6 +337,53 @@ pub(crate) fn publishes_total_value() -> Option<u64> {
         })
 }
 
+/// The current value of one lane p0-39 displacement counter, by scope.
+///
+/// `None` means the family is not readable — either [`init`] has not run in
+/// this process or the registry holds no such counter — which a caller must
+/// treat as "no measurement", never as zero. Name and label are read from the
+/// same constants the registration uses, so a rename shows up as a failure
+/// rather than as a vacuous pass.
+#[cfg(test)]
+pub(crate) fn receipt_displacements_value(scope: ReceiptWindowScope) -> Option<u64> {
+    labelled_counter_value(
+        RECEIPT_DISPLACEMENTS_TOTAL,
+        SCOPE_LABEL,
+        ReceiptWindowScope::LABELS[scope.slot()],
+    )
+}
+
+/// The current value of one lane p0-39 shared-pool tripwire counter, by pool.
+///
+/// `None` means "not measured", never zero — see
+/// [`receipt_displacements_value`].
+#[cfg(test)]
+pub(crate) fn receipt_pool_runaway_value(pool: SharedReceiptPool) -> Option<u64> {
+    labelled_counter_value(RECEIPT_POOL_RUNAWAY_TOTAL, POOL_LABEL, pool.label())
+}
+
+#[cfg(test)]
+fn labelled_counter_value(name: &str, key: &str, label: &str) -> Option<u64> {
+    use liminal::metrics::MetricValue;
+
+    let registry = global_registry()?;
+    registry
+        .snapshot()
+        .metrics()
+        .iter()
+        .find(|metric| {
+            metric.name == name
+                && metric
+                    .labels
+                    .iter()
+                    .any(|(metric_key, value)| metric_key == key && value == label)
+        })
+        .and_then(|metric| match metric.value {
+            MetricValue::Counter(value) => Some(value),
+            MetricValue::Gauge(_) | MetricValue::Histogram(_) => None,
+        })
+}
+
 impl ServerMetrics {
     fn register(registry: &MetricsRegistry) -> Option<Self> {
         let connections_active = registry

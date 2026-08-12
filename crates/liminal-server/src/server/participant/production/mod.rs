@@ -119,12 +119,6 @@ mod tests_delivery_acceptance;
 #[cfg(test)]
 mod tests_f8_marker_poison;
 #[cfg(test)]
-mod tests_p0_39_capacity_hybrid;
-#[cfg(test)]
-mod tests_p0_60_admission_cost;
-#[cfg(test)]
-mod tests_p0_64_live_extension;
-#[cfg(test)]
 mod tests_f8b_boot_drain;
 #[cfg(test)]
 mod tests_f8b_seal;
@@ -161,6 +155,14 @@ mod tests_outbox_log;
 mod tests_outbox_owner;
 #[cfg(test)]
 mod tests_outbox_replay;
+#[cfg(test)]
+mod tests_p0_39_capacity_hybrid;
+#[cfg(test)]
+mod tests_p0_39_visibility;
+#[cfg(test)]
+mod tests_p0_60_admission_cost;
+#[cfg(test)]
+mod tests_p0_64_live_extension;
 #[cfg(test)]
 mod tests_pending_died_live_reachability;
 #[cfg(test)]
