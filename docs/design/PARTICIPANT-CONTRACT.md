@@ -664,6 +664,118 @@ lands at a breaking window — it converts one documented warn-and-commit arm
 into a documented refuse-and-commit-nothing arm, and rules the cross-
 participant silence permanent.
 
+### 0.16 R18 amendment A5 — lawful presentation for the frontier-Precedence refusal family (2026-08-12)
+
+**Status: PROPOSED, authored by the liminal domain owner (Hermes Crumpet);
+awaiting the two-key gate (reviewer-of-record + independent second key).
+This is the contract surface board #14's lane report explicitly blocked on
+(`presented_refusal.rs`'s `detach()` constructor sits `#[expect(dead_code)]`
+naming exactly this amendment as its unblocking condition, `presented_refusal.rs:91@c3c7c7f`),
+and the field provenance is SIGNATURE 4: a detach/attach refused with
+frontier `Precedence` during compaction-marker settlement — a
+contract-correct refusal presented as a bare connection close with no
+wire-visible retry story. It is on the critical path of the extension
+program's proving run (a crash-restart client re-attaching during marker
+settlement meets this signature; DESIGN-EXTENSIONS.md §3).**
+
+**The verified gap (measured at `ATTACH-SILENCE-14.md@6c466e9`, standing at
+`c3c7c7f`):** `LiveFrontierError::Precedence` — *"a mandatory
+immutable/recovery transition has precedence"*, lane occupancy, elsewhere
+ruled *"a designed structural boundary … not corruption"* — reaches two
+sinks that both bare-close today, measured at this tree rather than carried
+from the lane doc's rev: the `apply_attach_frontier` flatten
+(`ops_attach.rs:518-525@c3c7c7f`, "attach frontier transition failed") and
+its detach twin inside `detach_commit`
+(`ops_session.rs:237-240@c3c7c7f`, "detach frontier transition failed"). `Precedence` has THREE clearing
+conditions with no shared retry story, and the frozen R-D1 register admits
+no row for two of them while its own text forbids improvising one (*"no
+generic 'proof/admission refusal' exists"*). Additionally the refusal is
+raised inside `attach_commit` after `slots.remove_entry`, `take_frontier`,
+and `prepare_selected_fenced_finalizer` have run — the carrier consumes
+authority before the refusal exists, and `LiveFrontierFailure::into_parts`
+does not restore the in-memory finalizer state. Pre-flighting the predicate
+is outlawed here as the-fix-that-closes-a-different-failure: it would
+answer genuinely corrupt state "retry later" (`ATTACH-SILENCE-14.md`).
+
+**The law, per clearing condition:**
+
+1. **Binding-terminal candidate (observer-blocked).** The existing
+   `ObserverBackpressure` row IS the lawful answer at both sites — the
+   blocked resource is hard-observer progress, the wake is the already-pushed
+   `0x0200 ObserverProgressed`, and the retry discipline is the register's
+   existing "retry once after matching `ObserverProgressed`". This pairing
+   is hereby declared lawful for the two named sites; no new wire surface.
+
+2. **Marker candidate awaiting its drain.** New typed refusal
+   `MarkerSettlementBackpressure { conversation_id, refused_epoch }` paired
+   with a NEW pushed connection event `0x0202 MarkerSettled { conversation_id,
+   refused_epoch }`. The clearing write is ANOTHER participant's record
+   admission (the `RecordAdmissionDecision::DrainFirst` arm,
+   `ops_frontier.rs:225@c3c7c7f`) or boot drain — a
+   refused ATTACH client holds no binding and therefore receives no
+   `ParticipantDelivery`, so without this push the only honest client
+   behavior would be polling, which the standing no-polling law forbids
+   ("redesign it to be TOLD"). The push is CONNECTION-SCOPED: delivered
+   exactly to connections that received the refusal in this process
+   lifetime, mirroring `ObserverProgressed`'s connection-level delivery.
+   Retry discipline mirrors the stage-11 row: persist the waiting state,
+   retry once after matching `MarkerSettled` or reconnect status. Answering
+   this condition with `ObserverBackpressure` is OUTLAWED by this amendment:
+   it would promise an `ObserverProgressed` that nothing sends.
+
+3. **Armed fenced-recovery block — EXCLUDED BY CENSUS.** The fenced attach
+   path is a production husk: ZERO production constructors of
+   `StoredAttachModeV3::Fenced` exist and `allocate_attach_mode` has no
+   `Fenced` arm (constructor census, board #13, 2026-08-06). A refusal row
+   for a state that cannot be constructed would be wire surface for nothing.
+   TRIPWIRE, named: the first production constructor of
+   `StoredAttachModeV3::Fenced` VOIDS this exclusion, and the row question
+   reopens as a blocking prerequisite of that constructor's own lane — the
+   exclusion may never be cited to land the constructor without the row.
+
+**Presentation law (all conditions):** the new rows keep R-D1's
+no-side-effect refusal property. At presentation, consumed in-memory
+authority is RESTORED — the slot entry, frontier, and prepared finalizer
+state readable before the request are readable identically after the
+refusal — and nothing durable is committed. Delivery travels the existing
+Class B exit (`PresentedRefusal`), whose dormant `detach()` constructor
+this amendment brings alive. What is refused does not change anywhere in
+this amendment; only its delivery does.
+
+**Out of scope:** (a) the receipt-caps redesign (board #39, its own lane
+under Tom's no-configured-number sentence); (b) the retention-pressure
+identity erasure (board #23), which reaches one of these sites by a second
+path and is a state defect, not a presentation defect; (c) any change to
+which requests are refused.
+
+**Build obligations (consequences of the law, binding on the build):**
+
+1. **Restoration proof.** A pin proving post-refusal state identity with
+   the pre-request state at the carrier's own granularity (the in-memory
+   finalizer state explicitly included — `into_parts` alone is measured
+   insufficient). Red-proven against a build that skips restoration.
+
+2. **Additive-or-breaking is a MEASUREMENT, not a guess.** The registry
+   holds `0xFFFF` as the permanent unknown-value fixture, which suggests
+   defined unknown-value handling — but whether existing decoders IGNORE or
+   REFUSE an unknown pushed value (`0x0202`) and an unknown refusal value
+   must be measured at the published-client bytes before classification. If
+   strict-refuse, both new values ride the next planned protocol breaking
+   window alongside A4's build and `StateUnavailable { source }`; this
+   amendment's ratification authorizes the text now and the build at
+   whichever window the measurement selects.
+
+3. **No broadcast.** The lazy implementation pushes `MarkerSettled` to every
+   connection on the conversation; that is a settlement-timing side channel
+   to uninvolved parties and is outlawed. Connection-scoped to refused
+   connections, with the scoping pinned.
+
+4. **Stage-order honesty.** `ops_attach.rs`'s standing honest-limit note
+   (a request both against a pending binding AND at exhausted
+   order/sequence hears stage 11 before stages 9/10) extends to the new
+   row; the build must document the observed stage order at its sites and
+   pin it, so the order is a measured property rather than an accident.
+
 ## 1. The verified gap
 
 The evidence base was re-verified rather than copied:
