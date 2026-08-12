@@ -882,20 +882,36 @@ own row, and this amendment must not grow to hold it).
 
 ### 0.17 R18 amendment A6 — the receipt-capacity hybrid: TTL-bounded shared pools, displacement windows per participant (2026-08-13)
 
-**Status: PROPOSED, authored by lane p0-39 under the sequencer's ruling on
-Tom's governing sentence — *"no configured number refuses an honest arrival."*
-The build is LANDED (merge `f73d72b`, main `55621dd`, tree byte-identical to
-lane tip `64efdc5`; design record `docs/design/P0-39-RECEIPT-CAPACITY-HYBRID.md`),
-so this amendment is a description of shipped, pinned behaviour awaiting
-ratification, not a proposal in the abstract. KEY 1 TURNED: reviewer-of-record
-key by Waffles the Terrible on this document as written at rev `55621dd`
-(meridian DM `017068db`, ts 2026-08-12T22:12:46Z, received 08-13 after the
-land word seq=215) — his review verified the merge chain at his own ls-remote,
-the truth-report displacement visibility, and the cold-replay pins; he accepts
-the run-1 flake exoneration on the stated causal method while noting he did
-not independently re-derive the dependency graph. Independent second key
-(Cally-or-Vesper) outstanding; the seat runs the key process; RATIFIED flips
-when both have turned.**
+**Status: RATIFIED (2026-08-13) — two-key gate closed on this document,
+authored by lane p0-39 under the sequencer's ruling on Tom's governing
+sentence — *"no configured number refuses an honest arrival."* The build is
+LANDED (merge `f73d72b`, main `55621dd`, tree byte-identical to lane tip
+`64efdc5`; design record `docs/design/P0-39-RECEIPT-CAPACITY-HYBRID.md`).
+KEY 1: reviewer-of-record key by Waffles the Terrible on this document as
+written at rev `55621dd` (meridian DM `017068db`) — merge chain verified at
+his own ls-remote, truth-report displacement visibility, cold-replay pins;
+he accepted the run-1 flake exoneration on the stated causal method while
+noting he did not independently re-derive the dependency graph. KEY 2:
+independent key by Vesper Lynd on this document at rev `c4272bf` (meridian
+`7593eaa9`), turned only after the acceptance evidence landed IN the design
+record (S9, commit `c4272bf`) rather than in an account — her review
+RE-DERIVED the evidence rather than accepting it: dependency-graph closure
+(crates/liminal names neither lane crate in [dependencies] or
+[dev-dependencies] and its remaining deps are registry crates, so no
+transitive path back — the closure step key 1 explicitly did not take),
+empty-diff control (crates/liminal-server returns 35 files/2456 insertions
+over the same range, proving the empty crates/liminal diff is a
+measurement), the ignore verified as an ignored MEASUREMENT suppressing no
+assertion, and the displacement pins verified non-vacuous via the control
+twin (`tests_capacity_attach.rs:206`: an in-window unknown is STILL
+`StaleAuthority` — without which the degradation pin would distinguish
+nothing). SCOPE OF KEY 2, recorded verbatim so it cannot be read wider:
+"I key the MECHANISM and the RECORD... My key is not a values ratification
+and must not be cited as one." The values lock rests on Tom's struck-gate
+word and the design record's S3 premises (r2), not on either key. One
+residual accepted-not-raised by key 2: a two-failed-baseline battery cannot
+distinguish "the two expected" from "one expected plus one new" by COUNT —
+reconciliation runs BY NAME, which S9 enables by naming the F8 pair.**
 
 **Honesty line:** this amendment changes NO wire bytes. Every registry variant
 keeps its assigned value and every refusal row keeps its schema; five scopes
