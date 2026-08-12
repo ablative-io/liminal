@@ -666,18 +666,30 @@ participant silence permanent.
 
 ### 0.16 R18 amendment A5 — lawful presentation for the frontier-Precedence refusal family (2026-08-12)
 
-**Status: PROPOSED, authored by the liminal domain owner (Hermes Crumpet);
-key 1 of 2 TURNED — reviewer-of-record key granted by Waffles the Terrible
-against r2 = `f22a3a5` (2026-08-12, meridian record `1798b396`, verified at
-his hands: citation re-key, seam attachment with inheritance sentence, all
-three flatten sites at his census's own line cites, and condition 1's
+**Status: PROPOSED at r3 — the KEY PROCESS RESTARTED on this text
+(2026-08-13; prior keys do not carry across a text change). r2 history:
+reviewer-of-record key was granted by Waffles the Terrible against r2 =
+`f22a3a5` (2026-08-12, meridian record `1798b396`, verified at his hands:
+citation re-key, seam attachment with inheritance sentence, all three
+flatten sites at his census's own line cites, and condition 1's
 zero-new-surface claim confirmed at contract's enrollment-attach
-`ObserverBackpressure` row). His ruling on the initial-enrollment premise,
-for the record: argued suffices — the seam attachment made it
-non-load-bearing, since a wrong premise now lands INSIDE the law (a lawful
-row) instead of re-opening the gap (a bare close); a premise whose failure
-lands inside the law needs no pin. Awaiting the independent second key
-(Cally Ray when her park permits; Vesper Lynd as alternate past a day).
+`ObserverBackpressure` row; his ruling that the initial-enrollment premise
+is argued-sufficient stands unchanged). The r2→r3 rework was ordered by the
+second-key holder's ruling (Vesper Lynd, meridian records `4849ac2b` and
+`b932ef13`, key NOT turned): (i) attach/detach keep the labeled row; (ii)
+as amended on delta — the enrollment wrapper's condition-2 answer carries
+NO epoch label and NO wake, because that wrapper has no membership
+predicate and therefore no mechanism capable of trading enrollee
+convenience against stranger disclosure; (iii) the seam's position relative
+to durable genesis is stated in this text. The membership-predicate split
+was forced into the open by Cally Ray's adjacency questions (her board
+#170 family, meridian records `e95f0f9f` and `1a07c1d5`, reasoned from
+citations with the file unread); her wake objection is recorded ADOPTED —
+reached before either key-holder. Two author claims from the r2 defence
+are corrected in this text rather than defended: "credentialed by
+construction" was measured TRUE for attach/detach and FALSE for enrollment;
+"the prober joins visibly" is STRUCK — it is false for exactly the
+requests that read settlement state (see the seam-position statement).
 This is the contract surface board #14's lane report explicitly blocked on
 (`presented_refusal.rs`'s `detach()` constructor sits `#[expect(dead_code)]`
 naming exactly this amendment as its unblocking condition, `presented_refusal.rs:91@c3c7c7f`),
@@ -733,23 +745,52 @@ answer genuinely corrupt state "retry later" (`ATTACH-SILENCE-14.md`).
    with `AwaitingObserverProgress` persistence), so extending to the
    enrollment wrapper adds no new wire surface anywhere in this condition.
 
-2. **Marker candidate awaiting its drain.** New typed refusal
-   `MarkerSettlementBackpressure { conversation_id, refused_epoch }` paired
-   with a NEW pushed connection event `0x0202 MarkerSettled { conversation_id,
-   refused_epoch }`. The clearing write is ANOTHER participant's record
-   admission (the `RecordAdmissionDecision::DrainFirst` arm,
-   `ops_frontier.rs:225@c3c7c7f`) or boot drain — a
-   refused attach or subsequent-enrollment client holds no binding and
-   therefore receives no `ParticipantDelivery`, so without this push the
-   only honest client behavior would be polling, which the standing
-   no-polling law forbids
-   ("redesign it to be TOLD"). The push is CONNECTION-SCOPED: delivered
-   exactly to connections that received the refusal in this process
-   lifetime, mirroring `ObserverProgressed`'s connection-level delivery.
-   Retry discipline mirrors the stage-11 row: persist the waiting state,
-   retry once after matching `MarkerSettled` or reconnect status. Answering
-   this condition with `ObserverBackpressure` is OUTLAWED by this amendment:
-   it would promise an `ObserverProgressed` that nothing sends.
+2. **Marker candidate awaiting its drain — answered PER WRAPPER, because
+   the wrappers differ in exactly one predicate (measured in the
+   seam-position statement below).**
+
+   **Attach and detach wrappers** (membership-validated before the seam):
+   new typed refusal `MarkerSettlementBackpressure { conversation_id,
+   refused_epoch }` paired with a NEW pushed connection event `0x0202
+   MarkerSettled { conversation_id, refused_epoch }`. The clearing write is
+   ANOTHER participant's record admission (the
+   `RecordAdmissionDecision::DrainFirst` arm,
+   `ops_frontier.rs:225@c3c7c7f`) or boot drain — a refused attach client
+   holds no binding and therefore receives no `ParticipantDelivery`, so
+   without this push the only honest client behavior would be polling,
+   which the standing no-polling law forbids ("redesign it to be TOLD").
+   The push is CONNECTION-SCOPED: delivered exactly to connections that
+   received the refusal in this process lifetime, mirroring
+   `ObserverProgressed`'s connection-level delivery. Retry discipline
+   mirrors the stage-11 row: persist the waiting state, retry once after
+   matching `MarkerSettled` or reconnect status. Answering this condition
+   with `ObserverBackpressure` is OUTLAWED by this amendment: it would
+   promise an `ObserverProgressed` that nothing sends.
+
+   **Enrollment wrapper** (NO membership predicate exists at the seam):
+   new typed refusal `EnrollmentSettlementBackpressure { conversation_id }`
+   — NO epoch label, and NO pushed event of any kind. The enroller retries
+   at its own cadence. RULED (second-key delta, 2026-08-13, meridian
+   `b932ef13`): `EnrollmentRequest` carries only `{ conversation_id,
+   enrollment_token }` (`wire/request.rs:11-16@f1d4bd1`) and the token is a
+   replay-dedup key (`ops_enroll.rs:106@f1d4bd1`), not a capability — the
+   wrapper cannot distinguish an invited enrollee from a stranger, so a
+   wake on this arm is granted to both BY CONSTRUCTION; there is no
+   mechanism at the seam capable of trading enrollee convenience against
+   stranger disclosure. The wake's ARRIVAL is itself a settlement-time
+   disclosure whether or not it carries the label — the push fires at the
+   clearing write. The load asymmetry is stated so nobody re-litigates it
+   as security: the wake never restrained a prober (settlement-hitting
+   probes are trace-free, per the seam-position statement) — it only made
+   the honest enroller polite; removing it trades honest-enroller
+   efficiency for closing a stranger's exact-settlement-time feed, and
+   restores exactly the pre-amendment baseline (poll-resolution timing).
+   NO-POLLING LAW, resolved and recorded: the law is a promise to parties
+   the server has agreed to tell; an enrollment request IS the act of
+   asking to become such a party — until it is admitted there is no
+   relationship to honour, and the inconvenience ends the moment they
+   join. Softening this would require a membership predicate the wrapper
+   does not have.
 
 3. **Armed fenced-recovery block — EXCLUDED BY CENSUS.** The fenced attach
    path is a production husk: ZERO production constructors of
@@ -760,6 +801,33 @@ answer genuinely corrupt state "retry later" (`ATTACH-SILENCE-14.md`).
    `StoredAttachModeV3::Fenced` VOIDS this exclusion, and the row question
    reopens as a blocking prerequisite of that constructor's own lane — the
    exclusion may never be cited to land the constructor without the row.
+
+**Seam position and membership predicates (measured at `f1d4bd1`; required
+by the second-key ruling, meridian `4849ac2b`):** the three wrappers differ
+in exactly one predicate. ATTACH validates conversation membership twice
+before the seam: no slot for the participant in THIS conversation refuses
+`participant_unknown` immediately
+(`ops_attach.rs:77-81@f1d4bd1`, `apply_credential_attach_with_impact`), and
+the credential lookup against that conversation's binding with secret proof
+refuses anything but `AuthorizedFresh` (`ops_attach.rs:83-91@f1d4bd1`).
+DETACH requires an existing attached binding — stronger still. ENROLLMENT
+has NO membership predicate: it is the joining arm. On the enrollment
+wrapper, every refusal arm returns BEFORE durable genesis
+(`ops_enroll.rs:104-151@f1d4bd1` all respond before `ensure_genesis` at
+`:155`), and the frontier transition that raises `Precedence` for a
+SUBSEQUENT enrollment sits inside the commit path
+(`ops_enroll.rs:379@f1d4bd1`, reached through the `frontier().is_none()`
+branch at `:170`) before the enrollment's own durable append — so a
+settlement-window refusal on an EXISTING conversation leaves the durable
+store byte-identical and is TRACE-FREE. Attribution is paid by the probes
+that MISS settlement (those commit a durable, visible enrollment); the
+probes that HIT — the only ones that would read settlement state — leave
+no trace. Scope, stated so no reader derives it: on a never-seen
+conversation id, `ensure_genesis` DOES commit durable genesis before the
+frontier branch — but a never-seen id has no settlement to leak, so this
+scoping does NOT narrow the exposure; the no-trace path and the attack
+path are the same path. This measurement is why the enrollment wrapper's
+condition-2 answer above carries neither label nor wake.
 
 **Presentation law (all conditions):** the new rows keep R-D1's
 no-side-effect refusal property. At presentation, consumed in-memory
@@ -774,7 +842,13 @@ this amendment; only its delivery does.
 under Tom's no-configured-number sentence); (b) the retention-pressure
 identity erasure (board #23), which reaches one of these sites by a second
 path and is a state defect, not a presentation defect; (c) any change to
-which requests are refused.
+which requests are refused; (d) making `enrollment_token` a capability
+rather than a replay-dedup key — the structural fix that would give the
+enrollment wrapper a membership-class predicate and move its leg alongside
+attach/detach, dissolving the population-blindness instead of trading
+around it (board #71, surfaced by the second-key round; possibly
+incompatible with open-join enrollment — that determination belongs to its
+own row, and this amendment must not grow to hold it).
 
 **Build obligations (consequences of the law, binding on the build):**
 
@@ -786,9 +860,10 @@ which requests are refused.
 2. **Additive-or-breaking is a MEASUREMENT, not a guess.** The registry
    holds `0xFFFF` as the permanent unknown-value fixture, which suggests
    defined unknown-value handling — but whether existing decoders IGNORE or
-   REFUSE an unknown pushed value (`0x0202`) and an unknown refusal value
+   REFUSE an unknown pushed value (`0x0202`) and the new refusal values
+   (both condition-2 rows)
    must be measured at the published-client bytes before classification. If
-   strict-refuse, both new values ride the next planned protocol breaking
+   strict-refuse, all three new values ride the next planned protocol breaking
    window alongside A4's build and `StateUnavailable { source }`; this
    amendment's ratification authorizes the text now and the build at
    whichever window the measurement selects.
@@ -796,7 +871,8 @@ which requests are refused.
 3. **No broadcast.** The lazy implementation pushes `MarkerSettled` to every
    connection on the conversation; that is a settlement-timing side channel
    to uninvolved parties and is outlawed. Connection-scoped to refused
-   connections, with the scoping pinned.
+   connections, with the scoping pinned — and never to a connection refused
+   at the enrollment wrapper, which has no wake to scope (condition 2).
 
 4. **Stage-order honesty.** `ops_attach.rs`'s standing honest-limit note
    (a request both against a pending binding AND at exhausted
