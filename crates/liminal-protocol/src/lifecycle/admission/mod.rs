@@ -18,13 +18,13 @@ mod sequence_tests;
 pub use capacity::{
     BindingSlotDecision, BindingSlotOccupancy, CapacityCounter, CapacityCounterInvariantError,
     ConnectionConversationCapacityCommit, ConnectionConversationTracking,
-    CredentialAttachCapacityCommit, CredentialAttachCapacityCounters,
-    CredentialAttachCapacityDecision, EnrollmentCapacityCommit, EnrollmentCapacityCounters,
-    EnrollmentCapacityDecision, FreshParticipantCapacityCounter,
-    FreshParticipantCapacityCounterInvariantError, ResultingEnrollmentCapacityCounters,
+    CredentialAttachCapacityCommit, CredentialAttachCapacityCounters, EnrollmentCapacityCommit,
+    EnrollmentCapacityCounters, EnrollmentCapacityDecision, FreshParticipantCapacityCounter,
+    FreshParticipantCapacityCounterInvariantError, ParticipantWindowAdmission,
+    ParticipantWindowCommit, ResultingEnrollmentCapacityCounters,
     SemanticConnectionCapacityDecision, select_credential_attach_binding_slot,
     select_credential_attach_capacity, select_enrollment_binding_slot, select_enrollment_capacity,
-    select_semantic_connection_capacity,
+    select_participant_window, select_semantic_connection_capacity,
 };
 pub use observer::{
     ObserverCheckedOperation, ObserverFloorDecision, ObserverFloorPermit, check_observer_floor,

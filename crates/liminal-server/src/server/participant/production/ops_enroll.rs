@@ -212,7 +212,7 @@ impl ConversationAuthority {
         self.record_episode_changed(impact);
         // The durable append succeeded: the stage-8 reservation becomes
         // permanent (enrollment retires no earlier receipt).
-        reservation.confirm(&[]);
+        reservation.confirm(&[], &[]);
         Ok(ArmOutcome::committed(
             EnrollmentResponse::enroll_bound(outcome).into_server_value(),
             capacity,
@@ -427,6 +427,7 @@ impl ConversationAuthority {
                 enrollment_receipt_expires_at: allocation.receipt_expires_at.get(),
                 enrollment_provenance_expires_at: allocation.provenance_expires_at.get(),
                 enrollment_receipt_ended: None,
+                enrollment_provenance_displaced: false,
                 attach: None,
                 attach_provenance: std::collections::BTreeMap::new(),
                 attach_secret: AttachSecret::new(allocation.attach_secret),
@@ -471,10 +472,7 @@ fn replay_enrollment_capacity(
     Ok(EnrollmentCapacityCounters::new(
         replay_counter(config.max_retired_identity_slots_server)?,
         replay_counter(config.identity_slots)?,
-        replay_counter(config.max_live_attach_receipts_server)?,
         replay_fresh_counter(config.max_live_attach_receipts_per_participant)?,
-        replay_counter(config.max_receipt_provenance_server)?,
-        replay_counter(config.max_receipt_provenance_per_conversation)?,
         replay_fresh_counter(config.max_receipt_provenance_per_participant)?,
     ))
 }
@@ -493,6 +491,17 @@ fn enrollment_replay_response(
     // secret payload is never re-served once rotation ended it); the
     // non-secret provenance record then explains the ended receipt with its
     // exact terminal reason through its own deadline.
+    //
+    // Lane p0-39 — the DOCUMENTED classification degradation. The provenance
+    // phase also ends early when this participant's own retention window
+    // displaced its enrollment fingerprint to make room for a newer one of
+    // the SAME participant. The exact terminal reason is then gone, and the
+    // permanent lifetime mapping answers `EnrollmentKnown` instead: a
+    // strictly coarser, still-truthful answer. Note the displacement test is
+    // deliberately NOT the occupancy predicate — occupancy additionally
+    // requires proven possession (board #37), while a receipt that died by
+    // its own deadline with no attach at all still classifies `Deadline`
+    // here, exactly as it always has.
     let identity = ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member);
     let receipt_live =
         slot.enrollment_receipt_ended.is_none() && now < slot.enrollment_receipt_expires_at;
@@ -501,7 +510,7 @@ fn enrollment_replay_response(
             identity,
             receipt: &slot.enrollment_receipt,
         }
-    } else if now < slot.enrollment_provenance_expires_at {
+    } else if !slot.enrollment_provenance_displaced && now < slot.enrollment_provenance_expires_at {
         EnrollmentTokenPhase::Provenance {
             identity,
             provenance: EnrollmentProvenance::new(

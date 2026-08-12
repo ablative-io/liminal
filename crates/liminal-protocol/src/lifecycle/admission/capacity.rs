@@ -2,8 +2,8 @@ use core::num::NonZeroU64;
 
 use crate::wire::{
     AttachEnvelope, CredentialAttachRequest, CredentialAttachResponse, EnrollmentEnvelope,
-    EnrollmentReceiptCapacityScope, EnrollmentRequest, EnrollmentResponse,
-    IdentityCapacityExceeded, IdentityCapacityScope, ParticipantId, ReceiptCapacityScope,
+    EnrollmentRequest, EnrollmentResponse, IdentityCapacityExceeded, IdentityCapacityScope,
+    ParticipantId,
 };
 
 /// Invalid persisted occupancy for one signed nonzero capacity.
@@ -142,6 +142,85 @@ impl FreshParticipantCapacityCounter {
             limit: self.counter.limit,
             occupied: 1,
         }
+    }
+
+    /// The window as enrollment leaves it when the operation fills NOTHING:
+    /// nonzero size, zero occupancy.
+    ///
+    /// Board #37: enrollment mints a receipt body but retains no provenance
+    /// fingerprint — nothing has yet proven possession of the secret that
+    /// receipt minted — so the provenance window is reserved and still empty.
+    const fn unfilled(self) -> CapacityCounter {
+        self.counter
+    }
+}
+
+/// Whether a per-participant window entry landed into headroom or had to
+/// displace the window's oldest member to make room.
+///
+/// Both arms LAND the new entry. The window size is a bound on retention, not
+/// a refusal threshold: per-participant pressure is self-inflicted (your own
+/// churn displaces your own oldest fingerprint), so the number bounds memory
+/// without ever refusing an honest arrival.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParticipantWindowAdmission {
+    /// The window had headroom; occupancy rose by one and nothing was lost.
+    Landed,
+    /// The window was exactly full; its OLDEST in-window member is displaced
+    /// so the new entry can land, and occupancy stays exactly at the bound.
+    Displaced,
+}
+
+/// One per-participant window's admission paired with the occupancy it leaves.
+///
+/// There is no refusal arm by construction. `resulting` never exceeds the
+/// signed window size, and under [`ParticipantWindowAdmission::Displaced`] it
+/// is exactly that size — the bound holds exactly, in both arms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParticipantWindowCommit {
+    admission: ParticipantWindowAdmission,
+    resulting: CapacityCounter,
+}
+
+impl ParticipantWindowCommit {
+    /// Returns whether landing displaced the window's oldest member.
+    #[must_use]
+    pub const fn admission(self) -> ParticipantWindowAdmission {
+        self.admission
+    }
+
+    /// Returns whether this admission displaced an older member — the fact
+    /// the server's visibility surface counts.
+    #[must_use]
+    pub const fn displaced(self) -> bool {
+        matches!(self.admission, ParticipantWindowAdmission::Displaced)
+    }
+
+    /// Returns the post-admission occupancy, always within the window.
+    #[must_use]
+    pub const fn resulting(self) -> CapacityCounter {
+        self.resulting
+    }
+}
+
+/// Admits one entry into a per-participant retention window.
+///
+/// A window with headroom takes the entry and grows by one. A full window
+/// displaces its oldest member and stays exactly full. The entry ALWAYS
+/// lands: this selector has no refusal arm, which is the whole of Tom's
+/// governing sentence — *no configured number refuses an honest arrival* —
+/// expressed in the type.
+#[must_use]
+pub const fn select_participant_window(current: CapacityCounter) -> ParticipantWindowCommit {
+    match current.incremented() {
+        Some(resulting) => ParticipantWindowCommit {
+            admission: ParticipantWindowAdmission::Landed,
+            resulting,
+        },
+        None => ParticipantWindowCommit {
+            admission: ParticipantWindowAdmission::Displaced,
+            resulting: current,
+        },
     }
 }
 
@@ -284,19 +363,26 @@ pub const fn select_credential_attach_binding_slot(
     }
 }
 
-/// All seven stage-8 counters for a fresh enrollment.
+/// The stage-8 counters one fresh enrollment decides against.
 ///
-/// Only five can refuse. The two per-participant counters use
-/// [`FreshParticipantCapacityCounter`], proving their occupancy is zero and
-/// their limits nonzero before identity mint.
+/// Only the two IDENTITY counters can refuse. The two per-participant window
+/// counters use [`FreshParticipantCapacityCounter`], proving their occupancy
+/// is zero and their sizes nonzero before identity mint — which is exactly
+/// what makes a fresh participant's first receipt land without a decision.
+///
+/// # Lane p0-39: the shared pools are gone from this decision
+///
+/// `LiveReceiptServer`, `ProvenanceServer`, and `ProvenanceConversation` are
+/// no longer admission gates in any scope. They are where an honest THIRD
+/// PARTY would meet a number someone else's churn consumed, and no configured
+/// refusal is tolerable there; their retention is bounded by the TTL windows
+/// alone, with a reporting tripwire in place of a wall. The wire scopes remain
+/// assigned and defined — they are simply never emitted from these paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnrollmentCapacityCounters {
     identity_server: CapacityCounter,
     identity_conversation: CapacityCounter,
-    live_receipt_server: CapacityCounter,
     live_receipt_participant: FreshParticipantCapacityCounter,
-    provenance_server: CapacityCounter,
-    provenance_conversation: CapacityCounter,
     provenance_participant: FreshParticipantCapacityCounter,
 }
 
@@ -306,19 +392,13 @@ impl EnrollmentCapacityCounters {
     pub const fn new(
         identity_server: CapacityCounter,
         identity_conversation: CapacityCounter,
-        live_receipt_server: CapacityCounter,
         live_receipt_participant: FreshParticipantCapacityCounter,
-        provenance_server: CapacityCounter,
-        provenance_conversation: CapacityCounter,
         provenance_participant: FreshParticipantCapacityCounter,
     ) -> Self {
         Self {
             identity_server,
             identity_conversation,
-            live_receipt_server,
             live_receipt_participant,
-            provenance_server,
-            provenance_conversation,
             provenance_participant,
         }
     }
@@ -335,46 +415,25 @@ impl EnrollmentCapacityCounters {
         self.identity_conversation
     }
 
-    /// Returns server-wide live-receipt occupancy.
-    #[must_use]
-    pub const fn live_receipt_server(self) -> CapacityCounter {
-        self.live_receipt_server
-    }
-
-    /// Returns the provably empty participant live-receipt capacity.
+    /// Returns the provably empty participant live-receipt window.
     #[must_use]
     pub const fn live_receipt_participant(self) -> FreshParticipantCapacityCounter {
         self.live_receipt_participant
     }
 
-    /// Returns server-wide provenance occupancy.
-    #[must_use]
-    pub const fn provenance_server(self) -> CapacityCounter {
-        self.provenance_server
-    }
-
-    /// Returns conversation provenance occupancy.
-    #[must_use]
-    pub const fn provenance_conversation(self) -> CapacityCounter {
-        self.provenance_conversation
-    }
-
-    /// Returns the provably empty participant provenance capacity.
+    /// Returns the provably empty participant provenance window.
     #[must_use]
     pub const fn provenance_participant(self) -> FreshParticipantCapacityCounter {
         self.provenance_participant
     }
 }
 
-/// All seven post-enrollment identity and receipt/provenance counters.
+/// The post-enrollment identity counters and per-participant window occupancy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResultingEnrollmentCapacityCounters {
     identity_server: CapacityCounter,
     identity_conversation: CapacityCounter,
-    live_receipt_server: CapacityCounter,
     live_receipt_participant: CapacityCounter,
-    provenance_server: CapacityCounter,
-    provenance_conversation: CapacityCounter,
     provenance_participant: CapacityCounter,
 }
 
@@ -391,31 +450,17 @@ impl ResultingEnrollmentCapacityCounters {
         self.identity_conversation
     }
 
-    /// Returns server-wide live-receipt occupancy.
-    #[must_use]
-    pub const fn live_receipt_server(self) -> CapacityCounter {
-        self.live_receipt_server
-    }
-
-    /// Returns the newly minted participant's live-receipt occupancy.
+    /// Returns the newly minted participant's live-receipt window occupancy.
     #[must_use]
     pub const fn live_receipt_participant(self) -> CapacityCounter {
         self.live_receipt_participant
     }
 
-    /// Returns server-wide provenance occupancy.
-    #[must_use]
-    pub const fn provenance_server(self) -> CapacityCounter {
-        self.provenance_server
-    }
-
-    /// Returns conversation provenance occupancy.
-    #[must_use]
-    pub const fn provenance_conversation(self) -> CapacityCounter {
-        self.provenance_conversation
-    }
-
-    /// Returns the newly minted participant's provenance occupancy.
+    /// Returns the newly minted participant's provenance window occupancy.
+    ///
+    /// Board #37: this is zero at mint — nothing has proven possession of the
+    /// secret the enrollment receipt just minted, so no fingerprint is
+    /// retained yet. The window is reserved, not filled.
     #[must_use]
     pub const fn provenance_participant(self) -> CapacityCounter {
         self.provenance_participant
@@ -439,17 +484,19 @@ impl EnrollmentCapacityCommit {
 /// Exhaustive stage-8 enrollment runtime-capacity result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnrollmentCapacityDecision {
-    /// All seven reservations may commit together.
+    /// Both identity reservations and both window reservations may commit.
     Commit(EnrollmentCapacityCommit),
-    /// Exact first-full identity or receipt scope, bound to enrollment.
+    /// Exact first-full IDENTITY scope, bound to enrollment. The receipt
+    /// scopes have no refusal arm on this path at all.
     Respond(EnrollmentResponse),
 }
 
-/// Applies the fixed enrollment runtime-capacity order atomically.
+/// Applies the enrollment runtime-capacity order atomically.
 ///
-/// The order is identity Server, identity Conversation, `LiveReceiptServer`,
-/// `ProvenanceServer`, then `ProvenanceConversation`. A refusal exposes only
-/// the first full scope; success carries every post-increment counter together.
+/// The order is identity Server then identity Conversation — the complete
+/// refusable set. A refusal exposes only the first full scope; success
+/// carries the post-increment identity counters and the fresh participant's
+/// two reserved windows.
 #[must_use]
 pub const fn select_enrollment_capacity(
     request: &EnrollmentRequest,
@@ -469,175 +516,93 @@ pub const fn select_enrollment_capacity(
             current.identity_conversation,
         );
     };
-    let Some(live_receipt_server) = current.live_receipt_server.incremented() else {
-        return enrollment_receipt_refusal(
-            request,
-            EnrollmentReceiptCapacityScope::LiveReceiptServer,
-            current.live_receipt_server,
-        );
-    };
-    let Some(provenance_server) = current.provenance_server.incremented() else {
-        return enrollment_receipt_refusal(
-            request,
-            EnrollmentReceiptCapacityScope::ProvenanceServer,
-            current.provenance_server,
-        );
-    };
-    let Some(provenance_conversation) = current.provenance_conversation.incremented() else {
-        return enrollment_receipt_refusal(
-            request,
-            EnrollmentReceiptCapacityScope::ProvenanceConversation,
-            current.provenance_conversation,
-        );
-    };
 
     EnrollmentCapacityDecision::Commit(EnrollmentCapacityCommit {
         resulting: ResultingEnrollmentCapacityCounters {
             identity_server,
             identity_conversation,
-            live_receipt_server,
             live_receipt_participant: current.live_receipt_participant.reserved(),
-            provenance_server,
-            provenance_conversation,
-            provenance_participant: current.provenance_participant.reserved(),
+            provenance_participant: current.provenance_participant.unfilled(),
         },
     })
 }
 
-/// The five ordered receipt/provenance counters for credential attach.
+/// The two per-participant retention windows credential attach admits into.
+///
+/// The three shared scopes this snapshot used to carry are gone: they no
+/// longer gate anything, so passing them here would be an unread number
+/// pretending to be a decision input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CredentialAttachCapacityCounters {
-    live_receipt_server: CapacityCounter,
     live_receipt_participant: CapacityCounter,
-    provenance_server: CapacityCounter,
-    provenance_conversation: CapacityCounter,
     provenance_participant: CapacityCounter,
 }
 
 impl CredentialAttachCapacityCounters {
-    /// Creates the complete credential-attach counter snapshot.
+    /// Creates the complete credential-attach window snapshot.
     #[must_use]
     pub const fn new(
-        live_receipt_server: CapacityCounter,
         live_receipt_participant: CapacityCounter,
-        provenance_server: CapacityCounter,
-        provenance_conversation: CapacityCounter,
         provenance_participant: CapacityCounter,
     ) -> Self {
         Self {
-            live_receipt_server,
             live_receipt_participant,
-            provenance_server,
-            provenance_conversation,
             provenance_participant,
         }
     }
 
-    /// Returns server-wide live-receipt occupancy.
-    #[must_use]
-    pub const fn live_receipt_server(self) -> CapacityCounter {
-        self.live_receipt_server
-    }
-
-    /// Returns participant live-receipt occupancy.
+    /// Returns participant live-receipt window occupancy.
     #[must_use]
     pub const fn live_receipt_participant(self) -> CapacityCounter {
         self.live_receipt_participant
     }
 
-    /// Returns server-wide provenance occupancy.
-    #[must_use]
-    pub const fn provenance_server(self) -> CapacityCounter {
-        self.provenance_server
-    }
-
-    /// Returns conversation provenance occupancy.
-    #[must_use]
-    pub const fn provenance_conversation(self) -> CapacityCounter {
-        self.provenance_conversation
-    }
-
-    /// Returns participant provenance occupancy.
+    /// Returns participant provenance window occupancy.
     #[must_use]
     pub const fn provenance_participant(self) -> CapacityCounter {
         self.provenance_participant
     }
 }
 
-/// Atomic successful credential-attach capacity reservation.
+/// Atomic credential-attach window admission.
+///
+/// There is no refusal counterpart. Every credential attach that reaches
+/// stage 8 admits; the only outcome carried here is whether each window had
+/// to displace its oldest member to make room.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CredentialAttachCapacityCommit {
-    resulting: CredentialAttachCapacityCounters,
+    live_receipt_participant: ParticipantWindowCommit,
+    provenance_participant: ParticipantWindowCommit,
 }
 
 impl CredentialAttachCapacityCommit {
-    /// Returns all five incremented receipt/provenance counters together.
+    /// Returns the participant live-receipt window's admission.
     #[must_use]
-    pub const fn resulting(self) -> CredentialAttachCapacityCounters {
-        self.resulting
+    pub const fn live_receipt_participant(self) -> ParticipantWindowCommit {
+        self.live_receipt_participant
+    }
+
+    /// Returns the participant provenance window's admission.
+    #[must_use]
+    pub const fn provenance_participant(self) -> ParticipantWindowCommit {
+        self.provenance_participant
     }
 }
 
-/// Exhaustive stage-8 credential-attach runtime-capacity result.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CredentialAttachCapacityDecision {
-    /// All five receipt/provenance reservations may commit together.
-    Commit(CredentialAttachCapacityCommit),
-    /// Exact first-full receipt/provenance scope, bound to credential attach.
-    Respond(CredentialAttachResponse),
-}
-
-/// Applies credential attach's exact five-scope runtime-capacity order.
+/// Admits one credential attach into both per-participant windows.
+///
+/// This selector is TOTAL: it returns a commit for every input, because the
+/// (N+1)th honest fingerprint of a participant always lands. Whichever window
+/// was full displaces its own oldest member, and the caller applies exactly
+/// that displacement to the ledger and the slot from one shared plan.
 #[must_use]
 pub const fn select_credential_attach_capacity(
-    request: &CredentialAttachRequest,
     current: CredentialAttachCapacityCounters,
-) -> CredentialAttachCapacityDecision {
-    let Some(live_receipt_server) = current.live_receipt_server.incremented() else {
-        return credential_attach_receipt_refusal(
-            request,
-            ReceiptCapacityScope::LiveReceiptServer,
-            current.live_receipt_server,
-        );
-    };
-    let Some(live_receipt_participant) = current.live_receipt_participant.incremented() else {
-        return credential_attach_receipt_refusal(
-            request,
-            ReceiptCapacityScope::LiveReceiptParticipant,
-            current.live_receipt_participant,
-        );
-    };
-    let Some(provenance_server) = current.provenance_server.incremented() else {
-        return credential_attach_receipt_refusal(
-            request,
-            ReceiptCapacityScope::ProvenanceServer,
-            current.provenance_server,
-        );
-    };
-    let Some(provenance_conversation) = current.provenance_conversation.incremented() else {
-        return credential_attach_receipt_refusal(
-            request,
-            ReceiptCapacityScope::ProvenanceConversation,
-            current.provenance_conversation,
-        );
-    };
-    let Some(provenance_participant) = current.provenance_participant.incremented() else {
-        return credential_attach_receipt_refusal(
-            request,
-            ReceiptCapacityScope::ProvenanceParticipant,
-            current.provenance_participant,
-        );
-    };
-
-    CredentialAttachCapacityDecision::Commit(CredentialAttachCapacityCommit {
-        resulting: CredentialAttachCapacityCounters {
-            live_receipt_server,
-            live_receipt_participant,
-            provenance_server,
-            provenance_conversation,
-            provenance_participant,
-        },
-    })
+) -> CredentialAttachCapacityCommit {
+    CredentialAttachCapacityCommit {
+        live_receipt_participant: select_participant_window(current.live_receipt_participant),
+        provenance_participant: select_participant_window(current.provenance_participant),
+    }
 }
 
 const fn enrollment_identity_refusal(
@@ -652,32 +617,6 @@ const fn enrollment_identity_refusal(
             limit: counter.limit(),
             occupied: counter.occupied(),
         },
-    ))
-}
-
-const fn enrollment_receipt_refusal(
-    request: &EnrollmentRequest,
-    scope: EnrollmentReceiptCapacityScope,
-    counter: CapacityCounter,
-) -> EnrollmentCapacityDecision {
-    EnrollmentCapacityDecision::Respond(EnrollmentResponse::receipt_capacity_exceeded(
-        enrollment_envelope(request),
-        scope,
-        counter.limit(),
-        counter.occupied(),
-    ))
-}
-
-const fn credential_attach_receipt_refusal(
-    request: &CredentialAttachRequest,
-    scope: ReceiptCapacityScope,
-    counter: CapacityCounter,
-) -> CredentialAttachCapacityDecision {
-    CredentialAttachCapacityDecision::Respond(CredentialAttachResponse::receipt_capacity_exceeded(
-        attach_envelope(request),
-        scope,
-        counter.limit(),
-        counter.occupied(),
     ))
 }
 

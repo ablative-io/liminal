@@ -26,6 +26,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use liminal_protocol::lifecycle::{CapacityCounter, CapacityCounterInvariantError};
 
+use crate::metrics::SharedReceiptPool;
+
+use super::barrier::SharedPoolTripwires;
 use super::state::StateError;
 
 /// One stage-8 scope's occupancy against its signed limit: the crate's
@@ -179,6 +182,13 @@ struct CapacityLedger {
     identity_by_conversation: HashMap<u64, u64>,
     live_receipts: BTreeSet<OccupancyEntry>,
     provenance: BTreeSet<OccupancyEntry>,
+    /// Whether each server-scope tripwire has already warned for the storm it
+    /// is currently inside. Counting happens on EVERY observation; the warning
+    /// fires once per rising edge, so a sustained storm costs one log line
+    /// rather than one per request, and a pool that recovers and runs away
+    /// again warns again.
+    live_receipt_tripwire_warned: bool,
+    provenance_tripwire_warned: bool,
 }
 
 impl CapacityLedger {
@@ -187,6 +197,52 @@ impl CapacityLedger {
     fn prune(&mut self, now: u128) {
         prune_set(&mut self.live_receipts, now);
         prune_set(&mut self.provenance, now);
+    }
+
+    /// Counts, and on the rising edge warns about, each server-scope shared
+    /// pool sitting at or above its configured reporting threshold.
+    ///
+    /// This runs after [`Self::prune`], so the occupancy it reads is the
+    /// in-window occupancy — the thing a TTL bound actually holds. It refuses
+    /// nothing: the operation that triggered it has already been admitted by
+    /// the time these numbers are looked at.
+    fn observe_shared_pools(&mut self, occupancy: ServerOccupancy, tripwires: SharedPoolTripwires) {
+        Self::observe_pool(
+            SharedReceiptPool::LiveReceiptServer,
+            occupancy.live_receipts,
+            tripwires.live_receipt_server,
+            &mut self.live_receipt_tripwire_warned,
+        );
+        Self::observe_pool(
+            SharedReceiptPool::ProvenanceServer,
+            occupancy.provenance,
+            tripwires.provenance_server,
+            &mut self.provenance_tripwire_warned,
+        );
+    }
+
+    fn observe_pool(
+        pool: SharedReceiptPool,
+        occupied: u64,
+        threshold: u64,
+        warned: &mut bool,
+    ) -> bool {
+        if occupied < threshold {
+            *warned = false;
+            return false;
+        }
+        crate::metrics::receipt_pool_runaway_observed(pool);
+        if !*warned {
+            *warned = true;
+            tracing::warn!(
+                pool = pool.label(),
+                occupied,
+                threshold,
+                "shared receipt pool runaway: in-window occupancy reached its reporting \
+                 threshold; this pool refuses nothing and is bounded by its TTL alone"
+            );
+        }
+        true
     }
 
     fn occupancy(&self) -> Result<ServerOccupancy, StateError> {
@@ -262,12 +318,14 @@ impl ServerCapacity {
     pub(super) fn admit<R, A>(
         &self,
         now: u128,
+        tripwires: SharedPoolTripwires,
         effects: ReservationEffects,
         decide: impl FnOnce(ServerOccupancy) -> Result<Stage8Choice<R, A>, StateError>,
     ) -> Result<Stage8Outcome<'_, R, A>, StateError> {
         let mut ledger = self.ledger();
         ledger.prune(now);
         let occupancy = ledger.occupancy()?;
+        ledger.observe_shared_pools(occupancy, tripwires);
         match decide(occupancy)? {
             Stage8Choice::Refuse(response) => Ok(Stage8Outcome::Refused(response)),
             Stage8Choice::Admit(admitted) => {
@@ -401,13 +459,24 @@ pub(super) struct CapacityReservation<'a> {
 }
 
 impl CapacityReservation<'_> {
-    /// Makes the reservation permanent and removes the receipts this commit
+    /// Makes the reservation permanent, removing both the receipts this commit
     /// retired early (the superseded attach receipt and, on the first
-    /// rotation, the ended enrollment receipt).
-    pub(super) fn confirm(mut self, retire: &[OccupancyEntry]) {
+    /// rotation, the ended enrollment receipt) and the provenance entries its
+    /// per-participant window DISPLACED to make room.
+    ///
+    /// Retirement and displacement are different facts with the same
+    /// mechanical effect here, and they are kept apart deliberately: a
+    /// retirement is a receipt reaching its own end, a displacement is a bound
+    /// doing work. Only the second is counted as a displacement, and the
+    /// displaced list this method receives is the SAME plan the slot applies,
+    /// so the ledger and the slot cannot drift.
+    pub(super) fn confirm(mut self, retire: &[OccupancyEntry], displace: &[OccupancyEntry]) {
         if self.effects.take().is_some() {
             let mut ledger = self.capacity.ledger();
             for entry in retire {
+                ledger.remove(entry);
+            }
+            for entry in displace {
                 ledger.remove(entry);
             }
         }

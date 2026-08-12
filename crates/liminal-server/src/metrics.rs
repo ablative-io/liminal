@@ -65,6 +65,91 @@ const HANDSHAKE_REFUSALS_TOTAL: &str = "liminal_handshake_refusals_total";
 /// an origin value, or an error message here would be unbounded cardinality on
 /// a surface a scraper keeps forever.
 const REASON_LABEL: &str = "reason";
+/// Lane p0-39: entries displaced out of a per-participant retention window.
+///
+/// ADDITIVE, and it has to be: the event it counts did not exist before. The
+/// stage-8 receipt windows used to REFUSE at their bound, which was loud on the
+/// wire (a typed `ReceiptCapacityExceeded` the client could see). They now
+/// displace instead, which is silent to the arriving client BY DESIGN — the
+/// (N+1)th honest fingerprint lands. A bound that neither refuses nor discloses
+/// would hide exactly what the old wall at least made loud, so displacement is
+/// silent to experience and loud to record: this counter is the record.
+const RECEIPT_DISPLACEMENTS_TOTAL: &str = "liminal_receipt_displacements_total";
+/// Lane p0-39: observations that a SHARED receipt pool is carrying a churn
+/// storm (`liminal_receipt_pool_runaway_total`).
+///
+/// The three shared pools stopped being admission gates entirely — no
+/// configured number may refuse an honest third party there — so their only
+/// bound is the TTL window. This counter is the tripwire that replaces the
+/// wall: it is an OCCUPANCY OBSERVATION, never a gate, and nothing is refused
+/// because it moved. It increments once per admitted operation that observed a
+/// pool at or above its configured reporting threshold, so its rate is the
+/// storm's rate.
+const RECEIPT_POOL_RUNAWAY_TOTAL: &str = "liminal_receipt_pool_runaway_total";
+/// Label key carried by [`RECEIPT_DISPLACEMENTS_TOTAL`]. Cardinality is bounded
+/// by [`ReceiptWindowScope`]'s two variants.
+const SCOPE_LABEL: &str = "scope";
+/// Label key carried by [`RECEIPT_POOL_RUNAWAY_TOTAL`]. Cardinality is bounded
+/// by [`SharedReceiptPool`]'s three variants.
+const POOL_LABEL: &str = "pool";
+
+/// The per-participant retention windows that can displace an older entry.
+///
+/// A fixed, enum-derived label vocabulary: these are the only two scopes whose
+/// configured number is a window size rather than a gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReceiptWindowScope {
+    /// Stage-8 `LiveReceiptParticipant`.
+    LiveReceiptParticipant,
+    /// Stage-8 `ProvenanceParticipant`.
+    ProvenanceParticipant,
+}
+
+impl ReceiptWindowScope {
+    /// Every window scope, in handle-storage order.
+    pub(crate) const LABELS: [&'static str; 2] =
+        ["live_receipt_participant", "provenance_participant"];
+
+    const fn slot(self) -> usize {
+        match self {
+            Self::LiveReceiptParticipant => 0,
+            Self::ProvenanceParticipant => 1,
+        }
+    }
+}
+
+/// The shared receipt pools whose retention is TTL-bounded and tripwired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SharedReceiptPool {
+    /// Stage-8 `LiveReceiptServer`.
+    LiveReceiptServer,
+    /// Stage-8 `ProvenanceServer`.
+    ProvenanceServer,
+    /// Stage-8 `ProvenanceConversation`.
+    ProvenanceConversation,
+}
+
+impl SharedReceiptPool {
+    /// Every shared pool, in handle-storage order.
+    pub(crate) const LABELS: [&'static str; 3] = [
+        "live_receipt_server",
+        "provenance_server",
+        "provenance_conversation",
+    ];
+
+    const fn slot(self) -> usize {
+        match self {
+            Self::LiveReceiptServer => 0,
+            Self::ProvenanceServer => 1,
+            Self::ProvenanceConversation => 2,
+        }
+    }
+
+    /// Human-readable pool name for the paired rising-edge warning.
+    pub(crate) const fn label(self) -> &'static str {
+        Self::LABELS[self.slot()]
+    }
+}
 
 static SERVER_METRICS: OnceLock<ServerMetrics> = OnceLock::new();
 
@@ -85,6 +170,10 @@ struct ServerMetrics {
     admission_refusals: [CounterHandle; AdmissionRefusal::LABELS.len()],
     /// One pre-registered handle per WebSocket upgrade-refusal class.
     handshake_refusals: [CounterHandle; UpgradeRefusal::LABELS.len()],
+    /// One pre-registered handle per per-participant retention window.
+    receipt_displacements: [CounterHandle; ReceiptWindowScope::LABELS.len()],
+    /// One pre-registered handle per shared receipt pool.
+    receipt_pool_runaway: [CounterHandle; SharedReceiptPool::LABELS.len()],
 }
 
 /// Every transport a delivery can ride, in the order their handles are stored.
@@ -197,6 +286,34 @@ pub fn subscription_shed() {
     }
 }
 
+/// Records `count` entries displaced out of one per-participant retention
+/// window (`liminal_receipt_displacements_total`, labelled by scope).
+///
+/// The arriving client sees nothing — that is the ruled behaviour, "silent to
+/// experience" — so this counter and the `debug` line beside it are the only
+/// record that a bound did work. A zero count returns early, so the ordinary
+/// with-headroom path touches no atomic.
+pub(crate) fn receipt_entries_displaced(scope: ReceiptWindowScope, count: u64) {
+    if count == 0 {
+        return;
+    }
+    if let Some(metrics) = SERVER_METRICS.get() {
+        metrics.receipt_displacements[scope.slot()].increment_by(count);
+    }
+}
+
+/// Records one observation of a shared receipt pool at or above its configured
+/// reporting threshold (`liminal_receipt_pool_runaway_total`, labelled by pool).
+///
+/// An OBSERVATION, not a refusal: the operation that made it was admitted. The
+/// rising-edge `warn` beside the first such observation carries the occupancy
+/// and threshold; this counter carries the storm's rate.
+pub(crate) fn receipt_pool_runaway_observed(pool: SharedReceiptPool) {
+    if let Some(metrics) = SERVER_METRICS.get() {
+        metrics.receipt_pool_runaway[pool.slot()].increment();
+    }
+}
+
 /// The current value of the accepted-publish counter, for a test that needs an
 /// UNRELATED counter to prove its harness measured anything at all.
 ///
@@ -214,6 +331,53 @@ pub(crate) fn publishes_total_value() -> Option<u64> {
         .metrics()
         .iter()
         .find(|metric| metric.name == PUBLISHES_TOTAL)
+        .and_then(|metric| match metric.value {
+            MetricValue::Counter(value) => Some(value),
+            MetricValue::Gauge(_) | MetricValue::Histogram(_) => None,
+        })
+}
+
+/// The current value of one lane p0-39 displacement counter, by scope.
+///
+/// `None` means the family is not readable — either [`init`] has not run in
+/// this process or the registry holds no such counter — which a caller must
+/// treat as "no measurement", never as zero. Name and label are read from the
+/// same constants the registration uses, so a rename shows up as a failure
+/// rather than as a vacuous pass.
+#[cfg(test)]
+pub(crate) fn receipt_displacements_value(scope: ReceiptWindowScope) -> Option<u64> {
+    labelled_counter_value(
+        RECEIPT_DISPLACEMENTS_TOTAL,
+        SCOPE_LABEL,
+        ReceiptWindowScope::LABELS[scope.slot()],
+    )
+}
+
+/// The current value of one lane p0-39 shared-pool tripwire counter, by pool.
+///
+/// `None` means "not measured", never zero — see
+/// [`receipt_displacements_value`].
+#[cfg(test)]
+pub(crate) fn receipt_pool_runaway_value(pool: SharedReceiptPool) -> Option<u64> {
+    labelled_counter_value(RECEIPT_POOL_RUNAWAY_TOTAL, POOL_LABEL, pool.label())
+}
+
+#[cfg(test)]
+fn labelled_counter_value(name: &str, key: &str, label: &str) -> Option<u64> {
+    use liminal::metrics::MetricValue;
+
+    let registry = global_registry()?;
+    registry
+        .snapshot()
+        .metrics()
+        .iter()
+        .find(|metric| {
+            metric.name == name
+                && metric
+                    .labels
+                    .iter()
+                    .any(|(metric_key, value)| metric_key == key && value == label)
+        })
         .and_then(|metric| match metric.value {
             MetricValue::Counter(value) => Some(value),
             MetricValue::Gauge(_) | MetricValue::Histogram(_) => None,
@@ -248,10 +412,27 @@ impl ServerMetrics {
         let admission_refusals = register_labelled(
             registry,
             ADMISSION_REFUSALS_TOTAL,
+            REASON_LABEL,
             &AdmissionRefusal::LABELS,
         )?;
-        let handshake_refusals =
-            register_labelled(registry, HANDSHAKE_REFUSALS_TOTAL, &UpgradeRefusal::LABELS)?;
+        let handshake_refusals = register_labelled(
+            registry,
+            HANDSHAKE_REFUSALS_TOTAL,
+            REASON_LABEL,
+            &UpgradeRefusal::LABELS,
+        )?;
+        let receipt_displacements = register_labelled(
+            registry,
+            RECEIPT_DISPLACEMENTS_TOTAL,
+            SCOPE_LABEL,
+            &ReceiptWindowScope::LABELS,
+        )?;
+        let receipt_pool_runaway = register_labelled(
+            registry,
+            RECEIPT_POOL_RUNAWAY_TOTAL,
+            POOL_LABEL,
+            &SharedReceiptPool::LABELS,
+        )?;
         Some(Self {
             connections_active,
             publishes_total,
@@ -260,6 +441,8 @@ impl ServerMetrics {
             sheds_total,
             admission_refusals,
             handshake_refusals,
+            receipt_displacements,
+            receipt_pool_runaway,
         })
     }
 }
@@ -274,15 +457,12 @@ impl ServerMetrics {
 fn register_labelled<const N: usize>(
     registry: &MetricsRegistry,
     name: &'static str,
+    key: &'static str,
     labels: &[&'static str; N],
 ) -> Option<[CounterHandle; N]> {
     let mut handles = Vec::with_capacity(N);
     for label in labels {
-        handles.push(
-            registry
-                .register_counter(name, [(REASON_LABEL, *label)])
-                .ok()?,
-        );
+        handles.push(registry.register_counter(name, [(key, *label)]).ok()?);
     }
     handles.try_into().ok()
 }

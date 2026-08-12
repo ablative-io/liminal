@@ -69,10 +69,7 @@ fn enrollment_capacity(identity_server: CapacityCounter) -> EnrollmentCapacityCo
     EnrollmentCapacityCounters::new(
         identity_server,
         counter(4, 0),
-        counter(4, 0),
         fresh_counter(4),
-        counter(4, 0),
-        counter(4, 0),
         fresh_counter(4),
     )
 }

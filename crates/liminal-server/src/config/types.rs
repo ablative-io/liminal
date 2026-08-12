@@ -579,32 +579,54 @@ pub struct ParticipantConfig {
     /// least `attach_receipt_ttl_ms` (provenance explains the receipt and
     /// cannot expire first).
     pub receipt_provenance_ttl_ms: u64,
-    /// Server-wide cap on live secret-bearing receipts (enrollment and
-    /// credential-attach receipt bodies inside their own receipt windows,
-    /// across every conversation). R-D1 stage-8 scope `LiveReceiptServer`:
-    /// enrollment and credential attach refuse with the typed
-    /// `ReceiptCapacityExceeded` when reserving one more would exceed it.
-    pub max_live_attach_receipts_server: u64,
-    /// Per-participant cap on live secret-bearing receipts (stage-8 scope
-    /// `LiveReceiptParticipant`). A participant holds at most its enrollment
-    /// receipt plus its current attach receipt live at once, so values below
-    /// 3 refuse rotation while the enrollment receipt is still live.
-    pub max_live_attach_receipts_per_participant: u64,
-    /// Server-wide cap on retained non-secret provenance fingerprints
-    /// (stage-8 scope `ProvenanceServer`).
+    /// Reporting threshold for server-wide live secret-bearing receipts
+    /// (stage-8 shared scope `LiveReceiptServer`).
     ///
-    /// Board #37 (ruling 2026-08-12): a fingerprint OCCUPIES from the moment
+    /// Lane p0-39: this scope is NOT an admission gate. It is where an honest
+    /// third party would meet a number someone else's churn consumed, and no
+    /// configured refusal is tolerable there — retention is bounded by
+    /// `attach_receipt_ttl_ms` alone. This number is a TRIPWIRE: when
+    /// in-window occupancy reaches it, the server counts the observation and
+    /// warns on the rising edge. Nothing is ever refused because of it.
+    /// Setting it higher than the deployment's plausible steady state is the
+    /// point; a churn storm is what it is meant to disclose.
+    pub live_receipt_server_report_threshold: u64,
+    /// Per-participant WINDOW SIZE for live secret-bearing receipts (stage-8
+    /// scope `LiveReceiptParticipant`).
+    ///
+    /// Lane p0-39: this is a bound on retention, not a refusal threshold. At
+    /// a full window the participant's own oldest live receipt is displaced
+    /// and the new one lands, so a rotation can never be refused by the very
+    /// receipt it is about to end. Occupancy never exceeds this value.
+    pub max_live_attach_receipts_per_participant: u64,
+    /// Reporting threshold for server-wide retained non-secret provenance
+    /// fingerprints (stage-8 shared scope `ProvenanceServer`).
+    ///
+    /// Lane p0-39: a tripwire, never a gate — see
+    /// [`Self::live_receipt_server_report_threshold`]. Retention here is
+    /// bounded by `receipt_provenance_ttl_ms` alone.
+    ///
+    /// Board #37 (ruling 2026-08-12): a fingerprint occupies from the moment
     /// the client proves it possesses the secret its receipt minted through
     /// that receipt's own provenance deadline — not from the minting commit.
     /// A receipt whose delivery was never observed classifies through its
-    /// window but consumes none of this cap, so an enrol-and-crash cycle
-    /// leaves no provenance residue behind it.
-    pub max_receipt_provenance_server: u64,
-    /// Per-conversation provenance-fingerprint cap (stage-8 scope
-    /// `ProvenanceConversation`).
-    pub max_receipt_provenance_per_conversation: u64,
-    /// Per-participant provenance-fingerprint cap (stage-8 scope
+    /// window but is never counted here, so an enrol-and-crash cycle leaves
+    /// no provenance residue behind it.
+    pub receipt_provenance_server_report_threshold: u64,
+    /// Reporting threshold for per-conversation provenance fingerprints
+    /// (stage-8 shared scope `ProvenanceConversation`). A tripwire, never a
+    /// gate: one participant's churn must not refuse the next participant of
+    /// the same conversation.
+    pub receipt_provenance_per_conversation_report_threshold: u64,
+    /// Per-participant WINDOW SIZE for provenance fingerprints (stage-8 scope
     /// `ProvenanceParticipant`).
+    ///
+    /// Lane p0-39: the participant's retained fingerprints — one per
+    /// committed rotation, plus its proven enrollment fingerprint — are held
+    /// to this many, oldest displaced first. Per-participant pressure is
+    /// self-inflicted, so the number bounds memory without refusing: the
+    /// (N+1)th honest fingerprint always lands, including on cold replay from
+    /// durable state. Occupancy never exceeds this value.
     pub max_receipt_provenance_per_participant: u64,
     /// Server-wide identity-slot limit (the contract's
     /// `max_retired_identity_slots` server scope): the total number of
@@ -672,20 +694,20 @@ impl ParticipantConfig {
             ("attach_receipt_ttl_ms", self.attach_receipt_ttl_ms),
             ("receipt_provenance_ttl_ms", self.receipt_provenance_ttl_ms),
             (
-                "max_live_attach_receipts_server",
-                self.max_live_attach_receipts_server,
+                "live_receipt_server_report_threshold",
+                self.live_receipt_server_report_threshold,
             ),
             (
                 "max_live_attach_receipts_per_participant",
                 self.max_live_attach_receipts_per_participant,
             ),
             (
-                "max_receipt_provenance_server",
-                self.max_receipt_provenance_server,
+                "receipt_provenance_server_report_threshold",
+                self.receipt_provenance_server_report_threshold,
             ),
             (
-                "max_receipt_provenance_per_conversation",
-                self.max_receipt_provenance_per_conversation,
+                "receipt_provenance_per_conversation_report_threshold",
+                self.receipt_provenance_per_conversation_report_threshold,
             ),
             (
                 "max_receipt_provenance_per_participant",

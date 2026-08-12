@@ -232,10 +232,8 @@ fn rows_read_by_a_cold_restore_of(history: u64) -> Result<(usize, usize), Box<dy
     let counting = Arc::new(ReadCountingStore::new(inner));
     let store = Arc::clone(&counting) as Arc<dyn DurableStore>;
     {
-        let handler = ProductionParticipantHandler::new(
-            Arc::clone(&store),
-            test_participant_config(),
-        )?;
+        let handler =
+            ProductionParticipantHandler::new(Arc::clone(&store), test_participant_config())?;
         let sender = enroll(&handler, ConnectionIncarnation::new(0x60, 1), 1)?;
         let _recipient = enroll(&handler, ConnectionIncarnation::new(0x60, 2), 2)?;
         for nonce in 0..history {

@@ -170,14 +170,7 @@ fn operation_facts(
         identity_slots: config.identity_slots,
         attach_receipt_ttl_ms: config.attach_receipt_ttl_ms,
         receipt_provenance_ttl_ms: config.receipt_provenance_ttl_ms,
-        receipt_limits: ReceiptCapacityLimits {
-            identity_server: config.max_retired_identity_slots_server,
-            live_receipts_server: config.max_live_attach_receipts_server,
-            live_receipts_per_participant: config.max_live_attach_receipts_per_participant,
-            provenance_server: config.max_receipt_provenance_server,
-            provenance_per_conversation: config.max_receipt_provenance_per_conversation,
-            provenance_per_participant: config.max_receipt_provenance_per_participant,
-        },
+        receipt_limits: ReceiptCapacityLimits::from_config(&config),
         connection_tracking: ConnectionConversationTracking::Untracked,
         connection_capacity,
     })

@@ -9,10 +9,9 @@ use liminal::durability::bridge::block_on;
 
 use liminal_protocol::lifecycle::{
     BindingState, MarkerAckCommit, MarkerAckDecision, MarkerProofState, ParticipantAckCommit,
-    ParticipantAckDecision, PresentedIdentity, RecipientAckObligations,
-    RetainedCausalRecordKind, SemanticConnectionCapacityDecision, apply_marker_ack,
-    apply_marker_ack_frontier, apply_participant_ack_frontier,
-    apply_participant_ack_with_obligations,
+    ParticipantAckDecision, PresentedIdentity, RecipientAckObligations, RetainedCausalRecordKind,
+    SemanticConnectionCapacityDecision, apply_marker_ack, apply_marker_ack_frontier,
+    apply_participant_ack_frontier, apply_participant_ack_with_obligations,
 };
 use liminal_protocol::wire::{
     BindingEpoch, DeliverySeq, MarkerAck, MarkerAckEnvelope, MarkerAckResponse, ParticipantAck,
@@ -320,10 +319,8 @@ impl ConversationAuthority {
         // predates the crossing) re-presents it here, and without this flag
         // the selector answers MarkerMismatch for an acknowledgement that is
         // merely redundant — the 2026-08-07 kernel death.
-        let accepted_marker_at_cursor = self.marker_record_accepted_at_cursor(
-            request.participant_id,
-            cursor,
-        );
+        let accepted_marker_at_cursor =
+            self.marker_record_accepted_at_cursor(request.participant_id, cursor);
         let marker_state = MarkerProofState::new(
             cursor,
             accepted_marker_at_cursor,

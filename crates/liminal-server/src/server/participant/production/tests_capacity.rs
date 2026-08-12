@@ -1,19 +1,29 @@
 //! R-D1 stage-8 enrollment capacity production-path tests.
 //!
 //! Each test drives the live dispatch seam with real wire frames over a real
-//! on-disk store and pins one register-row refusal of the enrollment
-//! identity/receipt capacity family (rows 5654/5655): the exact scope in the
-//! frozen seven-scope order, the signed limit, and the true occupancy — plus
-//! the cold-restart exactness of the server-scope ledger (a restart must not
-//! forget reserved identity slots or in-window receipts). The credential
-//! attach scopes live in [`super::tests_capacity_attach`].
+//! on-disk store and pins the enrollment identity capacity family (register
+//! row 5655): the exact scope in the frozen order, the signed limit, and the
+//! true occupancy — plus the cold-restart exactness of the server-scope
+//! ledger (a restart must not forget reserved identity slots).
+//!
+//! # Lane p0-39: what these tests stopped being able to say
+//!
+//! Three RECEIPT scopes used to refuse enrollment here (`LiveReceiptServer`,
+//! `ProvenanceServer`, `ProvenanceConversation`, register row 5654). They no
+//! longer refuse anything, so the pins that walked them are rewritten below to
+//! assert the law that replaced them — an honest arrival lands — rather than
+//! deleted, which would have removed the only evidence anyone checks that
+//! behaviour at all. Each rewrite names the pin it replaces.
+//!
+//! The IDENTITY scopes are untouched by that lane and their pins stand exactly
+//! as they were. The credential attach scopes live in
+//! [`super::tests_capacity_attach`].
 
 use std::error::Error;
 
 use liminal_protocol::wire::{
-    ClientRequest, ConnectionIncarnation, EnrollmentReceiptCapacityScope, EnrollmentRequest,
-    EnrollmentToken, IdentityCapacityExceeded, IdentityCapacityScope, ReceiptCapacityExceeded,
-    ServerValue,
+    ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken,
+    IdentityCapacityExceeded, IdentityCapacityScope, ServerValue,
 };
 
 use crate::config::types::ParticipantConfig;
@@ -36,38 +46,14 @@ fn enrollment_request(conversation_id: u64, token: [u8; 16]) -> ClientRequest {
     })
 }
 
-/// Asserts one exact enrollment `ReceiptCapacityExceeded` row.
-fn assert_enrollment_receipt_refusal(
-    value: &ServerValue,
-    conversation_id: u64,
-    scope: EnrollmentReceiptCapacityScope,
-    limit: u64,
-    occupied: u64,
-) -> Result<(), Box<dyn Error>> {
-    let ServerValue::ReceiptCapacityExceeded(ReceiptCapacityExceeded::Enrollment {
-        request,
-        scope: got_scope,
-        limit: got_limit,
-        occupied: got_occupied,
-    }) = value
-    else {
-        return Err(format!(
-            "expected the enrollment ReceiptCapacityExceeded row ({scope:?}), got: {value:?}"
-        )
-        .into());
-    };
-    assert_eq!(request.conversation_id, conversation_id);
-    assert_eq!(*got_scope, scope);
-    assert_eq!(*got_limit, limit);
-    assert_eq!(*got_occupied, occupied);
-    Ok(())
-}
-
 /// Server-scope identity capacity (register row 5655): the third identity
 /// across the whole server refuses with scope `Server` (tested BEFORE the
 /// conversation scope, whose per-conversation occupancy is far below its
 /// limit) — and the refusal SURVIVES a cold restart, proving the startup
 /// restore rebuilds the identity ledger from durable truth.
+///
+/// Lane p0-39 leaves this pin untouched: identity capacity is a GATE and
+/// stays one.
 #[test]
 fn enrollment_identity_server_scope_refuses_and_survives_restart() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
@@ -123,79 +109,68 @@ fn enrollment_identity_server_scope_refuses_and_survives_restart() -> Result<(),
     Ok(())
 }
 
-/// Server-scope live-receipt capacity (register row 5654): with one live
-/// enrollment receipt occupying the whole server cap, a second enrollment on
-/// a DIFFERENT conversation refuses with `LiveReceiptServer` — before and
-/// after a cold restart (the receipt is still inside its 60s window).
+/// Lane p0-39 REWRITE of `enrollment_live_receipt_server_scope_refuses_and_survives_restart`.
+///
+/// That pin asserted a `LiveReceiptServer` refusal and its survival across a
+/// cold restart. The refusal is gone, so both of its assertions read a wire row
+/// that can no longer be produced. What it was really guarding — that the
+/// server-scope live-receipt ledger is rebuilt exactly from durable truth — is
+/// preserved here in its non-refusing form: the pool is deliberately driven far
+/// past its old cap, before and after a restart, and every honest arrival still
+/// lands.
 #[test]
-fn enrollment_live_receipt_server_scope_refuses_and_survives_restart() -> Result<(), Box<dyn Error>>
+fn shared_live_receipt_pool_never_refuses_before_or_after_a_restart() -> Result<(), Box<dyn Error>>
 {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(72, 1);
-    let config = capacity_config(|c| c.max_live_attach_receipts_server = 1);
+    let config = capacity_config(|c| c.live_receipt_server_report_threshold = 1);
 
     {
         let store = open_disk_store_for_tests(&data_dir)?;
         let handler = ProductionParticipantHandler::new(store, config)?;
         enroll(&handler, incarnation, 711, [11; 16])?;
-        let refused = dispatch(&handler, incarnation, enrollment_request(712, [12; 16]))?;
-        assert_enrollment_receipt_refusal(
-            &refused,
-            712,
-            EnrollmentReceiptCapacityScope::LiveReceiptServer,
-            1,
-            1,
-        )?;
+        // Third party, far past the old cap of one.
+        enroll(&handler, incarnation, 712, [12; 16])?;
+        enroll(&handler, incarnation, 713, [13; 16])?;
     }
 
     let store = open_disk_store_for_tests(&data_dir)?;
     let handler = ProductionParticipantHandler::new(store, config)?;
-    let refused = dispatch(&handler, incarnation, enrollment_request(712, [12; 16]))?;
-    assert_enrollment_receipt_refusal(
-        &refused,
-        712,
-        EnrollmentReceiptCapacityScope::LiveReceiptServer,
-        1,
-        1,
-    )
+    enroll(&handler, incarnation, 714, [14; 16])?;
+    Ok(())
 }
 
-/// Server-scope provenance capacity: one retained enrollment fingerprint
-/// fills the server cap, so a second enrollment on another conversation
-/// refuses with `ProvenanceServer` (live-receipt scopes pass first).
+/// Lane p0-39 REWRITE of `enrollment_provenance_server_scope_refusal`.
 ///
-/// Board #37: the fingerprint has to be EARNED. A bare enrollment retains
-/// nothing — possession of the secret it minted is unproven — so the fixture
-/// proves it with a rotation before the cap can be full.
+/// The shared server provenance pool no longer gates, so the refusal that pin
+/// asserted cannot occur. Its earned-fingerprint premise is kept — the fixture
+/// still pays for a real retained fingerprint through a rotation, so this is
+/// not a green bought by an empty pool.
 #[test]
-fn enrollment_provenance_server_scope_refusal() -> Result<(), Box<dyn Error>> {
+fn shared_server_provenance_pool_never_refuses_an_enrollment() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(73, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    let config = capacity_config(|c| c.max_receipt_provenance_server = 1);
+    let config = capacity_config(|c| c.receipt_provenance_server_report_threshold = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
 
     enroll_proving_provenance(&handler, incarnation, 721, [[21; 16], [121; 16], [221; 16]])?;
-    let refused = dispatch(&handler, incarnation, enrollment_request(722, [22; 16]))?;
-    assert_enrollment_receipt_refusal(
-        &refused,
-        722,
-        EnrollmentReceiptCapacityScope::ProvenanceServer,
-        1,
-        1,
-    )
+    enroll(&handler, incarnation, 722, [22; 16])?;
+    Ok(())
 }
 
-/// Out-of-model over-limit refusal with true numbers: two retained
-/// enrollment fingerprints, then a restart whose server provenance cap was
-/// lowered to 1 BENEATH that durable occupancy. Every earlier scope in the
-/// frozen order has headroom, so the next enrollment refuses at
-/// `ProvenanceServer` with the lowered limit and the true occupancy — never
-/// admitting past the signed cap and never inventing in-model numbers.
+/// Lane p0-39 REWRITE of `enrollment_over_limit_scope_refuses_with_true_numbers`.
+///
+/// The out-of-model over-limit arm SURVIVES — a configured number lowered
+/// beneath restored durable occupancy still refuses with its true numbers
+/// rather than admitting past a signed cap — but only for the scopes that are
+/// still gates. The original drove it through `ProvenanceServer`, which no
+/// longer refuses; this drives the identical mechanism through the identity
+/// server scope, whose cap is lowered to 1 beneath two durable identities.
 #[test]
-fn enrollment_over_limit_scope_refuses_with_true_numbers() -> Result<(), Box<dyn Error>> {
+fn enrollment_over_limit_identity_scope_refuses_with_true_numbers() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(80, 1);
@@ -203,78 +178,77 @@ fn enrollment_over_limit_scope_refuses_with_true_numbers() -> Result<(), Box<dyn
     {
         let store = open_disk_store_for_tests(&data_dir)?;
         let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
-        enroll_proving_provenance(
-            &handler,
-            incarnation,
-            751,
-            [[61; 16], [161; 16], [0xC1; 16]],
-        )?;
-        enroll_proving_provenance(
-            &handler,
-            incarnation,
-            752,
-            [[62; 16], [162; 16], [0xC2; 16]],
-        )?;
+        enroll(&handler, incarnation, 751, [61; 16])?;
+        enroll(&handler, incarnation, 752, [62; 16])?;
     }
 
-    // RESTART with the server provenance cap lowered beneath the two
-    // retained in-window fingerprints.
+    // RESTART with the server identity cap lowered beneath the two durable
+    // identities.
     let store = open_disk_store_for_tests(&data_dir)?;
-    let config = capacity_config(|c| c.max_receipt_provenance_server = 1);
+    let config = capacity_config(|c| c.max_retired_identity_slots_server = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
     let refused = dispatch(&handler, incarnation, enrollment_request(753, [63; 16]))?;
-    assert_enrollment_receipt_refusal(
-        &refused,
-        753,
-        EnrollmentReceiptCapacityScope::ProvenanceServer,
-        1,
-        2,
-    )
+    let ServerValue::IdentityCapacityExceeded(IdentityCapacityExceeded {
+        scope,
+        limit,
+        occupied,
+        ..
+    }) = refused
+    else {
+        return Err(format!(
+            "an identity cap lowered beneath durable occupancy must refuse with its true \
+             numbers, got: {refused:?}"
+        )
+        .into());
+    };
+    assert_eq!(scope, IdentityCapacityScope::Server);
+    assert_eq!(limit, 1);
+    assert_eq!(occupied, 2);
+    Ok(())
 }
 
-/// Frozen first-full precedence across the model boundary: the identity
-/// Server scope is exactly full IN model (2 identities against a cap of 2)
-/// while a LATER scope is over-limit (server provenance cap lowered to 1
-/// beneath 2 retained fingerprints). The contract's seven-scope suborder
-/// says the first full scope answers and no later occupancy is disclosed,
-/// so the refusal must be `IdentityCapacityExceeded` scope `Server` with the
-/// identity numbers — never the later provenance scope's.
+/// Lane p0-39 REWRITE of `enrollment_mixed_full_and_over_limit_refuses_the_earlier_full_scope`.
+///
+/// # The model-boundary variant is now UNCONSTRUCTIBLE, and that is a finding
+///
+/// The original played an in-model exactly-full scope (identity Server) off
+/// against a later OVER-LIMIT scope (`ProvenanceServer`, its cap lowered
+/// beneath durable occupancy) and asserted the earlier one answered. Both
+/// halves of that setup are gone: the receipt scopes no longer refuse, and the
+/// only surviving later scope — identity Conversation — cannot be driven
+/// over-limit at all. Lowering `identity_slots` beneath already-minted ordinals
+/// makes the conversation REFUSE TO REPLAY (the protocol's initial-enrollment
+/// slot allocator rejects an ordinal outside `0..I` during restore, long before
+/// stage-8 capacity is consulted), so the state the old pin needed cannot be
+/// reached through any sequence of operations. Measured, not assumed: the
+/// attempt answers `ConversationUnloadable … "durable initial enrollment was
+/// refused during protocol replay"`.
+///
+/// What IS still constructible, and is pinned here, is the in-model half of
+/// the same law: with BOTH identity scopes exactly full, the refusal names the
+/// EARLIER one — Server — and discloses no later occupancy.
 #[test]
-fn enrollment_mixed_full_and_over_limit_refuses_the_earlier_full_scope()
--> Result<(), Box<dyn Error>> {
+fn enrollment_first_full_identity_scope_answers_before_the_later_one() -> Result<(), Box<dyn Error>>
+{
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(81, 1);
-
-    {
-        let store = open_disk_store_for_tests(&data_dir)?;
-        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
-        // Board #37: both fingerprints must be EARNED, or the later
-        // provenance scope would not be over-limit at all and this test would
-        // stop exercising the model boundary it is named for.
-        enroll_proving_provenance(
-            &handler,
-            incarnation,
-            761,
-            [[64; 16], [164; 16], [0xC4; 16]],
-        )?;
-        enroll_proving_provenance(
-            &handler,
-            incarnation,
-            762,
-            [[65; 16], [165; 16], [0xC5; 16]],
-        )?;
-    }
-
-    // RESTART: identity Server exactly full in model, ProvenanceServer
-    // over-limit out of model.
     let store = open_disk_store_for_tests(&data_dir)?;
+    // Two identities, one conversation, and BOTH scopes sized to exactly two:
+    // server and conversation are full together.
     let config = capacity_config(|c| {
         c.max_retired_identity_slots_server = 2;
-        c.max_receipt_provenance_server = 1;
+        c.identity_slots = 2;
     });
     let handler = ProductionParticipantHandler::new(store, config)?;
-    let refused = dispatch(&handler, incarnation, enrollment_request(763, [66; 16]))?;
+
+    enroll(&handler, incarnation, 761, [64; 16])?;
+    enroll(&handler, ConnectionIncarnation::new(81, 2), 761, [65; 16])?;
+    let refused = dispatch(
+        &handler,
+        ConnectionIncarnation::new(81, 3),
+        enrollment_request(761, [66; 16]),
+    )?;
     let ServerValue::IdentityCapacityExceeded(IdentityCapacityExceeded {
         request,
         scope,
@@ -283,45 +257,42 @@ fn enrollment_mixed_full_and_over_limit_refuses_the_earlier_full_scope()
     }) = refused
     else {
         return Err(format!(
-            "the earlier full identity Server scope must answer before the later over-limit \
-             provenance scope, got: {refused:?}"
+            "two full identity scopes must refuse with IdentityCapacityExceeded, got: {refused:?}"
         )
         .into());
     };
-    assert_eq!(request.conversation_id, 763);
-    assert_eq!(scope, IdentityCapacityScope::Server);
+    assert_eq!(request.conversation_id, 761);
+    assert_eq!(
+        scope,
+        IdentityCapacityScope::Server,
+        "the EARLIER scope in the frozen order must answer"
+    );
     assert_eq!(limit, 2);
     assert_eq!(occupied, 2);
     Ok(())
 }
 
-/// Conversation-scope provenance capacity: a second identity in the SAME
-/// conversation refuses with `ProvenanceConversation`, while the same
-/// enrollment on a fresh conversation still admits — the scope is really
-/// per conversation.
+/// Lane p0-39 REWRITE of `enrollment_provenance_conversation_scope_refusal_is_scoped`.
+///
+/// The conversation provenance pool no longer refuses, so the original's
+/// refusal assertion is gone; its second half — that the same enrollment
+/// succeeds against a fresh conversation — is kept and generalised. Both
+/// participants now land, which is the whole point: the second participant of a
+/// conversation is a third party to the first participant's churn.
 #[test]
-fn enrollment_provenance_conversation_scope_refusal_is_scoped() -> Result<(), Box<dyn Error>> {
+fn shared_conversation_provenance_pool_never_refuses_either_participant()
+-> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(74, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    let config = capacity_config(|c| c.max_receipt_provenance_per_conversation = 1);
+    let config = capacity_config(|c| c.receipt_provenance_per_conversation_report_threshold = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
 
     enroll_proving_provenance(&handler, incarnation, 731, [[31; 16], [131; 16], [231; 16]])?;
-    let refused = dispatch(
-        &handler,
-        ConnectionIncarnation::new(74, 2),
-        enrollment_request(731, [32; 16]),
-    )?;
-    assert_enrollment_receipt_refusal(
-        &refused,
-        731,
-        EnrollmentReceiptCapacityScope::ProvenanceConversation,
-        1,
-        1,
-    )?;
-    // The identical enrollment against a FRESH conversation admits.
-    enroll(&handler, ConnectionIncarnation::new(74, 2), 732, [32; 16])?;
+    // Same conversation, past the old cap.
+    enroll(&handler, ConnectionIncarnation::new(74, 2), 731, [32; 16])?;
+    // And a fresh conversation, exactly as before.
+    enroll(&handler, ConnectionIncarnation::new(74, 3), 732, [33; 16])?;
     Ok(())
 }

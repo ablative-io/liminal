@@ -1399,10 +1399,7 @@ fn initial_frontier_capacity() -> EnrollmentCapacityCounters {
     EnrollmentCapacityCounters::new(
         initial_frontier_counter(4, 0),
         initial_frontier_counter(4, 0),
-        initial_frontier_counter(4, 0),
         initial_frontier_fresh_counter(4),
-        initial_frontier_counter(4, 0),
-        initial_frontier_counter(4, 0),
         initial_frontier_fresh_counter(4),
     )
 }
