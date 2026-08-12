@@ -42,7 +42,7 @@ liminal-server = { version = "0.6.1", path = "crates/liminal-server" }
 
 anyhow = "1"
 async-trait = "0.1"
-beamr = { version = "0.16.3", features = ["readiness"] }
+beamr = { version = "0.17.1", features = ["readiness"] }
 blake3 = "1"
 chrono = "0.4.45"
 clap = "4"
