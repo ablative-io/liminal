@@ -1,0 +1,67 @@
+   Compiling fnv v1.0.7
+   Compiling getrandom v0.3.4
+   Compiling bit-vec v0.8.0
+   Compiling gimli v0.33.0
+   Compiling bit-set v0.8.0
+   Compiling fancy-regex v0.18.0
+   Compiling ahash v0.8.12
+   Compiling referencing v0.46.5
+   Compiling jsonschema v0.46.5
+   Compiling cranelift-codegen v0.131.2
+   Compiling cranelift-native v0.131.2
+   Compiling cranelift-module v0.131.2
+   Compiling cranelift-frontend v0.131.2
+   Compiling cranelift-jit v0.131.2
+   Compiling beamr v0.16.3
+   Compiling haematite v0.8.1
+   Compiling liminal-rs v0.5.5 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-39/crates/liminal)
+   Compiling liminal-server v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-39/crates/liminal-server)
+   Compiling liminal-sdk v0.6.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/p0-39/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 54.82s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-5117af88e6fe0556)
+
+running 7 tests
+test server::participant::production::tests_p0_39_capacity_hybrid::full_participant_live_receipt_window_never_wedges_its_own_rotation ... FAILED
+test server::participant::production::tests_p0_39_capacity_hybrid::shared_conversation_provenance_churn_never_refuses_a_second_participant ... FAILED
+test server::participant::production::tests_p0_39_capacity_hybrid::shared_server_live_receipt_churn_never_refuses_a_third_party_enrollment ... FAILED
+test server::participant::production::tests_p0_39_capacity_hybrid::full_participant_provenance_window_lands_on_cold_replay ... FAILED
+test server::participant::production::tests_p0_39_capacity_hybrid::full_participant_provenance_window_displaces_and_the_next_rotation_lands ... FAILED
+test server::participant::production::tests_p0_39_capacity_hybrid::shared_server_provenance_churn_never_refuses_a_third_party_enrollment ... FAILED
+test server::participant::production::tests_p0_39_capacity_hybrid::shared_server_provenance_churn_never_refuses_a_third_party_attach ... FAILED
+
+failures:
+
+---- server::participant::production::tests_p0_39_capacity_hybrid::full_participant_live_receipt_window_never_wedges_its_own_rotation stdout ----
+Error: "no configured number may refuse an honest arrival: the first rotation at a full participant live-receipt window met CredentialAttach { request: AttachEnvelope { conversation_id: 3903, participant_id: 0, capability_generation: Generation(1), attach_attempt_token: AttachAttemptToken([72, 72, 72, 72, 72, 72, 72, 72, 72, 72, 72, 72, 72, 72, 72, 72]), accept_marker_delivery_seq: None }, scope: LiveReceiptParticipant, limit: 1, occupied: 1 }"
+
+---- server::participant::production::tests_p0_39_capacity_hybrid::shared_conversation_provenance_churn_never_refuses_a_second_participant stdout ----
+Error: "no configured number may refuse an honest arrival: a second participant against a full shared conversation provenance pool met Enrollment { request: EnrollmentEnvelope { conversation_id: 3908, enrollment_token: EnrollmentToken([82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82]) }, scope: ProvenanceConversation, limit: 1, occupied: 1 }"
+
+---- server::participant::production::tests_p0_39_capacity_hybrid::shared_server_live_receipt_churn_never_refuses_a_third_party_enrollment stdout ----
+Error: "no configured number may refuse an honest arrival: an honest third-party enrollment against a full shared live-receipt pool met Enrollment { request: EnrollmentEnvelope { conversation_id: 3907, enrollment_token: EnrollmentToken([78, 78, 78, 78, 78, 78, 78, 78, 78, 78, 78, 78, 78, 78, 78, 78]) }, scope: LiveReceiptServer, limit: 1, occupied: 1 }"
+
+---- server::participant::production::tests_p0_39_capacity_hybrid::full_participant_provenance_window_lands_on_cold_replay stdout ----
+Error: "no configured number may refuse an honest arrival: the reconnecting attach at a replayed full participant window met CredentialAttach { request: AttachEnvelope { conversation_id: 3902, participant_id: 0, capability_generation: Generation(3), attach_attempt_token: AttachAttemptToken([69, 69, 69, 69, 69, 69, 69, 69, 69, 69, 69, 69, 69, 69, 69, 69]), accept_marker_delivery_seq: None }, scope: ProvenanceParticipant, limit: 2, occupied: 2 }"
+
+---- server::participant::production::tests_p0_39_capacity_hybrid::full_participant_provenance_window_displaces_and_the_next_rotation_lands stdout ----
+Error: "no configured number may refuse an honest arrival: the (N+1)th rotation at a full participant window met CredentialAttach { request: AttachEnvelope { conversation_id: 3901, participant_id: 0, capability_generation: Generation(3), attach_attempt_token: AttachAttemptToken([63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63]), accept_marker_delivery_seq: None }, scope: ProvenanceParticipant, limit: 2, occupied: 2 }"
+
+---- server::participant::production::tests_p0_39_capacity_hybrid::shared_server_provenance_churn_never_refuses_a_third_party_enrollment stdout ----
+Error: "no configured number may refuse an honest arrival: an honest third-party enrollment against a full shared provenance pool met Enrollment { request: EnrollmentEnvelope { conversation_id: 3905, enrollment_token: EnrollmentToken([76, 76, 76, 76, 76, 76, 76, 76, 76, 76, 76, 76, 76, 76, 76, 76]) }, scope: ProvenanceServer, limit: 1, occupied: 1 }"
+
+---- server::participant::production::tests_p0_39_capacity_hybrid::shared_server_provenance_churn_never_refuses_a_third_party_attach stdout ----
+Error: "no configured number may refuse an honest arrival: a reconnecting attach against a shared provenance pool another conversation filled met CredentialAttach { request: AttachEnvelope { conversation_id: 3909, participant_id: 0, capability_generation: Generation(2), attach_attempt_token: AttachAttemptToken([89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89, 89]), accept_marker_delivery_seq: None }, scope: ProvenanceServer, limit: 1, occupied: 2 }"
+
+
+failures:
+    server::participant::production::tests_p0_39_capacity_hybrid::full_participant_live_receipt_window_never_wedges_its_own_rotation
+    server::participant::production::tests_p0_39_capacity_hybrid::full_participant_provenance_window_displaces_and_the_next_rotation_lands
+    server::participant::production::tests_p0_39_capacity_hybrid::full_participant_provenance_window_lands_on_cold_replay
+    server::participant::production::tests_p0_39_capacity_hybrid::shared_conversation_provenance_churn_never_refuses_a_second_participant
+    server::participant::production::tests_p0_39_capacity_hybrid::shared_server_live_receipt_churn_never_refuses_a_third_party_enrollment
+    server::participant::production::tests_p0_39_capacity_hybrid::shared_server_provenance_churn_never_refuses_a_third_party_attach
+    server::participant::production::tests_p0_39_capacity_hybrid::shared_server_provenance_churn_never_refuses_a_third_party_enrollment
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 697 filtered out; finished in 2.35s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
