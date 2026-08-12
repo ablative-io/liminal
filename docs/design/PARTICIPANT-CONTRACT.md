@@ -678,15 +678,29 @@ wire-visible retry story. It is on the critical path of the extension
 program's proving run (a crash-restart client re-attaching during marker
 settlement meets this signature; DESIGN-EXTENSIONS.md §3).**
 
-**The verified gap (measured at `ATTACH-SILENCE-14.md@6c466e9`, standing at
-`c3c7c7f`):** `LiveFrontierError::Precedence` — *"a mandatory
-immutable/recovery transition has precedence"*, lane occupancy, elsewhere
-ruled *"a designed structural boundary … not corruption"* — reaches two
-sinks that both bare-close today, measured at this tree rather than carried
-from the lane doc's rev: the `apply_attach_frontier` flatten
-(`ops_attach.rs:518-525@c3c7c7f`, "attach frontier transition failed") and
-its detach twin inside `detach_commit`
-(`ops_session.rs:237-240@c3c7c7f`, "detach frontier transition failed"). `Precedence` has THREE clearing
+**The verified gap (lane doc `ATTACH-SILENCE-14.md`, landed at `25d79f3`;
+sites re-measured standing at `c3c7c7f`):** `LiveFrontierError::Precedence`
+— *"a mandatory immutable/recovery transition has precedence"*, lane
+occupancy, elsewhere ruled *"a designed structural boundary … not
+corruption"* — is raised by ONE shared seam, `apply_live_transition`'s
+immutable-candidate/armed-recovery guard
+(`claim_frontier.rs:2397-2409@c3c7c7f`), reached through exactly THREE
+wrappers (`apply_enrollment_frontier`, `apply_attach_frontier`,
+`apply_detach_frontier` — `live_frontier.rs:1113/:1165/:1268@c3c7c7f`),
+and all three call sites flatten it into the same bare-close shape today:
+the `apply_attach_frontier` flatten (`ops_attach.rs:518-525@c3c7c7f`,
+"attach frontier transition failed"), its detach twin inside
+`detach_commit` (`ops_session.rs:237-240@c3c7c7f`), and the subsequent-
+enrollment flatten (`ops_enroll.rs:379-385@c3c7c7f`, "subsequent
+enrollment frontier transition failed" — initial enrollment is trivially
+safe, an empty conversation holds no candidates; a SUBSEQUENT enrollment
+during marker settlement or armed recovery is the same family as the field
+signature). The first proposal enumerated two of the three; the third was
+found by the reviewer-of-record's census, and the law below therefore
+attaches to the SEAM, not to a call-site list: **any wrapper of
+`apply_live_transition`, present or future, inherits this law**, so a
+fourth wrapper cannot re-open the gap by silently falling outside an
+enumeration. `Precedence` has THREE clearing
 conditions with no shared retry story, and the frozen R-D1 register admits
 no row for two of them while its own text forbids improvising one (*"no
 generic 'proof/admission refusal' exists"*). Additionally the refusal is
@@ -700,11 +714,14 @@ answer genuinely corrupt state "retry later" (`ATTACH-SILENCE-14.md`).
 **The law, per clearing condition:**
 
 1. **Binding-terminal candidate (observer-blocked).** The existing
-   `ObserverBackpressure` row IS the lawful answer at both sites — the
+   `ObserverBackpressure` row IS the lawful answer at all three sites — the
    blocked resource is hard-observer progress, the wake is the already-pushed
    `0x0200 ObserverProgressed`, and the retry discipline is the register's
-   existing "retry once after matching `ObserverProgressed`". This pairing
-   is hereby declared lawful for the two named sites; no new wire surface.
+   existing "retry once after matching `ObserverProgressed`". The register
+   already carries this row for BOTH operation families (credential attach
+   and enrollment attach — the enrollment-attach `ObserverBackpressure` row
+   with `AwaitingObserverProgress` persistence), so extending to the
+   enrollment wrapper adds no new wire surface anywhere in this condition.
 
 2. **Marker candidate awaiting its drain.** New typed refusal
    `MarkerSettlementBackpressure { conversation_id, refused_epoch }` paired
@@ -712,9 +729,10 @@ answer genuinely corrupt state "retry later" (`ATTACH-SILENCE-14.md`).
    refused_epoch }`. The clearing write is ANOTHER participant's record
    admission (the `RecordAdmissionDecision::DrainFirst` arm,
    `ops_frontier.rs:225@c3c7c7f`) or boot drain — a
-   refused ATTACH client holds no binding and therefore receives no
-   `ParticipantDelivery`, so without this push the only honest client
-   behavior would be polling, which the standing no-polling law forbids
+   refused attach or subsequent-enrollment client holds no binding and
+   therefore receives no `ParticipantDelivery`, so without this push the
+   only honest client behavior would be polling, which the standing
+   no-polling law forbids
    ("redesign it to be TOLD"). The push is CONNECTION-SCOPED: delivered
    exactly to connections that received the refusal in this process
    lifetime, mirroring `ObserverProgressed`'s connection-level delivery.
