@@ -1,0 +1,286 @@
+# Canonical participant-wire golden trace -- annotated hexdump
+# Direction markers: C->S is client-to-server, S->C is server-to-client.
+# `offset` is the byte offset of the frame within its connection+direction stream.
+# `~` marks a run-variable byte; `.` marks a structural byte a foreign
+# implementation must reproduce verbatim.
+
+===== connection: admitter =====
+
+[C->S #00 Connect offset=0 len=22 outer=0x01 discriminant=--]
+  decoded: Connect { flags: 0, min_version: ProtocolVersion { major: 1, minor: 0 }, max_version: ProtocolVersion { major: 1, minor: 0 }, auth_token: [] }
+  0000  01 00 00 00 00 00 00 00 00 0c 00 01 00 00 00 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00                               
+        .. .. .. .. .. ..                               
+
+[S->C #00 ConnectAck offset=0 len=18 outer=0x02 discriminant=--]
+  decoded: ConnectAck { flags: 0, selected_version: ProtocolVersion { major: 1, minor: 0 }, capabilities: 1 }
+  0000  02 00 00 00 00 00 00 00 00 08 00 01 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 01                                           
+        .. ..                                           
+
+[C->S #01 ClientRequest::EnrollmentRequest offset=22 len=40 outer=0x1A discriminant=0x0001]
+  decoded: Enrollment(EnrollmentRequest { conversation_id: 105, enrollment_token: EnrollmentToken([105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105]) })
+  0000  1a 00 00 00 00 00 00 00 00 1e 00 01 00 00 00 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 69 69 69 69 69 69 69 69 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  69 69 69 69 69 69 69 69                         
+        .. .. .. .. .. .. .. ..                         
+
+[S->C #01 ServerValue::EnrollBound offset=18 len=156 outer=0x1A discriminant=0x010A]
+  decoded: ServerValue(EnrollBound(EnrollBound { conversation_id: 105, token: EnrollmentToken([105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105, 105]), participant_id: 0, attach_secret: AttachSecret([115, 31, 33, 98, 219, 197, 37, 117, 229, 95, 214, 71, 49, 142, 8, 119, 21, 51, 6, 191, 58, 58, 14, 34, 4, 247, 20, 17, 22, 251, 100, 223]), origin_binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 0 }, capability_generation: Generation(1) }, receipt_expires_at: 1786554580330, provenance_expires_at: 1786555120330 }))
+  run-variable: [59..91) attach_secret[0]
+  run-variable: [124..140) wall_clock_deadline[0]
+  run-variable: [140..156) wall_clock_deadline[1]
+  0000  1a 00 00 00 00 00 00 00 00 92 00 01 00 00 01 0a 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 01 00 00 00 00 00 00 00 69 69 69 69 69 69 69 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  69 69 69 69 69 69 69 69 69 69 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  00 00 00 00 00 00 00 00 00 00 01 73 1f 21 62 db 
+        .. .. .. .. .. .. .. .. .. .. .. ~~ ~~ ~~ ~~ ~~ 
+  0040  c5 25 75 e5 5f d6 47 31 8e 08 77 15 33 06 bf 3a 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  0050  3a 0e 22 04 f7 14 11 16 fb 64 df 00 00 00 00 00 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ .. .. .. .. .. 
+  0060  00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0070  00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. ~~ ~~ ~~ ~~ 
+  0080  00 00 00 00 00 00 01 9f f6 f3 7d 6a 00 00 00 00 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  0090  00 00 00 00 00 00 01 9f f6 fb ba ca             
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~             
+
+[C->S #02 ClientRequest::CredentialAttachRequest offset=62 len=89 outer=0x1A discriminant=0x0002]
+  decoded: CredentialAttach(CredentialAttachRequest { conversation_id: 105, participant_id: 0, capability_generation: Generation(1), attach_secret: AttachSecret([115, 31, 33, 98, 219, 197, 37, 117, 229, 95, 214, 71, 49, 142, 8, 119, 21, 51, 6, 191, 58, 58, 14, 34, 4, 247, 20, 17, 22, 251, 100, 223]), attach_attempt_token: AttachAttemptToken([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), accept_marker_delivery_seq: None })
+  run-variable: [40..72) attach_secret[0]
+  0000  1a 00 00 00 00 00 00 00 00 4f 00 01 00 00 00 02 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 00 00 00 00 00 00 01 73 1f 21 62 db c5 25 75 
+        .. .. .. .. .. .. .. .. ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  0030  e5 5f d6 47 31 8e 08 77 15 33 06 bf 3a 3a 0e 22 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  0040  04 f7 14 11 16 fb 64 df 6a 6a 6a 6a 6a 6a 6a 6a 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ .. .. .. .. .. .. .. .. 
+  0050  6a 6a 6a 6a 6a 6a 6a 6a 00                      
+        .. .. .. .. .. .. .. .. ..                      
+
+[S->C #02 ServerPush::ParticipantDelivery offset=174 len=66 outer=0x1A discriminant=0x0201]
+  decoded: ServerPush(ParticipantDelivery(ParticipantDelivery { conversation_id: 105, delivery_seq: 2, record: Attached { affected_participant_id: 1, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(1) } } }))
+  0000  1a 00 00 00 00 00 00 00 00 38 00 01 00 00 02 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 00 00 00 00 00 00 00 02 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 01 00 00 00 00 00 00 00 01 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  00 01 00 00 00 00 00 00 00 01 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0040  00 01                                           
+        .. ..                                           
+
+[S->C #03 ServerValue::AttachBound offset=240 len=164 outer=0x1A discriminant=0x0111]
+  decoded: ServerValue(AttachBound(AttachBound { conversation_id: 105, token: AttachAttemptToken([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), participant_id: 0, request_generation: Generation(1), attach_secret: AttachSecret([250, 238, 223, 179, 14, 36, 43, 40, 197, 81, 16, 128, 2, 43, 197, 173, 59, 237, 131, 47, 97, 254, 220, 254, 30, 57, 82, 59, 53, 216, 135, 188]), origin_binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 0 }, capability_generation: Generation(2) }, persisted_cursor: 0, accepted_marker_delivery_seq: None, receipt_expires_at: 1786554580570, provenance_expires_at: 1786555120570 }))
+  run-variable: [67..99) attach_secret[2]
+  run-variable: [132..148) wall_clock_deadline[4]
+  run-variable: [148..164) wall_clock_deadline[5]
+  0000  1a 00 00 00 00 00 00 00 00 9a 00 01 00 00 01 11 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 02 00 00 00 00 00 00 00 69 6a 6a 6a 6a 6a 6a 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  6a 6a 6a 6a 6a 6a 6a 6a 6a 6a 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  00 00 01 00 00 00 00 00 00 00 01 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0040  00 00 02 fa ee df b3 0e 24 2b 28 c5 51 10 80 02 
+        .. .. .. ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  0050  2b c5 ad 3b ed 83 2f 61 fe dc fe 1e 39 52 3b 35 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  0060  d8 87 bc 00 00 00 00 00 00 00 01 00 00 00 00 00 
+        ~~ ~~ ~~ .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0070  00 00 00 00 00 00 00 00 00 00 02 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0080  00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 9f 
+        .. .. .. .. ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  0090  f6 f3 7e 5a 00 00 00 00 00 00 00 00 00 00 01 9f 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  00a0  f6 fb bb ba                                     
+        ~~ ~~ ~~ ~~                                     
+
+[C->S #03 ClientRequest::RecordAdmission offset=151 len=78 outer=0x1A discriminant=0x0007]
+  decoded: RecordAdmission(RecordAdmission { conversation_id: 105, participant_id: 0, capability_generation: Generation(2), record_admission_attempt_token: RecordAdmissionAttemptToken([107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107]), payload: [103, 111, 108, 100, 101, 110, 45, 116, 114, 97, 99, 101, 45, 112, 48, 45, 54, 57] })
+  0000  1a 00 00 00 00 00 00 00 00 44 00 01 00 00 00 07 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 00 00 00 00 00 00 02 6b 6b 6b 6b 6b 6b 6b 6b 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  6b 6b 6b 6b 6b 6b 6b 6b 00 00 00 12 67 6f 6c 64 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0040  65 6e 2d 74 72 61 63 65 2d 70 30 2d 36 39       
+        .. .. .. .. .. .. .. .. .. .. .. .. .. ..       
+
+[S->C #04 ServerPush::ParticipantDelivery offset=404 len=66 outer=0x1A discriminant=0x0201]
+  decoded: ServerPush(ParticipantDelivery(ParticipantDelivery { conversation_id: 105, delivery_seq: 2, record: Attached { affected_participant_id: 1, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(1) } } }))
+  0000  1a 00 00 00 00 00 00 00 00 38 00 01 00 00 02 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 00 00 00 00 00 00 00 02 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 01 00 00 00 00 00 00 00 01 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  00 01 00 00 00 00 00 00 00 01 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0040  00 01                                           
+        .. ..                                           
+
+[S->C #05 ServerValue::RecordCommitted offset=470 len=74 outer=0x1A discriminant=0x011F]
+  decoded: ServerValue(RecordCommitted(RecordCommitted { request: RecordAdmissionEnvelope { conversation_id: 105, participant_id: 0, capability_generation: Generation(2), record_admission_attempt_token: RecordAdmissionAttemptToken([107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107, 107]) }, delivery_seq: 5 }))
+  0000  1a 00 00 00 00 00 00 00 00 40 00 01 00 00 01 1f 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 07 00 00 00 00 00 00 00 69 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 00 00 00 00 00 00 00 00 02 6b 6b 6b 6b 6b 6b 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0040  00 00 00 00 00 00 00 00 00 05                   
+        .. .. .. .. .. .. .. .. .. ..                   
+
+[C->S #04 ClientRequest::DetachRequest offset=229 len=56 outer=0x1A discriminant=0x0003]
+  decoded: Detach(DetachRequest { conversation_id: 105, participant_id: 0, capability_generation: Generation(2), detach_attempt_token: DetachAttemptToken([108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108]) })
+  0000  1a 00 00 00 00 00 00 00 00 2e 00 01 00 00 00 03 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 00 00 00 00 00 00 02 6c 6c 6c 6c 6c 6c 6c 6c 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  6c 6c 6c 6c 6c 6c 6c 6c                         
+        .. .. .. .. .. .. .. ..                         
+
+[S->C #06 ServerValue::DetachCommitted offset=544 len=90 outer=0x1A discriminant=0x0117]
+  decoded: ServerValue(DetachCommitted(DetachCommitted { conversation_id: 105, participant_id: 0, detach_attempt_token: DetachAttemptToken([108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108, 108]), committed_binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 0 }, capability_generation: Generation(2) }, detached_delivery_seq: 6 }))
+  0000  1a 00 00 00 00 00 00 00 00 50 00 01 00 00 01 17 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 03 00 00 00 00 00 00 00 69 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 00 00 00 00 00 00 00 00 02 6c 6c 6c 6c 6c 6c 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  6c 6c 6c 6c 6c 6c 6c 6c 6c 6c 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0040  00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0050  00 02 00 00 00 00 00 00 00 06                   
+        .. .. .. .. .. .. .. .. .. ..                   
+
+===== connection: observer =====
+
+[C->S #00 Connect offset=0 len=22 outer=0x01 discriminant=--]
+  decoded: Connect { flags: 0, min_version: ProtocolVersion { major: 1, minor: 0 }, max_version: ProtocolVersion { major: 1, minor: 0 }, auth_token: [] }
+  0000  01 00 00 00 00 00 00 00 00 0c 00 01 00 00 00 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00                               
+        .. .. .. .. .. ..                               
+
+[S->C #00 ConnectAck offset=0 len=18 outer=0x02 discriminant=--]
+  decoded: ConnectAck { flags: 0, selected_version: ProtocolVersion { major: 1, minor: 0 }, capabilities: 1 }
+  0000  02 00 00 00 00 00 00 00 00 08 00 01 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 01                                           
+        .. ..                                           
+
+[C->S #01 ClientRequest::EnrollmentRequest offset=22 len=40 outer=0x1A discriminant=0x0001]
+  decoded: Enrollment(EnrollmentRequest { conversation_id: 105, enrollment_token: EnrollmentToken([110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110]) })
+  0000  1a 00 00 00 00 00 00 00 00 1e 00 01 00 00 00 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 6e 6e 6e 6e 6e 6e 6e 6e 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  6e 6e 6e 6e 6e 6e 6e 6e                         
+        .. .. .. .. .. .. .. ..                         
+
+[S->C #01 ServerValue::EnrollBound offset=18 len=156 outer=0x1A discriminant=0x010A]
+  decoded: ServerValue(EnrollBound(EnrollBound { conversation_id: 105, token: EnrollmentToken([110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110]), participant_id: 1, attach_secret: AttachSecret([69, 159, 236, 132, 71, 246, 102, 196, 199, 105, 93, 201, 0, 154, 233, 114, 32, 63, 52, 83, 22, 199, 127, 65, 6, 50, 102, 38, 88, 17, 212, 12]), origin_binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(1) }, receipt_expires_at: 1786554580516, provenance_expires_at: 1786555120516 }))
+  run-variable: [59..91) attach_secret[1]
+  run-variable: [124..140) wall_clock_deadline[2]
+  run-variable: [140..156) wall_clock_deadline[3]
+  0000  1a 00 00 00 00 00 00 00 00 92 00 01 00 00 01 0a 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 01 00 00 00 00 00 00 00 69 6e 6e 6e 6e 6e 6e 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  6e 6e 6e 6e 6e 6e 6e 6e 6e 6e 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  00 01 00 00 00 00 00 00 00 00 01 45 9f ec 84 47 
+        .. .. .. .. .. .. .. .. .. .. .. ~~ ~~ ~~ ~~ ~~ 
+  0040  f6 66 c4 c7 69 5d c9 00 9a e9 72 20 3f 34 53 16 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  0050  c7 7f 41 06 32 66 26 58 11 d4 0c 00 00 00 00 00 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ .. .. .. .. .. 
+  0060  00 00 01 00 00 00 00 00 00 00 01 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0070  00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. ~~ ~~ ~~ ~~ 
+  0080  00 00 00 00 00 00 01 9f f6 f3 7e 24 00 00 00 00 
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ 
+  0090  00 00 00 00 00 00 01 9f f6 fb bb 84             
+        ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~ ~~             
+
+[S->C #02 ServerPush::ParticipantDelivery offset=174 len=68 outer=0x1A discriminant=0x0201]
+  decoded: ServerPush(ParticipantDelivery(ParticipantDelivery { conversation_id: 105, delivery_seq: 3, record: Detached { affected_participant_id: 0, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 0 }, capability_generation: Generation(1) }, cause: Superseded } }))
+  0000  1a 00 00 00 00 00 00 00 00 3a 00 01 00 00 02 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 00 00 00 00 00 00 00 03 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0040  00 01 00 05                                     
+        .. .. .. ..                                     
+
+[S->C #03 ServerPush::ParticipantDelivery offset=242 len=66 outer=0x1A discriminant=0x0201]
+  decoded: ServerPush(ParticipantDelivery(ParticipantDelivery { conversation_id: 105, delivery_seq: 4, record: Attached { affected_participant_id: 0, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 0 }, capability_generation: Generation(2) } } }))
+  0000  1a 00 00 00 00 00 00 00 00 38 00 01 00 00 02 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 00 00 00 00 00 00 00 04 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0040  00 02                                           
+        .. ..                                           
+
+[S->C #04 ServerPush::ParticipantDelivery offset=308 len=64 outer=0x1A discriminant=0x0201]
+  decoded: ServerPush(ParticipantDelivery(ParticipantDelivery { conversation_id: 105, delivery_seq: 5, record: OrdinaryRecord { sender_participant_id: 0, payload: [103, 111, 108, 100, 101, 110, 45, 116, 114, 97, 99, 101, 45, 112, 48, 45, 54, 57] } }))
+  0000  1a 00 00 00 00 00 00 00 00 36 00 01 00 00 02 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 00 00 00 00 00 00 00 05 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 00 00 00 00 00 00 00 00 00 00 00 00 12 67 6f 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  6c 64 65 6e 2d 74 72 61 63 65 2d 70 30 2d 36 39 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+
+[C->S #02 ClientRequest::ParticipantAck offset=62 len=48 outer=0x1A discriminant=0x0004]
+  decoded: ParticipantAck(ParticipantAck { conversation_id: 105, participant_id: 1, capability_generation: Generation(1), through_seq: 5 })
+  0000  1a 00 00 00 00 00 00 00 00 26 00 01 00 00 00 04 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 00 00 00 00 00 00 69 00 00 00 00 00 00 00 01 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 05 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+
+[S->C #05 ServerValue::AckCommitted offset=372 len=58 outer=0x1A discriminant=0x0119]
+  decoded: ServerValue(AckCommitted(AckCommitted { request: ParticipantAckEnvelope { conversation_id: 105, participant_id: 1, capability_generation: Generation(1), through_seq: 5 } }))
+  0000  1a 00 00 00 00 00 00 00 00 30 00 01 00 00 01 19 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0010  00 04 00 00 00 00 00 00 00 69 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0020  00 01 00 00 00 00 00 00 00 01 00 00 00 00 00 00 
+        .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. .. 
+  0030  00 05 00 00 00 00 00 00 00 05                   
+        .. .. .. .. .. .. .. .. .. ..                   
