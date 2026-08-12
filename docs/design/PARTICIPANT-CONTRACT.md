@@ -667,7 +667,17 @@ participant silence permanent.
 ### 0.16 R18 amendment A5 — lawful presentation for the frontier-Precedence refusal family (2026-08-12)
 
 **Status: PROPOSED, authored by the liminal domain owner (Hermes Crumpet);
-awaiting the two-key gate (reviewer-of-record + independent second key).
+key 1 of 2 TURNED — reviewer-of-record key granted by Waffles the Terrible
+against r2 = `f22a3a5` (2026-08-12, meridian record `1798b396`, verified at
+his hands: citation re-key, seam attachment with inheritance sentence, all
+three flatten sites at his census's own line cites, and condition 1's
+zero-new-surface claim confirmed at contract's enrollment-attach
+`ObserverBackpressure` row). His ruling on the initial-enrollment premise,
+for the record: argued suffices — the seam attachment made it
+non-load-bearing, since a wrong premise now lands INSIDE the law (a lawful
+row) instead of re-opening the gap (a bare close); a premise whose failure
+lands inside the law needs no pin. Awaiting the independent second key
+(Cally Ray when her park permits; Vesper Lynd as alternate past a day).
 This is the contract surface board #14's lane report explicitly blocked on
 (`presented_refusal.rs`'s `detach()` constructor sits `#[expect(dead_code)]`
 naming exactly this amendment as its unblocking condition, `presented_refusal.rs:91@c3c7c7f`),
