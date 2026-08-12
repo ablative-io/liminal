@@ -1067,10 +1067,10 @@ mod tests {
             wire_frame_limit: 65_536,
             attach_receipt_ttl_ms: 60_000,
             receipt_provenance_ttl_ms: 600_000,
-            max_live_attach_receipts_server: 1_024,
+            live_receipt_server_report_threshold: 1_024,
             max_live_attach_receipts_per_participant: 8,
-            max_receipt_provenance_server: 4_096,
-            max_receipt_provenance_per_conversation: 256,
+            receipt_provenance_server_report_threshold: 4_096,
+            receipt_provenance_per_conversation_report_threshold: 256,
             max_receipt_provenance_per_participant: 64,
             max_retired_identity_slots_server: 1_024,
             identity_slots: 4,
@@ -1117,18 +1117,21 @@ mod tests {
             ("receipt_provenance_ttl_ms", |p| {
                 p.receipt_provenance_ttl_ms = 0;
             }),
-            ("max_live_attach_receipts_server", |p| {
-                p.max_live_attach_receipts_server = 0;
+            ("live_receipt_server_report_threshold", |p| {
+                p.live_receipt_server_report_threshold = 0;
             }),
             ("max_live_attach_receipts_per_participant", |p| {
                 p.max_live_attach_receipts_per_participant = 0;
             }),
-            ("max_receipt_provenance_server", |p| {
-                p.max_receipt_provenance_server = 0;
+            ("receipt_provenance_server_report_threshold", |p| {
+                p.receipt_provenance_server_report_threshold = 0;
             }),
-            ("max_receipt_provenance_per_conversation", |p| {
-                p.max_receipt_provenance_per_conversation = 0;
-            }),
+            (
+                "receipt_provenance_per_conversation_report_threshold",
+                |p| {
+                    p.receipt_provenance_per_conversation_report_threshold = 0;
+                },
+            ),
             ("max_receipt_provenance_per_participant", |p| {
                 p.max_receipt_provenance_per_participant = 0;
             }),

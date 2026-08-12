@@ -43,13 +43,14 @@ use crate::server::participant::{
 };
 
 use super::ProductionParticipantHandler;
+use super::barrier::ReceiptCapacityLimits;
 use super::boot_drain::BootDrainVerdict;
 use super::handler::LogAppender;
-use super::outbox_log::OutboxLog;
 use super::log::{
     DecodedStoredOperation, OperationLog, OperationLogError, StoredOperation,
     StoredTerminalDisposition,
 };
+use super::outbox_log::OutboxLog;
 use super::state::{ConversationAuthority, DurableAppend};
 use super::tests::test_participant_config;
 use super::tests_w1b_pending_died_restart::pending_restart_fixture;
@@ -396,7 +397,10 @@ fn a_genesis_only_conversation_still_enrolls_as_ordinary_flow() -> Result<(), Bo
             outbox_log: &outbox_log,
             outstanding_extension_rows: std::cell::Cell::new(0),
         };
-        let mut authority = ConversationAuthority::empty(GENESIS_ONLY);
+        let mut authority = ConversationAuthority::empty(
+            GENESIS_ONLY,
+            ReceiptCapacityLimits::from_config(&test_participant_config()),
+        );
         authority.ensure_genesis(&appender)?;
         if authority.next_log_sequence != 1 {
             return Err("the genesis-only cut appended more than the genesis row".into());

@@ -6,8 +6,7 @@ use liminal_protocol::lifecycle::{
     ReceiptDeadlines, select_enrollment_capacity,
 };
 use liminal_protocol::wire::{
-    EnrollmentReceiptCapacityScope, EnrollmentRequest, EnrollmentResponse,
-    IdentityCapacityExceeded, IdentityCapacityScope,
+    EnrollmentRequest, EnrollmentResponse, IdentityCapacityExceeded, IdentityCapacityScope,
 };
 
 use super::barrier::OperationFacts;
@@ -34,10 +33,12 @@ impl ConversationAuthority {
     {
         let now = u128::from(operation_facts.now_ms);
         // Request-time expiry of this conversation's retained fingerprints
-        // before their occupancy is counted.
+        // before their occupancy is observed (contract R-C0: never a sweep).
         self.prune_expired_provenance(now);
         let identity_conversation_occupied = self.next_participant;
-        let provenance_conversation_occupied = self.provenance_occupancy(now)?;
+        // The conversation provenance pool is a TRIPWIRE now, not a gate: this
+        // occupancy is observed and reported, and refuses nothing.
+        self.observe_conversation_provenance_pool(now)?;
         let token = request.enrollment_token.into_bytes();
         let effects = ReservationEffects {
             conversation_id: self.conversation_id,
@@ -60,13 +61,13 @@ impl ConversationAuthority {
                 token,
             }],
         };
-        server_capacity.admit(now, effects, |server| {
+        let tripwires = operation_facts.receipt_limits.shared_pool_tripwires;
+        server_capacity.admit(now, tripwires, effects, |server| {
             let counters = match enrollment_scope_counters(
                 request,
                 operation_facts,
                 server,
                 identity_conversation_occupied,
-                provenance_conversation_occupied,
             )? {
                 Ok(counters) => counters,
                 Err(response) => return Ok(Stage8Choice::Refuse(response)),
@@ -95,95 +96,65 @@ fn fresh_participant_counter(
     })
 }
 
-/// One enrollment stage-8 scope's refusal shape in the frozen order.
-#[derive(Clone, Copy)]
-enum EnrollmentScope {
-    /// `IdentityCapacityExceeded` with the named identity scope.
-    Identity(IdentityCapacityScope),
-    /// `ReceiptCapacityExceeded` with the named receipt/provenance scope.
-    Receipt(EnrollmentReceiptCapacityScope),
-}
-
-/// Binds one refusing enrollment scope to its exact typed wire row.
-const fn enrollment_scope_refusal(
+/// Binds one refusing identity scope to its exact typed wire row.
+const fn enrollment_identity_refusal(
     request: &EnrollmentRequest,
-    scope: EnrollmentScope,
+    scope: IdentityCapacityScope,
     limit: u64,
     occupied: u64,
 ) -> EnrollmentResponse {
-    match scope {
-        EnrollmentScope::Identity(scope) => {
-            EnrollmentResponse::identity_capacity_exceeded(IdentityCapacityExceeded {
-                request: enrollment_envelope(request),
-                scope,
-                limit,
-                occupied,
-            })
-        }
-        EnrollmentScope::Receipt(scope) => EnrollmentResponse::receipt_capacity_exceeded(
-            enrollment_envelope(request),
-            scope,
-            limit,
-            occupied,
-        ),
-    }
+    EnrollmentResponse::identity_capacity_exceeded(IdentityCapacityExceeded {
+        request: enrollment_envelope(request),
+        scope,
+        limit,
+        occupied,
+    })
 }
 
-/// Builds enrollment's five refusable stage-8 scope counters in the frozen
-/// order (identity Server, identity Conversation, `LiveReceiptServer`,
-/// `ProvenanceServer`, `ProvenanceConversation`) plus the two provably empty
-/// per-participant counters. A scope whose configured limit was lowered
-/// beneath retained durable occupancy is outside the crate's occupancy model
-/// (over-limit) and refuses at counter construction rather than admitting
-/// past the signed cap — but the contract's first-full precedence still
-/// holds: the refusal names the FIRST scope in the frozen order unable to
-/// admit one, so an earlier exactly-full scope answers with its own true
-/// numbers and no later scope's occupancy is disclosed.
+/// Builds enrollment's two refusable stage-8 scope counters in the frozen
+/// order (identity Server, then identity Conversation) plus the two provably
+/// empty per-participant window counters.
+///
+/// # Lane p0-39: what left this function, and what did not
+///
+/// The three SHARED receipt scopes are gone. They were the only place an
+/// honest third party could be refused by someone else's churn, and they now
+/// bound retention through their TTL windows with a reporting tripwire instead
+/// of a wall.
+///
+/// The over-limit arm SURVIVES, for identity only. A configured identity limit
+/// lowered beneath restored durable occupancy is still outside the crate's
+/// occupancy model, and still refuses with its true numbers rather than
+/// admitting past a signed cap — identity slots are out of this lane entirely.
+/// The first-full precedence walk it needs is preserved with it.
 fn enrollment_scope_counters(
     request: &EnrollmentRequest,
     operation_facts: &OperationFacts,
     server: super::capacity::ServerOccupancy,
     identity_conversation_occupied: u64,
-    provenance_conversation_occupied: u64,
 ) -> Result<Result<EnrollmentCapacityCounters, EnrollmentResponse>, StateError> {
     let limits = operation_facts.receipt_limits;
     let ordered = [
         (
             limits.identity_server,
             server.identity,
-            EnrollmentScope::Identity(IdentityCapacityScope::Server),
+            IdentityCapacityScope::Server,
         ),
         (
             operation_facts.identity_slots,
             identity_conversation_occupied,
-            EnrollmentScope::Identity(IdentityCapacityScope::Conversation),
-        ),
-        (
-            limits.live_receipts_server,
-            server.live_receipts,
-            EnrollmentScope::Receipt(EnrollmentReceiptCapacityScope::LiveReceiptServer),
-        ),
-        (
-            limits.provenance_server,
-            server.provenance,
-            EnrollmentScope::Receipt(EnrollmentReceiptCapacityScope::ProvenanceServer),
-        ),
-        (
-            limits.provenance_per_conversation,
-            provenance_conversation_occupied,
-            EnrollmentScope::Receipt(EnrollmentReceiptCapacityScope::ProvenanceConversation),
+            IdentityCapacityScope::Conversation,
         ),
     ];
     let mut counters = Vec::with_capacity(ordered.len());
-    // Contract precedence (frozen seven-scope suborder): "The first full
-    // scope returns its named IdentityCapacityExceeded or
-    // ReceiptCapacityExceeded; no later occupancy is disclosed." An
+    // Contract precedence: "The first full scope returns its named
+    // IdentityCapacityExceeded; no later occupancy is disclosed." An
     // out-of-model over-limit scope must not answer past an earlier in-model
     // full scope, so the walk remembers the first exactly-full counter it
     // passes and refuses THAT scope when a later over-limit scope ends the
     // walk. When every scope is in model, the crate selector below stays the
     // sole decision owner.
-    let mut first_full: Option<(EnrollmentScope, u64, u64)> = None;
+    let mut first_full: Option<(IdentityCapacityScope, u64, u64)> = None;
     for (limit, occupied, scope) in ordered {
         match scope_counter(limit, occupied)? {
             ScopeCounter::Valid(counter) => {
@@ -194,28 +165,20 @@ fn enrollment_scope_counters(
             }
             ScopeCounter::OverLimit { limit, occupied } => {
                 let (scope, limit, occupied) = first_full.unwrap_or((scope, limit, occupied));
-                return Ok(Err(enrollment_scope_refusal(
+                return Ok(Err(enrollment_identity_refusal(
                     request, scope, limit, occupied,
                 )));
             }
         }
     }
-    let [
-        identity_server,
-        identity_conversation,
-        live_receipt_server,
-        provenance_server,
-        provenance_conversation,
-    ]: [liminal_protocol::lifecycle::CapacityCounter; 5] = counters.try_into().map_err(|_| {
+    let [identity_server, identity_conversation]: [liminal_protocol::lifecycle::CapacityCounter;
+        2] = counters.try_into().map_err(|_| {
         StateError::invariant("enrollment stage-8 scope construction lost a counter")
     })?;
     Ok(Ok(EnrollmentCapacityCounters::new(
         identity_server,
         identity_conversation,
-        live_receipt_server,
-        fresh_participant_counter(limits.live_receipts_per_participant, "live-receipt")?,
-        provenance_server,
-        provenance_conversation,
-        fresh_participant_counter(limits.provenance_per_participant, "provenance")?,
+        fresh_participant_counter(limits.live_receipt_participant_window, "live-receipt")?,
+        fresh_participant_counter(limits.provenance_participant_window, "provenance")?,
     )))
 }

@@ -17,6 +17,7 @@ use liminal_protocol::wire::{
 };
 
 use super::ProductionParticipantHandler;
+use super::barrier::ReceiptCapacityLimits;
 use super::observer_progress::{
     ObserverProgressConformanceError, ObserverProgressSourceMetadata,
     ObserverProgressSourceWitness, ObserverProgressWitnessState, with_duplicate_leave_injection,
@@ -344,7 +345,10 @@ fn two_participant_high_then_lower_ack_replay_preserves_observer_maximum()
     let participant_b = participant_a.checked_add(1).ok_or("participant overflow")?;
     let high = 100;
     let low = high / 2;
-    let mut authority = ConversationAuthority::empty(conversation_id);
+    let mut authority = ConversationAuthority::empty(
+        conversation_id,
+        ReceiptCapacityLimits::from_config(&test_participant_config()),
+    );
     authority.record_observer_progress_projection(
         ack_projection(conversation_id, participant_a, 0, high)?,
         ObserverProgressSourceMetadata::participant_ack(0, conversation_id, participant_a, high),

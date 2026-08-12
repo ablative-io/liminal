@@ -5,6 +5,7 @@ use liminal_protocol::wire::ParticipantDelivery;
 
 use crate::config::types::ParticipantConfig;
 
+use super::barrier::ReceiptCapacityLimits;
 use super::fenced_attach_terminal::ComposedTerminalValidation;
 use super::log::{
     DecodedOperation, DecodedStoredOperation, OperationLog, OperationLogError,
@@ -31,7 +32,8 @@ impl ConversationAuthority {
         outbox_limits: ConversationOutboxLimits,
     ) -> Result<Self, RestoreError> {
         validate_operation_schema(log, config.identity_slots).await?;
-        let mut authority = Self::empty(conversation_id);
+        let mut authority =
+            Self::empty(conversation_id, ReceiptCapacityLimits::from_config(config));
         let mut merge = ExtensionMerge::new(outbox_log, conversation_id, outbox_limits)?;
         merge.apply_boundary(&mut authority, 0, None).await?;
         let mut sequence = 0_u64;
@@ -170,7 +172,8 @@ impl ConversationAuthority {
         config: &ParticipantConfig,
         outbox_limits: ConversationOutboxLimits,
     ) -> Result<Self, StateError> {
-        let mut authority = Self::empty(conversation_id);
+        let mut authority =
+            Self::empty(conversation_id, ReceiptCapacityLimits::from_config(config));
         let mut merge = AggregateExtensionMerge::new(
             outbox_log,
             extension_rows,

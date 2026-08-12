@@ -144,7 +144,10 @@ fn full_participant_provenance_window_displaces_and_the_next_rotation_lands()
             [0x3F; 16],
         ),
     )?;
-    assert_landed(&arrival, "the (N+1)th rotation at a full participant window")
+    assert_landed(
+        &arrival,
+        "the (N+1)th rotation at a full participant window",
+    )
 }
 
 /// The same specimen FROM DURABLE STATE (red at `77e4845`): a cold restart
@@ -213,8 +216,8 @@ fn full_participant_provenance_window_lands_on_cold_replay() -> Result<(), Box<d
 /// the attach that was refused is exactly the one that ENDS that receipt — a
 /// pure wedge. The window must displace and the rotation must land.
 #[test]
-fn full_participant_live_receipt_window_never_wedges_its_own_rotation()
--> Result<(), Box<dyn Error>> {
+fn full_participant_live_receipt_window_never_wedges_its_own_rotation() -> Result<(), Box<dyn Error>>
+{
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(141, 1);
@@ -263,7 +266,7 @@ fn shared_server_provenance_churn_never_refuses_a_third_party_enrollment()
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(142, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    let config = capacity_config(|c| c.max_receipt_provenance_server = 1);
+    let config = capacity_config(|c| c.receipt_provenance_server_report_threshold = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
 
     // Someone else's churn fills the shared pool.
@@ -290,7 +293,7 @@ fn shared_server_live_receipt_churn_never_refuses_a_third_party_enrollment()
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(143, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    let config = capacity_config(|c| c.max_live_attach_receipts_server = 1);
+    let config = capacity_config(|c| c.live_receipt_server_report_threshold = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
 
     enroll(&handler, incarnation, 3906, [0x4D; 16])?;
@@ -313,7 +316,7 @@ fn shared_conversation_provenance_churn_never_refuses_a_second_participant()
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(144, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    let config = capacity_config(|c| c.max_receipt_provenance_per_conversation = 1);
+    let config = capacity_config(|c| c.receipt_provenance_per_conversation_report_threshold = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
     let conversation_id = 3908;
 
@@ -342,8 +345,8 @@ fn shared_conversation_provenance_churn_never_refuses_a_second_participant()
 /// churn filled — the third-party shape on the arm a reconnecting client
 /// actually takes after a restart.
 #[test]
-fn shared_server_provenance_churn_never_refuses_a_third_party_attach()
--> Result<(), Box<dyn Error>> {
+fn shared_server_provenance_churn_never_refuses_a_third_party_attach() -> Result<(), Box<dyn Error>>
+{
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let conversation_id = 3909;
@@ -374,7 +377,7 @@ fn shared_server_provenance_churn_never_refuses_a_third_party_attach()
     // Restart with the shared server pool lowered beneath the retained
     // fingerprints; the client reconnects and rotates.
     let store = open_disk_store_for_tests(&data_dir)?;
-    let config = capacity_config(|c| c.max_receipt_provenance_server = 1);
+    let config = capacity_config(|c| c.receipt_provenance_server_report_threshold = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
     let reconnect = ConnectionIncarnation::new(145, 2);
     let arrival = dispatch(

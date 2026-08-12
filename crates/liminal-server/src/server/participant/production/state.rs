@@ -8,6 +8,7 @@
 //! carrying both the operation inputs and the canonical event bytes — has
 //! been appended and flushed.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use liminal_protocol::lifecycle::{
@@ -26,6 +27,7 @@ use liminal_protocol::wire::{
     TransactionOrder,
 };
 
+use super::barrier::ReceiptCapacityLimits;
 use super::facts::{Digest, FactsError};
 use super::fate_occurrence::{FateOccurrenceConflict, FateOccurrenceRouter};
 use super::log::{
@@ -159,10 +161,21 @@ pub(super) struct Slot {
     pub(super) enrollment_receipt_ended: Option<ReceiptExpiryReason>,
     /// Current attach receipt with its own independent deadline pair.
     pub(super) attach: Option<AttachReceiptState>,
+    /// Whether this participant's own retention window has DISPLACED its
+    /// enrollment fingerprint (lane p0-39).
+    ///
+    /// Derived, never durable: cold replay re-executes the same committed
+    /// attaches in the same order and re-derives the same flag. Once set, the
+    /// enrollment fingerprint stops occupying and stops answering — an exact
+    /// enrollment-token replay falls through from the `ReceiptExpired`
+    /// provenance row to the permanent lifetime mapping's `EnrollmentKnown`.
+    /// That degradation is the documented, pinned price of never refusing.
+    pub(super) enrollment_provenance_displaced: bool,
     /// Bounded provenance fingerprints of ended attach receipts, keyed by
     /// their exact attempt tokens. One record exists per committed rotation
-    /// (each rotation requires the then-current secret), so growth is bound
-    /// to the participant's own committed history.
+    /// (each rotation requires the then-current secret), and the participant's
+    /// own displacement window holds this map to the configured size — growth
+    /// is bounded by the window, not merely by committed history.
     pub(super) attach_provenance: BTreeMap<[u8; 16], AttachProvenanceRecord>,
     /// Currently valid attach secret for this slot.
     pub(super) attach_secret: AttachSecret,
@@ -174,6 +187,18 @@ pub(super) struct Slot {
 #[derive(Debug)]
 pub(super) struct ConversationAuthority {
     pub(super) conversation_id: u64,
+    /// Per-participant retention window sizes and shared-pool reporting
+    /// thresholds, re-read from validated configuration on every restore.
+    ///
+    /// Not durable and deliberately so: a deployment that changes a window
+    /// size gets the new size everywhere at once, and a LOWERED window simply
+    /// displaces more on the next insert. It can never refuse, and can never
+    /// wedge a boot the way a lowered cap once did.
+    pub(super) receipt_limits: ReceiptCapacityLimits,
+    /// Whether this conversation's provenance tripwire has already warned for
+    /// the storm it is currently inside (rising-edge logging; every
+    /// observation is still counted).
+    pub(super) provenance_tripwire_warned: Cell<bool>,
     /// Shell aggregate; `Some` from genesis onward. Temporarily taken while a
     /// pending aggregate barrier owns it.
     pub(super) shell: Option<ParticipantConversation>,
@@ -421,9 +446,11 @@ pub(super) trait DurableAppend {
 
 impl ConversationAuthority {
     /// Creates the pre-genesis empty authority for one conversation.
-    pub(super) const fn empty(conversation_id: u64) -> Self {
+    pub(super) const fn empty(conversation_id: u64, receipt_limits: ReceiptCapacityLimits) -> Self {
         Self {
             conversation_id,
+            receipt_limits,
+            provenance_tripwire_warned: Cell::new(false),
             shell: None,
             obligation_debt_dispatch: None,
             pending_debt_dispatch_transition: None,

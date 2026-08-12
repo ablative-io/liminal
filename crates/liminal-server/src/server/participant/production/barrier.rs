@@ -13,6 +13,8 @@ use liminal_protocol::lifecycle::{
 };
 use liminal_protocol::wire::{ConnectionIncarnation, ServerValue};
 
+use crate::config::types::ParticipantConfig;
+
 use super::log::StoredOperation;
 use super::state::{DurableAppend, StateError};
 
@@ -38,21 +40,64 @@ pub(super) struct OperationFacts {
     pub(super) connection_capacity: CapacityCounter,
 }
 
-/// Signed stage-8 capacity limits, straight from validated configuration.
+/// Signed stage-8 capacity numbers, straight from validated configuration.
+///
+/// # Lane p0-39: three kinds of number, and only one of them refuses
+///
+/// * `identity_server` is a GATE. Identity capacity is out of the hybrid's
+///   scope and behaves exactly as it always has.
+/// * The two `*_window` values are BOUNDS ON RETENTION. At a full window the
+///   participant's own oldest entry is displaced and the arrival lands; the
+///   number never refuses.
+/// * [`SharedPoolTripwires`] are REPORTING THRESHOLDS. They gate nothing at
+///   all — they decide only when the server counts and warns.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ReceiptCapacityLimits {
-    /// Server-wide identity-slot limit.
+    /// Server-wide identity-slot limit — the one receipt-family neighbour
+    /// that is still an admission gate.
     pub(super) identity_server: u64,
-    /// Server-wide live-receipt cap.
-    pub(super) live_receipts_server: u64,
-    /// Per-participant live-receipt cap.
-    pub(super) live_receipts_per_participant: u64,
-    /// Server-wide provenance-fingerprint cap.
+    /// Per-participant live-receipt window size.
+    pub(super) live_receipt_participant_window: u64,
+    /// Per-participant provenance-fingerprint window size.
+    pub(super) provenance_participant_window: u64,
+    /// Reporting thresholds for the three shared pools.
+    pub(super) shared_pool_tripwires: SharedPoolTripwires,
+}
+
+/// Occupancy at which each shared pool is reported as running away.
+///
+/// Crossing one of these refuses NOTHING. It counts an observation and, on the
+/// rising edge, emits one warning naming the pool, its occupancy, and this
+/// threshold — the disclosure that replaces the wall these pools used to be.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SharedPoolTripwires {
+    /// Server-wide live-receipt reporting threshold.
+    pub(super) live_receipt_server: u64,
+    /// Server-wide provenance reporting threshold.
     pub(super) provenance_server: u64,
-    /// Per-conversation provenance-fingerprint cap.
-    pub(super) provenance_per_conversation: u64,
-    /// Per-participant provenance-fingerprint cap.
-    pub(super) provenance_per_participant: u64,
+    /// Per-conversation provenance reporting threshold.
+    pub(super) provenance_conversation: u64,
+}
+
+impl ReceiptCapacityLimits {
+    /// Derives every stage-8 number from one validated participant config.
+    ///
+    /// One constructor, used by the live operation path, the replay path, and
+    /// every fixture — so a window size and its tripwire threshold can never
+    /// be read from configuration two different ways.
+    pub(super) const fn from_config(config: &ParticipantConfig) -> Self {
+        Self {
+            identity_server: config.max_retired_identity_slots_server,
+            live_receipt_participant_window: config.max_live_attach_receipts_per_participant,
+            provenance_participant_window: config.max_receipt_provenance_per_participant,
+            shared_pool_tripwires: SharedPoolTripwires {
+                live_receipt_server: config.live_receipt_server_report_threshold,
+                provenance_server: config.receipt_provenance_server_report_threshold,
+                provenance_conversation: config
+                    .receipt_provenance_per_conversation_report_threshold,
+            },
+        }
+    }
 }
 
 impl OperationFacts {

@@ -872,14 +872,7 @@ impl ProductionParticipantHandler {
             identity_slots: self.config.identity_slots,
             attach_receipt_ttl_ms: self.config.attach_receipt_ttl_ms,
             receipt_provenance_ttl_ms: self.config.receipt_provenance_ttl_ms,
-            receipt_limits: ReceiptCapacityLimits {
-                identity_server: self.config.max_retired_identity_slots_server,
-                live_receipts_server: self.config.max_live_attach_receipts_server,
-                live_receipts_per_participant: self.config.max_live_attach_receipts_per_participant,
-                provenance_server: self.config.max_receipt_provenance_server,
-                provenance_per_conversation: self.config.max_receipt_provenance_per_conversation,
-                provenance_per_participant: self.config.max_receipt_provenance_per_participant,
-            },
+            receipt_limits: ReceiptCapacityLimits::from_config(&self.config),
             connection_tracking: conversations.tracking(conversation_id),
             connection_capacity,
         })

@@ -26,7 +26,7 @@
 use std::error::Error;
 
 use liminal_protocol::wire::{
-    AttachSecret, ConnectionIncarnation, ReceiptCapacityExceeded, ReceiptCapacityScope,
+    AttachSecret, ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken,
     ServerValue, StaleAuthority,
 };
 
@@ -35,47 +35,64 @@ use super::tests::{dispatch, open_disk_store_for_tests, test_participant_config}
 use super::tests_capacity::capacity_config;
 use super::tests_receipts::{GEN_ONE, attach, attach_request, detach, enroll, generation};
 
-/// Asserts one exact credential-attach `ReceiptCapacityExceeded` row.
-fn assert_attach_receipt_refusal(
-    value: &ServerValue,
-    scope: ReceiptCapacityScope,
-    limit: u64,
-    occupied: u64,
-) -> Result<(), Box<dyn Error>> {
-    let ServerValue::ReceiptCapacityExceeded(ReceiptCapacityExceeded::CredentialAttach {
-        scope: got_scope,
-        limit: got_limit,
-        occupied: got_occupied,
-        ..
-    }) = value
-    else {
-        return Err(format!(
-            "expected the credential-attach ReceiptCapacityExceeded row ({scope:?}), got: {value:?}"
+/// Whether the participant's enrollment fingerprint is still RETAINED, read
+/// off the wire through the answer only a retained fingerprint can give.
+///
+/// Lane p0-39 replaced this file's original instrument. It used to measure
+/// retention by driving a stage-8 scope to its cap and reading the
+/// `ReceiptCapacityExceeded` row's `occupied` field — an instrument the
+/// receipt scopes no longer have, because they no longer refuse. This reads
+/// the same fact off R-C0's own classification instead: inside its provenance
+/// window a retained enrollment fingerprint answers `ReceiptExpired` with the
+/// exact terminal reason, and once it is gone the permanent lifetime mapping
+/// answers `EnrollmentKnown`. Strictly better placed than the old one — it
+/// measures retention where retention is actually consumed.
+fn enrollment_fingerprint_retained(
+    handler: &ProductionParticipantHandler,
+    incarnation: ConnectionIncarnation,
+    conversation_id: u64,
+    token: [u8; 16],
+) -> Result<bool, Box<dyn Error>> {
+    let replayed = dispatch(
+        handler,
+        incarnation,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new(token),
+        }),
+    )?;
+    match replayed {
+        ServerValue::ReceiptExpired(_) => Ok(true),
+        ServerValue::EnrollmentKnown(_) => Ok(false),
+        other => Err(format!(
+            "an enrolled token past its receipt window must answer ReceiptExpired (retained) or \
+             EnrollmentKnown (gone), got: {other:?}"
         )
-        .into());
-    };
-    assert_eq!(*got_scope, scope);
-    assert_eq!(*got_limit, limit);
-    assert_eq!(*got_occupied, occupied);
-    Ok(())
+        .into()),
+    }
 }
 
 /// THE LEAK, and its exact repair, in one fixture.
 ///
 /// Two participants enroll in two conversations and neither ever attaches, so
 /// neither client ever proved it possesses the secret its enrollment receipt
-/// minted. Before this lane those two fingerprints occupied the server
-/// provenance scope for the full `receipt_provenance_ttl_ms` — provenance
-/// retained for a delivery that never happened — and with the cap at 1 the
-/// scope was over-limit at 2, so the FIRST honest rotation was refused.
+/// minted. Before board #37 those two fingerprints were retained for the full
+/// `receipt_provenance_ttl_ms` — provenance kept for a delivery that never
+/// happened.
 ///
-/// After it they occupy nothing, that rotation is admitted, and the very act
-/// of admitting it proves possession of the enrollment secret and promotes
-/// EXACTLY ONE fingerprint — which the second rotation then meets as an
-/// exactly-full scope carrying `occupied: 1`.
+/// After it they are retained by nothing, and the first honest rotation is
+/// what proves possession and promotes EXACTLY ONE fingerprint.
 ///
-/// The second half is load-bearing: without it this test would pass just as
-/// well against a build that stopped counting provenance altogether.
+/// # Lane p0-39: same law, a better instrument
+///
+/// The original asserted this through a `ProvenanceServer` refusal carrying
+/// `occupied: 1`. That scope no longer refuses. The window of one used here
+/// is what makes the claim discriminating instead: if the just-minted attach
+/// receipt ALSO occupied, the participant's single slot would already be
+/// contested after the first rotation and the enrollment fingerprint would
+/// have been displaced out of it. It is not — and the second rotation, which
+/// displaces it for real, is the positive control proving this instrument can
+/// move at all.
 #[test]
 fn unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one()
 -> Result<(), Box<dyn Error>> {
@@ -83,14 +100,16 @@ fn unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one()
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(137, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    let config = capacity_config(|c| c.max_receipt_provenance_server = 1);
+    // A window of one per participant: exactly one fingerprint may be held.
+    let config = capacity_config(|c| c.max_receipt_provenance_per_participant = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
     let conversation_id = 801;
+    let enrollment_token = [0x71; 16];
 
-    let receipt = enroll(&handler, incarnation, conversation_id, [0x71; 16])?;
+    let receipt = enroll(&handler, incarnation, conversation_id, enrollment_token)?;
     let participant_id = receipt.participant_id();
     // A second enrolled-and-never-attached participant, in its own
-    // conversation, so the server scope sees two unproven fingerprints.
+    // conversation: under the pre-#37 build it retained a fingerprint too.
     enroll(&handler, incarnation, 802, [0x72; 16])?;
 
     detach(
@@ -101,8 +120,6 @@ fn unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one()
         GEN_ONE,
         [0x73; 16],
     )?;
-    // Unproven possession occupies nothing, so this honest rotation is
-    // admitted against a server provenance cap of 1.
     let first = attach(
         &handler,
         incarnation,
@@ -116,8 +133,20 @@ fn unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one()
     )?;
     assert_eq!(first.capability_generation(), generation(2)?);
 
-    // That attach proved possession of the enrollment secret: exactly one
-    // fingerprint is now retained, and it fills the cap of 1.
+    // That attach proved possession of the enrollment secret and promoted
+    // exactly one fingerprint — its own. The receipt it just minted is
+    // unproven and takes no slot, so the enrollment fingerprint still holds
+    // the participant's single one.
+    assert!(
+        enrollment_fingerprint_retained(&handler, incarnation, conversation_id, enrollment_token)?,
+        "the proving rotation must promote the ENROLLMENT fingerprint and nothing else; a \
+         just-minted attach receipt that also occupied would have displaced it out of the \
+         participant's single slot"
+    );
+
+    // POSITIVE CONTROL for the instrument: a second rotation retains a NEWER
+    // fingerprint, the window of one displaces the oldest, and the same probe
+    // now reads gone.
     detach(
         &handler,
         incarnation,
@@ -126,7 +155,7 @@ fn unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one()
         generation(2)?,
         [0x75; 16],
     )?;
-    let refused = dispatch(
+    let second = attach(
         &handler,
         incarnation,
         attach_request(
@@ -137,29 +166,40 @@ fn unproven_receipts_occupy_no_provenance_slot_and_proof_promotes_exactly_one()
             [0x76; 16],
         ),
     )?;
-    assert_attach_receipt_refusal(&refused, ReceiptCapacityScope::ProvenanceServer, 1, 1)
+    assert_eq!(second.capability_generation(), generation(3)?);
+    assert!(
+        !enrollment_fingerprint_retained(&handler, incarnation, conversation_id, enrollment_token)?,
+        "a full window must displace its oldest member for the newer fingerprint of the same \
+         participant"
+    );
+    Ok(())
 }
 
 /// The just-minted receipt is unproven BY CONSTRUCTION, so a participant that
 /// attaches once holds exactly one retained fingerprint (its enrollment's),
-/// never two.
+/// never two — and the DISPLACEMENT TWIN of that fact: when the window moves,
+/// it moves to the newly proven fingerprint, not to the unproven one.
 ///
-/// This is the per-participant twin of the promotion arm above and it pins
-/// the site the ruling names directly: the provenance window minted at
-/// `ops_attach.rs`'s `install_attach_receipt` must not occupy while nothing
-/// has yet verified against the secret it minted.
+/// This pins the site the ruling names directly: the provenance window minted
+/// at `ops_attach.rs`'s `install_attach_receipt` must not be retained while
+/// nothing has verified against the secret it minted.
+///
+/// Lane p0-39: the original read `occupied: 1` off a `ProvenanceParticipant`
+/// refusal. That refusal is gone; this reads the same one-slot fact through
+/// WHICH fingerprint survives two rotations at a window of one.
 #[test]
 fn the_just_minted_attach_receipt_holds_no_provenance_slot() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(138, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    // Cap 1 per participant: the enrollment fingerprint alone may occupy it.
+    // A window of one per participant: the enrollment fingerprint alone.
     let config = capacity_config(|c| c.max_receipt_provenance_per_participant = 1);
     let handler = ProductionParticipantHandler::new(store, config)?;
     let conversation_id = 803;
+    let enrollment_token = [0x77; 16];
 
-    let receipt = enroll(&handler, incarnation, conversation_id, [0x77; 16])?;
+    let receipt = enroll(&handler, incarnation, conversation_id, enrollment_token)?;
     let participant_id = receipt.participant_id();
     detach(
         &handler,
@@ -169,6 +209,7 @@ fn the_just_minted_attach_receipt_holds_no_provenance_slot() -> Result<(), Box<d
         GEN_ONE,
         [0x78; 16],
     )?;
+    let first_token = [0x79; 16];
     let first = attach(
         &handler,
         incarnation,
@@ -177,13 +218,21 @@ fn the_just_minted_attach_receipt_holds_no_provenance_slot() -> Result<(), Box<d
             participant_id,
             GEN_ONE,
             receipt.attach_secret(),
-            [0x79; 16],
+            first_token,
         ),
     )?;
 
-    // One proven fingerprint (the enrollment's) fills the per-participant cap.
-    // If the just-minted attach receipt ALSO occupied, the scope would be
-    // over-limit at 2 and the refusal below would carry `occupied: 2`.
+    // The generation-2 receipt this attach just minted is UNPROVEN, so it
+    // takes no slot: presenting its own token back gets the live-receipt
+    // replay, not a provenance row, and the single slot still belongs to the
+    // enrollment fingerprint.
+    assert!(
+        enrollment_fingerprint_retained(&handler, incarnation, conversation_id, enrollment_token)?,
+        "an unproven just-minted receipt must not take the participant's only provenance slot"
+    );
+
+    // The SECOND rotation proves possession of that generation-2 secret. Now
+    // it earns the slot — and the window hands it over, oldest first.
     detach(
         &handler,
         incarnation,
@@ -192,7 +241,7 @@ fn the_just_minted_attach_receipt_holds_no_provenance_slot() -> Result<(), Box<d
         generation(2)?,
         [0x7A; 16],
     )?;
-    let refused = dispatch(
+    let second = attach(
         &handler,
         incarnation,
         attach_request(
@@ -203,7 +252,29 @@ fn the_just_minted_attach_receipt_holds_no_provenance_slot() -> Result<(), Box<d
             [0x7B; 16],
         ),
     )?;
-    assert_attach_receipt_refusal(&refused, ReceiptCapacityScope::ProvenanceParticipant, 1, 1)
+    assert_eq!(second.capability_generation(), generation(3)?);
+    assert!(
+        !enrollment_fingerprint_retained(&handler, incarnation, conversation_id, enrollment_token)?,
+        "the newly PROVEN generation-2 fingerprint must take the single slot"
+    );
+    // And it is the generation-2 fingerprint that holds it: its exact token
+    // still resolves through the provenance phase.
+    let retired = dispatch(
+        &handler,
+        incarnation,
+        attach_request(
+            conversation_id,
+            participant_id,
+            GEN_ONE,
+            receipt.attach_secret(),
+            first_token,
+        ),
+    )?;
+    assert!(
+        matches!(retired, ServerValue::ReceiptExpired(_)),
+        "the newly proven fingerprint must be the one the window retained, got: {retired:?}"
+    );
+    Ok(())
 }
 
 /// CLASSIFICATION NEUTRALITY (the ruling's binding constraint 1), measured

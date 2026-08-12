@@ -20,9 +20,8 @@ use liminal_protocol::lifecycle::{
     AggregateOperationDecision, AttachCommit, AttachFrontierCharges, AttachTransition,
     BindingSlotDecision, BindingState, CredentialAttachLiveReceipt, CredentialAttachLookupResult,
     LiveFrontierOwner, PresentedIdentity, ReceiptDeadlines, RetainedRecordCharge,
-    SemanticConnectionCapacityDecision,
-    apply_attach_frontier, commit_attach, decide_attached_operation, lookup_credential_attach,
-    select_credential_attach_binding_slot,
+    SemanticConnectionCapacityDecision, apply_attach_frontier, commit_attach,
+    decide_attached_operation, lookup_credential_attach, select_credential_attach_binding_slot,
 };
 use liminal_protocol::wire::{
     AttachBound, AttachEnvelope, AttachSecret, BindingEpoch, CredentialAttachRequest,
@@ -33,6 +32,7 @@ use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
 
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::capacity::ServerCapacity;
+use super::dispatch_impact::AttachedSourceRecord;
 use super::facts::{self, Digest};
 use super::frontier;
 use super::log::{
@@ -40,11 +40,11 @@ use super::log::{
 };
 use super::non_presenting_finalizer::NonPresentingFinalizerCommit;
 use super::observer_progress::ObserverProgressSourceMetadata;
+use super::occupancy::ProvenanceMember;
 use super::ops_attach_capacity::AttachStage8;
 use super::ops_attach_finalizer::SelectedFencedFinalizer;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
 use super::ops_attach_verify::{AttachVerification, stored_attach_parameters, verify_attach_mode};
-use super::dispatch_impact::AttachedSourceRecord;
 use super::outbox_projection::capture_projection_prestate;
 use super::presented_refusal::PresentedRefusal;
 use super::state::{
@@ -127,7 +127,7 @@ impl ConversationAuthority {
         // this authority and server occupancies from the shared ledger; the
         // reservation is atomic with the check.
         let deadlines = operation_facts.deadlines()?;
-        let (reservation, retire) = match self.attach_stage8(
+        let (reservation, retire, displace) = match self.attach_stage8(
             request,
             slot,
             operation_facts,
@@ -140,7 +140,8 @@ impl ConversationAuthority {
             AttachStage8::Reserved {
                 reservation,
                 retire,
-            } => (reservation, retire),
+                displace,
+            } => (reservation, retire, displace),
         };
         let (attached_order, attached_seq, attach_mode) =
             self.allocate_attach_mode(slot.binding, envelope)?;
@@ -174,8 +175,9 @@ impl ConversationAuthority {
         // The durable append succeeded: the stage-8 reservation becomes
         // permanent and the receipts this rotation retired early (the
         // superseded attach receipt and, on the first rotation, the ended
-        // enrollment receipt) leave the server-scope ledger.
-        reservation.confirm(&retire);
+        // enrollment receipt) leave the server-scope ledger — together with
+        // the provenance entries the participant's own window displaced.
+        reservation.confirm(&retire, &displace);
         Ok(ArmOutcome::committed(
             CredentialAttachResponse::attach_bound(outcome).into_server_value(),
             capacity,
@@ -397,6 +399,7 @@ impl ConversationAuthority {
             &outcome,
             installed.outcome,
             result_generation,
+            self.receipt_limits.provenance_participant_window,
         );
         self.slots.insert(participant_id, slot);
         if let Some(projection) = observer_projection {
@@ -419,7 +422,20 @@ fn install_attach_receipt(
     outcome: &AttachBound,
     installed_outcome: AttachBound,
     result_generation: Generation,
+    provenance_window: u64,
 ) {
+    // Lane p0-39: plan the participant's window displacement against the
+    // PRE-commit slot, before any of the mutations below move it. This is the
+    // same call `attach_stage8` made to build the ledger's removal list, over
+    // the same state, so the ledger and the slot cannot retain different sets —
+    // and because the plan reads only durable structure and the configured
+    // window (never the clock), a cold replay of these same commits in the same
+    // order re-derives the identical retained set.
+    let displaced = slot
+        .incoming_provenance_member()
+        .map_or_else(Vec::new, |incoming| {
+            slot.plan_provenance_displacement(incoming, provenance_window)
+        });
     // Retire the previous receipt into its bounded provenance record with the
     // exact terminal reason: `Superseded` when the newer generation ended a
     // still-live receipt, `Deadline` when its own deadline had already ended
@@ -430,14 +446,23 @@ fn install_attach_receipt(
         } else {
             ReceiptExpiryReason::Deadline
         };
-        slot.attach_provenance.insert(
-            previous.token.into_bytes(),
-            AttachProvenanceRecord {
-                result_generation: previous.result_generation,
-                reason,
-                provenance_expires_at: previous.provenance_expires_at,
-            },
-        );
+        // The retired predecessor IS this commit's incoming window member; a
+        // window too small to hold even that displaces it immediately, so it
+        // is never retained in the first place.
+        let member = ProvenanceMember::Attach {
+            expires_at: previous.provenance_expires_at,
+            token: previous.token.into_bytes(),
+        };
+        if !displaced.contains(&member) {
+            slot.attach_provenance.insert(
+                previous.token.into_bytes(),
+                AttachProvenanceRecord {
+                    result_generation: previous.result_generation,
+                    reason,
+                    provenance_expires_at: previous.provenance_expires_at,
+                },
+            );
+        }
     }
     // The first rotation also ends the enrollment receipt's secret body. Set
     // once and never rewrite it, preserving the exact end-of-body fact.
@@ -449,6 +474,18 @@ fn install_attach_receipt(
                 ReceiptExpiryReason::Deadline
             },
         );
+    }
+    // Apply the plan: the window drops its oldest members so the newest one of
+    // the same participant can land.
+    for member in displaced {
+        match member {
+            ProvenanceMember::Enrollment { .. } => {
+                slot.enrollment_provenance_displaced = true;
+            }
+            ProvenanceMember::Attach { token, .. } => {
+                slot.attach_provenance.remove(&token);
+            }
+        }
     }
     slot.attach = Some(AttachReceiptState {
         token: request.attach_attempt_token,
