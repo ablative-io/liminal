@@ -808,11 +808,18 @@ which requests are refused.
 
 **Status: PROPOSED, authored by lane p0-39 under the sequencer's ruling on
 Tom's governing sentence — *"no configured number refuses an honest arrival."*
-Neither key turned. The build exists and is gated (branch `p0-39-caps-hybrid`
-off `77e4845`; design record `docs/design/P0-39-RECEIPT-CAPACITY-HYBRID.md`),
+The build is LANDED (merge `f73d72b`, main `55621dd`, tree byte-identical to
+lane tip `64efdc5`; design record `docs/design/P0-39-RECEIPT-CAPACITY-HYBRID.md`),
 so this amendment is a description of shipped, pinned behaviour awaiting
-ratification, not a proposal in the abstract. Reviewer-of-record key and
-independent second key both outstanding; the seat runs the key process.**
+ratification, not a proposal in the abstract. KEY 1 TURNED: reviewer-of-record
+key by Waffles the Terrible on this document as written at rev `55621dd`
+(meridian DM `017068db`, ts 2026-08-12T22:12:46Z, received 08-13 after the
+land word seq=215) — his review verified the merge chain at his own ls-remote,
+the truth-report displacement visibility, and the cold-replay pins; he accepts
+the run-1 flake exoneration on the stated causal method while noting he did
+not independently re-derive the dependency graph. Independent second key
+(Cally-or-Vesper) outstanding; the seat runs the key process; RATIFIED flips
+when both have turned.**
 
 **Honesty line:** this amendment changes NO wire bytes. Every registry variant
 keeps its assigned value and every refusal row keeps its schema; five scopes
