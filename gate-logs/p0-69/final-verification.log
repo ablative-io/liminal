@@ -1,0 +1,25 @@
+=== FINAL VERIFICATION, lane p0-69 ===
+date : 2026-08-12T18:05:06Z UTC
+HEAD : bbe237f45021b9f30768c27cdd8795b66fcf9452
+base : 339e81a504709321f248a7c102677178b4391ca1
+
+--- clippy (both new targets, workspace lints) ---
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.24s
+
+--- rustfmt --check (authored files, edition 2024) ---
+clean
+
+--- independent reader over the committed capture ---
+
+17 participant frames decomposed to exactly zero remaining bytes.
+decompose.py exit=0
+
+--- adjacent suites ---
+golden_trace_participant_wire          test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.73s
+participant_record_rtt_probe           test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 18.84s
+loopback_parity_e2e                    test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.30s
+loopback_sdk_e2e                       test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.97s
+participant_quiet_pump_e2e             test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.63s
+participant_churn_convergence_e2e      test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.98s
+participant_strand_recovery_e2e        test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.09s
+subscription_e2e                       test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
