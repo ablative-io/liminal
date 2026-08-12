@@ -332,6 +332,102 @@ never can be. Until the attach path can distinguish "told the client" from
 "closed on the client", #37 has nothing to key on. **They are the same event
 from two sides.**
 
+### ⚠ AMENDED 2026-08-12 — the paragraph above is wrong about its own lane
+
+The section above stayed as written because it is the reasoning the amendment
+replaces, and a struck premise is worth more in place than deleted.
+
+**The funnel does not unblock #37, and could not have.** The one
+`PresentedRefusal` raise site is `ops_attach::allocate_attach_mode`'s
+`PendingFinalization` arm, called at `ops_attach.rs:146`; `attach_commit` — the
+only path to the retention site `install_attach_receipt` (`ops_attach.rs:415`,
+insert at `:433`) — is called at `ops_attach.rs:157`. **A refusal returns eleven
+lines before any receipt is minted, so the population the funnel made
+wire-visible and the population that retains provenance are disjoint.** #14 gave
+a frame to a path that never retained anything.
+
+Worse, the discriminator the paragraph asks for still does not exist. Nothing on
+a receipt records delivery (`AttachReceiptState`, `state.rs:48-67`), the attach
+path is documented as having no delivery facts at all (`ops_attach.rs:116-119`;
+`ops_attach_lookup.rs:164-168`, *"a capability gap owned by the delivery pump"*),
+and the one layer with a delivery notion says explicitly that it is not one —
+`supervisor.rs:379-381`, *"`Ok` promises ADMISSION, not delivery"*. It is also
+volatile and absent from `StoredAttachAllocation` (`log_v3.rs:141-150`), so
+keying retention on it would make cold replay rebuild a different provenance set
+than the live path produced — the very "a live guard is not a replay guard"
+hazard recorded earlier in this document.
+
+**THE RULED DEFINITION (Tom's seat via Waffles, 2026-08-12, binding).** "Delivery
+was observed" means **the client demonstrably possessed the secret the receipt
+minted**. Two rejected alternatives, recorded so the choice is not re-litigated
+by drift:
+
+- *Observer progress reaching the receipt's delivery seq* — REJECTED. It
+  measures the observer record stream: a third party saw the record, not that
+  the client was told.
+- *"Told the client" vs "closed on the client"* — the sentence above, and
+  unimplementable without the witness build. Building that witness inside a leak
+  fix is a smuggle; it queues as its own lane (durable schema version plus the
+  delivery pump that owns the gap by name) and owns any future upgrade of
+  "observed" to told-the-client.
+
+**Why the definition needs no new plumbing.** Only enrollment and credential
+attach are secret-bearing, a fresh attempt token is verified against
+`slot.attach_secret` (`ops_attach_lookup.rs:45-46`) and only `AuthorizedFresh`
+reaches a commit (`ops_attach.rs:90-92`), and every committed attach supersedes
+the receipt that minted the secret it presented. So proof of possession is
+structural, and already durable:
+
+| receipt | possession proven ⟺ |
+|---|---|
+| enrollment | `slot.enrollment_receipt_ended.is_some()` |
+| attach receipt N | it has been retired into `slot.attach_provenance` |
+| the CURRENT receipt, and an unended enrollment receipt | never yet — UNPROVEN |
+
+Every input is rebuilt by cold replay, so retention stays a pure function of
+durable bytes.
+
+**What changed:** the unproven pair stops OCCUPYING a stage-8 provenance slot
+(`occupancy.rs`, `ops_enroll_capacity.rs`, `ops_attach_capacity.rs`). An
+enrolment that crashes before ever attaching now leaves no provenance residue.
+Exactly one provenance entry is still created per committed attach — it just
+belongs to the predecessor rather than to the receipt being minted — so the
+crate's "admit one" selector algebra and the frozen R-D1 scope order are
+untouched. This is not the #39 caps lane: no cap number, limit, or scope order
+moves.
+
+**What did NOT change: classification.** Occupancy and classification read
+different state. Every fingerprint still classifies through its own window in
+`ops_attach_lookup`; only what consumes a signed slot moved. Pinned by
+`tests_37_observed_provenance::r_c0_token_phase_classification_is_unchanged_by_observed_provenance_retention`,
+red-proved against a build whose `install_attach_receipt` retains nothing.
+⛔ That pin's first draft PASSED against that mutation and was vacuous: both
+arms presented generation 2, whose successor is witnessed by the CURRENT
+receipt, which no retention change removes. The arms now present `GEN_ONE`,
+whose successor is witnessed only by the retained record. **A neutrality pin
+must be exercised on a generation whose only witness is the thing being
+changed.**
+
+**⚠ NAMED REMAINDER — what definition (3) does not reach.** Measured against the
+lane's outcome gate ("an afternoon of run-crash-fix-run cycles consumes nothing
+durable"), a crash cycle still consumes:
+
+1. **One identity slot, permanently.** `capacity_contribution`'s
+   `identity: self.next_participant` (`occupancy.rs`) plus the retirement
+   tombstone reservation. Identity is monotonic by design and this lane does not
+   touch it. **This is the dominant residue of a run-crash-fix-run afternoon and
+   definition (3) does nothing for it.**
+2. **The live receipt body**, until `attach_receipt_ttl_ms`. Unproven possession
+   frees the provenance tail (`receipt_provenance_ttl_ms` minus
+   `attach_receipt_ttl_ms`), not the receipt window itself.
+3. **The durable operation-log rows** of the enrolment. Retention accounting is
+   derived; the log is not compacted here.
+
+Per the ruling: if a measurement shows crash cycles still consuming durable
+state through a path (3) does not reach, that measurement returns the definition
+to Waffles's desk. Item 1 is that path, and it is named here rather than
+discovered later.
+
 ## Build outcome — the funnel landed, and the sweep's own classification moved
 
 Written on branch `attach-funnel-presentation`, base `edeabeb`, code at
