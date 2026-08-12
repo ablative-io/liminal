@@ -305,9 +305,55 @@ fresh measurement returns:
 Surviving informational values disclose through deployment config and the truth
 report, not through negotiated capability state.
 
+## 9. Acceptance evidence — the battery pair, the exoneration's method, the ignore
+
+Added at the second key-holder's block (2026-08-13, meridian `c766778c`):
+"the figure I have reached me from you, in a message" is a defect in the
+record, not in the figure. The evidence lands here so a key-holder learns it
+from the artifact, not from an account.
+
+**The gate.** Acceptance battery run 2, clean box, at lane tip `64efdc5`
+(merge `f73d72b`, tree byte-identical): **2028 passed / 2 failed / 1 ignored
+over 55** summed `test result:` lines, single TRUE EXIT. The 2 failures are
+the F8 declared instrument pair BY NAME
+(`tests_f8_marker_poison::a_refused_connection_fate_leaves_no_durable_residue`,
+`tests_f8_marker_poison::the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server`)
+— deliberately-red spine-poisoning instruments, never to be fixed. Raw log
+in-tree: `gate-logs/p0-39/acceptance-battery-run2.log`.
+
+**The flake pair.** Run 1 (contended box, load ~30 falling from a 60 spike)
+returned 2026/4/1 over 55 and is RETAINED in-tree
+(`gate-logs/p0-39/acceptance-battery.log`) as the flake-evidence half, not
+discarded. Its two extras, with the exoneration's method attached rather
+than asserted:
+
+1. The churn e2e — green on immediate same-box re-run; load flake.
+2. `routing::dispatch::tests::no_remaining_consumer_after_crash_is_an_error`
+   (crates/liminal) — pre-existing load-sensitive race, filed as board #70.
+   **Causal exoneration, two independent legs, both re-verified at
+   `7891897`:** (a) dependency edge — `crates/liminal/Cargo.toml`'s
+   `[dependencies]` block contains NO `liminal-protocol` and NO
+   `liminal-server` (the lane's only touched crates), so no change in this
+   lane can reach that test through the build graph; (b) byte identity —
+   `git diff 77e4845 f73d72b -- crates/liminal/` is EMPTY: the entire crate,
+   not merely the test file, is byte-identical across the lane. A test whose
+   crate the lane provably cannot reach, failing 1-in-8 under load on both
+   trees, is exonerated causally — not statistically.
+
+**The ignore, named.** The 1 ignored is
+`participant_record_rtt_probe.rs:519`
+(`#[ignore = "measurement: commits 2,200 durable records; run explicitly
+with --ignored"]`) — the board #68 RTT probe's full measurement arm. It is
+a measurement, not a pin, and not a bypass: its pin-class counterparts run
+un-ignored in the ordinary battery, and the run instructions live in
+`docs/perf/participant-record-rtt.md:165-168`. It predates this lane
+(landed in the p0-69 merge `388e9ce`) and is counted here because the
+battery denominator carries it.
+
 ## Revision record
 
 | Rev | Date | Author | Change |
 |---|---|---|---|
 | r1 | 2026-08-13 | seat/lane p0-39 | Initial design record for the ruled hybrid: TTL-only shared pools with reporting tripwires, per-participant displacement windows, the delete-and-rename config decision with its deployment consequence, clock-free replay-equivalent displacement ordering, the pinned classification degradation, and the visibility surface that replaces the wall. |
 | r2 | 2026-08-13 | seat (Hermes) | §3 rewritten: the values-to-Tom ratification gate struck by Tom's own word (relayed 2026-08-13); values set at the seat with premises and re-derivation triggers beside them — configured values with written rationale is the lock. All seven values derived; none changed from deployed/prior numbers. |
+| r3 | 2026-08-13 | seat (Hermes) | §9 added at the second key-holder's block: battery pair committed with figures, log paths, the F8 pair by name, the run-1 exoneration with its causal method attached (dependency edge + whole-crate byte identity, both re-verified), and the ignored test named with its justification. Evidence a key-holder previously could only learn from an account now lives in the artifact. |
