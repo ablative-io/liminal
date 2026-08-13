@@ -69,6 +69,34 @@ impl ObserverPublication {
     }
 }
 
+/// Exact settlement wake transferred to a connection whose attach or detach was
+/// refused `MarkerSettlementBackpressure` in THIS process lifetime.
+///
+/// ⛔ CONNECTION-SCOPED BY CONSTRUCTION (participant contract §0.16 build
+/// obligation 3). The lazy implementation pushes `MarkerSettled` to every
+/// connection on the conversation; that is a settlement-timing side channel to
+/// uninvolved parties and is OUTLAWED. There is no conversation-wide fan-out
+/// anywhere on this path: the only way a connection can receive one is for the
+/// registry to hold a waiter it installed from its own refusal. It is likewise
+/// never sent to a connection refused at the ENROLLMENT wrapper, whose refusal
+/// (`EnrollmentSettlementBackpressure`) carries no epoch and therefore cannot
+/// install a waiter at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkerSettledPublication {
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) refused_epoch: u64,
+}
+
+impl MarkerSettledPublication {
+    #[must_use]
+    pub(crate) const fn into_server_push(self) -> ServerPush {
+        ServerPush::MarkerSettled {
+            conversation_id: self.conversation_id,
+            refused_epoch: self.refused_epoch,
+        }
+    }
+}
+
 /// Weak exact-live-connection target captured when an observer arm is installed.
 ///
 /// Cloning this value clones only weak/non-owning publication capability; it
@@ -117,6 +145,49 @@ impl ObserverPublicationTarget {
     }
 }
 
+impl ObserverPublicationTarget {
+    /// Transfers one settlement wake to the exact live inbox that was refused.
+    ///
+    /// Deliberately the SAME weak connection-level capability the observer wake
+    /// uses: §0.16 rules the settlement wake "connection-scoped ... mirroring
+    /// `ObserverProgressed`'s connection-level delivery", and sharing the target
+    /// type is what makes that a structural property rather than a claim. Like
+    /// the observer lane it keeps the latest payload per conversation, which is
+    /// exact here because a connection waits on at most one settlement epoch per
+    /// conversation — its own most recent refusal.
+    pub(crate) fn publish_marker_settled(
+        &self,
+        publication: MarkerSettledPublication,
+    ) -> Result<bool, ParticipantPublicationError> {
+        let Some(inbox) = self.inbox.upgrade() else {
+            return Ok(false);
+        };
+        let should_wake = {
+            let mut inbox = inbox
+                .lock()
+                .map_err(|_| ParticipantPublicationError::InboxPoisoned)?;
+            let replacing = inbox
+                .marker_settled
+                .contains_key(&publication.conversation_id);
+            if !replacing {
+                let occupied = u64::try_from(inbox.marker_settled.len()).unwrap_or(u64::MAX);
+                if occupied >= inbox.limit {
+                    return Err(ParticipantPublicationError::InboxCapacity { limit: inbox.limit });
+                }
+            }
+            let was_empty = inbox.is_empty();
+            inbox
+                .marker_settled
+                .insert(publication.conversation_id, publication);
+            was_empty
+        };
+        if should_wake {
+            self.waker.fire();
+        }
+        Ok(true)
+    }
+}
+
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum ParticipantPublicationError {
     /// A live incarnation was registered more than once.
@@ -141,11 +212,14 @@ struct ReadyPublications {
     limit: u64,
     conversations: BTreeSet<ConversationId>,
     observer_progressed: BTreeMap<ConversationId, ObserverPublication>,
+    marker_settled: BTreeMap<ConversationId, MarkerSettledPublication>,
 }
 
 impl ReadyPublications {
     fn is_empty(&self) -> bool {
-        self.conversations.is_empty() && self.observer_progressed.is_empty()
+        self.conversations.is_empty()
+            && self.observer_progressed.is_empty()
+            && self.marker_settled.is_empty()
     }
 }
 
@@ -156,6 +230,7 @@ impl ReadyPublications {
 pub struct ReadyPublicationBatch {
     pub(crate) conversations: Vec<ConversationId>,
     pub(crate) observer_progressed: Vec<ObserverPublication>,
+    pub(crate) marker_settled: Vec<MarkerSettledPublication>,
 }
 
 /// Inbox strongly owned by exactly one connection process.
@@ -179,6 +254,7 @@ impl ParticipantPublicationInbox {
                 limit,
                 conversations: BTreeSet::new(),
                 observer_progressed: BTreeMap::new(),
+                marker_settled: BTreeMap::new(),
             })),
         }
     }
@@ -198,6 +274,9 @@ impl ParticipantPublicationInbox {
                 .into_iter()
                 .collect(),
             observer_progressed: std::mem::take(&mut inbox.observer_progressed)
+                .into_values()
+                .collect(),
+            marker_settled: std::mem::take(&mut inbox.marker_settled)
                 .into_values()
                 .collect(),
         })
@@ -251,6 +330,36 @@ impl ParticipantPublicationInbox {
             }
             inbox
                 .observer_progressed
+                .insert(publication.conversation_id, publication);
+        }
+        drop(inbox);
+        Ok(())
+    }
+
+    /// Requeues budget-deferred settlement wakes only for vacant conversations.
+    /// An incumbent arrived after the pump's take and supersedes the deferred
+    /// payload, exactly as on the observer lane.
+    pub(crate) fn requeue_marker_settled(
+        &self,
+        publications: impl IntoIterator<Item = MarkerSettledPublication>,
+    ) -> Result<(), ParticipantPublicationError> {
+        let mut inbox = self
+            .inner
+            .lock()
+            .map_err(|_| ParticipantPublicationError::InboxPoisoned)?;
+        for publication in publications {
+            if inbox
+                .marker_settled
+                .contains_key(&publication.conversation_id)
+            {
+                continue;
+            }
+            let occupied = u64::try_from(inbox.marker_settled.len()).unwrap_or(u64::MAX);
+            if occupied >= inbox.limit {
+                return Err(ParticipantPublicationError::InboxCapacity { limit: inbox.limit });
+            }
+            inbox
+                .marker_settled
                 .insert(publication.conversation_id, publication);
         }
         drop(inbox);
@@ -430,6 +539,7 @@ mod tests {
         let ready = inbox.take_ready()?;
         assert_eq!(ready.conversations, vec![7, 8]);
         assert!(ready.observer_progressed.is_empty());
+        assert!(ready.marker_settled.is_empty());
         assert!(!inbox.has_pending()?);
 
         // This notification models the execute-to-wait race: it lands after a

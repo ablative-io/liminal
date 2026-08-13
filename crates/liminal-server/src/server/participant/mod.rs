@@ -65,8 +65,8 @@ pub use production::marker_source::{
 pub(crate) use production::tests::test_participant_config;
 pub(crate) use production::{ProductionParticipantHandler, constant_time_eq};
 pub(crate) use publication::{
-    ObserverPublication, ParticipantPublicationError, ParticipantPublicationInbox,
-    ParticipantPublicationRegistry,
+    MarkerSettledPublication, ObserverPublication, ParticipantPublicationError,
+    ParticipantPublicationInbox, ParticipantPublicationRegistry,
 };
 pub use publication::{
     ObserverPublicationTarget, ParticipantOfferedProgress, ParticipantPublication,

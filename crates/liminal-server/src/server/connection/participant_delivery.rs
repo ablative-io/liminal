@@ -14,9 +14,9 @@ use super::outbound::OutboundError;
 use super::state::ConnectionProcessState;
 use crate::server::participant::publication::ReadyPublicationBatch;
 use crate::server::participant::{
-    InstalledParticipantService, ObserverPublication, ParticipantOfferedProgress,
-    ParticipantPublication, ParticipantPublicationError, ParticipantSemanticError,
-    encode_server_push,
+    InstalledParticipantService, MarkerSettledPublication, ObserverPublication,
+    ParticipantOfferedProgress, ParticipantPublication, ParticipantPublicationError,
+    ParticipantSemanticError, encode_server_push,
 };
 
 /// Signed participant/observer push budget for one connection scheduler slice.
@@ -105,6 +105,20 @@ enum ObserverWork {
 struct ConversationWork {
     conversation_id: ConversationId,
     observer: Option<ObserverWork>,
+    /// Participant contract §0.16's `0x0202 MarkerSettled` wake.
+    ///
+    /// It rides its own lane rather than the observer one because the two
+    /// wakes answer DIFFERENT refusals and coalescing them by conversation
+    /// would silently drop one: an `ObserverProgressed` cannot discharge a
+    /// `MarkerSettlementBackpressure`, and answering that condition with the
+    /// observer row is outlawed by the amendment for exactly that reason.
+    ///
+    /// Unlike the observer lane it holds no encoded head under sink pressure —
+    /// it requeues into the bounded inbox instead. The wake carries no
+    /// per-connection ordering obligation (its whole content is a conversation
+    /// and an epoch), so a re-encode next slice costs a re-encode and nothing
+    /// else.
+    settled: Option<MarkerSettledPublication>,
     participant: bool,
 }
 
@@ -126,8 +140,15 @@ fn prepare_ready_queue(
         state.held_pushes.remove_observer(conversation_id);
     }
 
+    let mut pending_settled: BTreeMap<_, _> = ready_batch
+        .marker_settled
+        .into_iter()
+        .map(|publication| (publication.conversation_id, publication))
+        .collect();
+
     let mut ready = participant_ready.clone();
     ready.extend(pending_observers.keys().copied());
+    ready.extend(pending_settled.keys().copied());
     ready.extend(state.held_pushes.observer_keys().copied());
     ready
         .into_iter()
@@ -142,6 +163,7 @@ fn prepare_ready_queue(
                         .contains_observer(conversation_id)
                         .then_some(ObserverWork::Held)
                 }),
+            settled: pending_settled.remove(&conversation_id),
             participant: participant_ready.contains(&conversation_id),
         })
         .collect()
@@ -191,9 +213,9 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
             ) {
                 Ok(outcome) => outcome,
                 Err(error) if error.is_capacity_refusal() => {
-                    // Preserve the exact typed observer payload and every later
-                    // work item in the bounded inbox. The incumbent encoded
-                    // participant head remains held and unoffered.
+                    // Preserve the exact typed observer payload and every
+                    // later work item in the bounded inbox. The incumbent
+                    // encoded participant head remains held and unoffered.
                     work.observer = Some(observer);
                     queue.push_front(work);
                     state.held_pushes.mark_capacity_refused();
@@ -204,23 +226,36 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
             };
             match outcome {
                 ConversationOutcome::Enqueued { fresh_encode } => {
-                    if fresh_encode {
-                        remaining -= 1;
-                    }
+                    remaining -= usize::from(fresh_encode);
                     enqueued += 1;
                     if work.participant {
                         queue.push_back(work);
                     }
                 }
                 ConversationOutcome::Held { fresh_encode } => {
-                    if fresh_encode {
-                        remaining -= 1;
-                    }
+                    remaining -= usize::from(fresh_encode);
                     if work.participant {
                         deferred_participants.insert(work.conversation_id);
                     }
                 }
                 ConversationOutcome::Done => {}
+            }
+            continue;
+        }
+        if let Some(publication) = work.settled.take() {
+            if service_one_settlement(sink, publication)? {
+                remaining -= 1;
+                enqueued += 1;
+                if work.participant {
+                    queue.push_back(work);
+                }
+            } else {
+                // No held head for this lane: put the exact payload back in the
+                // bounded inbox and let the next slice re-encode it.
+                work.settled = Some(publication);
+                queue.push_front(work);
+                requeue_deferred_work(state, queue, deferred_participants)?;
+                return Ok(enqueued);
             }
             continue;
         }
@@ -249,16 +284,10 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
         };
         match outcome {
             ConversationOutcome::Done => {}
-            ConversationOutcome::Held { fresh_encode } => {
-                if fresh_encode {
-                    remaining -= 1;
-                }
-            }
+            ConversationOutcome::Held { fresh_encode } => remaining -= usize::from(fresh_encode),
             ConversationOutcome::Enqueued { fresh_encode } => {
                 queue.push_back(work);
-                if fresh_encode {
-                    remaining -= 1;
-                }
+                remaining -= usize::from(fresh_encode);
                 enqueued += 1;
             }
         }
@@ -270,6 +299,33 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
     Ok(enqueued)
 }
 
+/// Encodes and enqueues one §0.16 settlement wake, or reports no room.
+///
+/// `Ok(false)` is sink pressure, not a failure: the caller returns the exact
+/// payload to the bounded inbox. Oversize is still a fault, because a complete
+/// frame larger than an empty sink is configuration corruption rather than
+/// pressure.
+fn service_one_settlement<Sink: DeliverySink>(
+    sink: &mut Sink,
+    publication: MarkerSettledPublication,
+) -> Result<bool, ParticipantPumpError> {
+    let frame = encode_server_push(publication.into_server_push())
+        .map_err(ParticipantPumpError::ParticipantCodec)?;
+    let needed = encoded_len(&frame).map_err(OutboundError::Encode)?;
+    if needed > sink.capacity() {
+        return Err(ParticipantPumpError::ObserverOversize {
+            conversation_id: publication.conversation_id,
+            needed,
+            capacity: sink.capacity(),
+        });
+    }
+    if !sink.has_room(needed) {
+        return Ok(false);
+    }
+    sink.enqueue_frame(&frame)?;
+    Ok(true)
+}
+
 fn requeue_deferred_work(
     state: &ConnectionProcessState,
     queue: VecDeque<ConversationWork>,
@@ -279,6 +335,7 @@ fn requeue_deferred_work(
         return Err(ParticipantPumpError::MissingInbox);
     };
     let mut observers = Vec::new();
+    let mut settled = Vec::new();
     for work in queue {
         if work.participant {
             conversations.insert(work.conversation_id);
@@ -286,9 +343,13 @@ fn requeue_deferred_work(
         if let Some(ObserverWork::Pending(publication)) = work.observer {
             observers.push(publication);
         }
+        if let Some(publication) = work.settled {
+            settled.push(publication);
+        }
     }
     inbox.requeue(conversations)?;
     inbox.requeue_observers(observers)?;
+    inbox.requeue_marker_settled(settled)?;
     Ok(())
 }
 

@@ -1,0 +1,47 @@
+   Compiling liminal-protocol v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+warning: function `settlement_matches_request` is never used
+   --> crates/liminal-protocol/src/client/correlation.rs:129:4
+    |
+129 | fn settlement_matches_request(value: &ServerValue, request: &ClientRequest) -> Option<bool> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `liminal-protocol` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.75s
+     Running unittests src/lib.rs (target/debug/deps/liminal_protocol-8a5f5a28a83d7911)
+
+running 4 tests
+test client::a5_settlement_correlation_tests::record_admission_body_conflict_correlates_to_its_own_request ... ok
+test client::a5_settlement_correlation_tests::the_settlement_retry_discipline_does_not_extend_the_195_orphan_window ... FAILED
+test client::a5_settlement_correlation_tests::a_settlement_refusal_correlates_to_no_other_conversation_or_family ... FAILED
+test client::a5_settlement_correlation_tests::settlement_refusals_correlate_to_their_own_pending_request ... FAILED
+
+failures:
+
+---- client::a5_settlement_correlation_tests::the_settlement_retry_discipline_does_not_extend_the_195_orphan_window stdout ----
+
+thread 'client::a5_settlement_correlation_tests::the_settlement_retry_discipline_does_not_extend_the_195_orphan_window' (2499217) panicked at crates/liminal-protocol/src/client/a5_settlement_correlation_tests.rs:249:5:
+assertion failed: super::correlation::matches_request(&row, &attach_request()?)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- client::a5_settlement_correlation_tests::a_settlement_refusal_correlates_to_no_other_conversation_or_family stdout ----
+
+thread 'client::a5_settlement_correlation_tests::a_settlement_refusal_correlates_to_no_other_conversation_or_family' (2499214) panicked at crates/liminal-protocol/src/client/a5_settlement_correlation_tests.rs:208:5:
+assertion failed: super::correlation::matches_request(&enrollment_row, &enrollment_request())
+
+---- client::a5_settlement_correlation_tests::settlement_refusals_correlate_to_their_own_pending_request stdout ----
+
+thread 'client::a5_settlement_correlation_tests::settlement_refusals_correlate_to_their_own_pending_request' (2499216) panicked at crates/liminal-protocol/src/client/a5_settlement_correlation_tests.rs:140:9:
+a settlement refusal must correlate to its own pending CredentialAttachRequest
+
+
+failures:
+    client::a5_settlement_correlation_tests::a_settlement_refusal_correlates_to_no_other_conversation_or_family
+    client::a5_settlement_correlation_tests::settlement_refusals_correlate_to_their_own_pending_request
+    client::a5_settlement_correlation_tests::the_settlement_retry_discipline_does_not_extend_the_195_orphan_window
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 469 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p liminal-protocol --lib`
+TRUE EXIT: 101

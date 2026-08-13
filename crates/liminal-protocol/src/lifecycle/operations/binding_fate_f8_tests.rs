@@ -423,7 +423,7 @@ fn the_retired_precedence_pole_backstop_names_itself_if_it_ever_fires() -> Resul
             let error = refused.error();
             if matches!(
                 error,
-                BindingFateMeasurementError::OwnerTransition(LiveFrontierError::Precedence)
+                BindingFateMeasurementError::OwnerTransition(LiveFrontierError::Precedence(_))
             ) {
                 return Err(format!(
                     "F8 §3.3 BACKSTOP FIRING, BY NAME: the RETIRED Precedence premise has \

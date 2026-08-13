@@ -277,6 +277,23 @@ pub(super) struct ConversationAuthority {
     pub(super) observer_progress: DeliverySeq,
 }
 
+/// The two position allocators captured before a request consumes them.
+///
+/// ⛔ Load-bearing, not tidiness. `StateError::PresentedRefusal` is answered
+/// with `Ok`, so the conversation owner is RETAINED rather than discarded and
+/// cold replayed — a consumed delivery sequence is therefore never re-derived
+/// from durable rows. Leaving the gap in place would make the very next attach
+/// allocate `high_watermark + 2` and meet the seam's record-position check as
+/// `LiveFrontierError::Frontier`: the presentation would have bought a frame
+/// with a broken conversation. Restoring them makes an A5 settlement refusal
+/// indistinguishable from one that returned before allocation ran at all
+/// (participant contract §0.16 presentation law, build obligation 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PositionAllocators {
+    next_order: TransactionOrder,
+    next_seq: DeliverySeq,
+}
+
 /// Failure while applying or replaying one production operation.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StateError {
@@ -682,6 +699,34 @@ impl ConversationAuthority {
         self.pending_debt_dispatch_transition = None;
         self.obligation_debt_dispatch = None;
         self.install_frontier(frontier)
+    }
+
+    /// Captures the two position allocators for a lawful presented refusal.
+    ///
+    /// See [`PositionAllocators`] for why an A5 settlement refusal MUST put
+    /// them back. Kept `pub(super)` so any future presented-refusal site
+    /// reaches the same pair rather than inventing its own rollback.
+    pub(super) const fn position_allocators(&self) -> PositionAllocators {
+        PositionAllocators {
+            next_order: self.next_order,
+            next_seq: self.next_seq,
+        }
+    }
+
+    /// Restores allocators consumed by a request that committed nothing.
+    ///
+    /// Only ever called on the `StateError::PresentedRefusal` path, where
+    /// nothing durable was appended and the owner is retained rather than cold
+    /// replayed.
+    pub(super) const fn restore_position_allocators(&mut self, captured: PositionAllocators) {
+        self.next_order = captured.next_order;
+        self.next_seq = captured.next_seq;
+    }
+
+    /// The next order/sequence pair, for the A5 restoration pins.
+    #[cfg(test)]
+    pub(super) const fn next_position_for_test(&self) -> (TransactionOrder, DeliverySeq) {
+        (self.next_order, self.next_seq)
     }
 
     /// Allocates the next transaction order and delivery sequence pair.

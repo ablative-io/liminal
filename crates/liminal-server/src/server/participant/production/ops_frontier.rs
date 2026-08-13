@@ -318,6 +318,19 @@ impl ConversationAuthority {
         {
             self.record_episode_changed(impact);
         }
+        // ⛔ THE CLEARING WRITE (participant contract §0.16 condition 2). This
+        // is the `RecordAdmissionDecision::DrainFirst` arm's marker lane and the
+        // boot drain's shared core, and it is the ONLY place a `MarkerSettled`
+        // wake originates. Recorded AFTER the drain row appended and the
+        // resulting owner installed, so the wake cannot promise a candidate is
+        // gone before it is.
+        //
+        // The epoch is `candidate.delivery_seq()`, the head of the immutable
+        // sequence lane, which is the same value `precedence_condition`
+        // published as `refused_epoch` when it refused this candidate: the
+        // stage-11 retry discipline matches the two, so removing either would
+        // remove the match.
+        impact.record_marker_settled(candidate.delivery_seq());
         Ok(())
     }
 

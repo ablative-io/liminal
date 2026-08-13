@@ -161,6 +161,16 @@ impl ProductionParticipantHandler {
     /// The impact accumulator is fresh and DISCARDED — boot has no connection
     /// to receive an impact; the listener is not bound until after
     /// `SupervisorInner::new` returns.
+    ///
+    /// That discard is ALSO the boot-drain answer to participant contract
+    /// §0.16's `0x0202 MarkerSettled` wake, and it is correct rather than a
+    /// gap. The amendment scopes the wake to "connections that received the
+    /// refusal in THIS PROCESS LIFETIME"; at boot no connection has received
+    /// anything, the settlement-waiter registry is empty by construction, and
+    /// a wake fired here could only ever be a broadcast to parties that were
+    /// never refused — which obligation 3 outlaws. `persist_next_marker` still
+    /// records the settled epoch on the accumulator it is handed, so the same
+    /// clearing write serves both callers; only this one has nobody to tell.
     pub(super) fn drain_restored_candidate_lane(
         &self,
         conversation_id: ConversationId,

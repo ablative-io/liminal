@@ -5,10 +5,10 @@ use alloc::boxed::Box;
 use super::super::{
     ConnectionConversationBindingOccupied, ConnectionConversationCapacityExceeded,
     ConversationOrderExhausted, ConversationSequenceExhausted, EnrollBound, EnrollmentEnvelope,
-    EnrollmentKnown, EnrollmentReceiptCapacityScope, Generation, IdentityCapacityExceeded,
-    MarkerClosureCapacityExceeded, ObserverBackpressure, ObserverBackpressureState,
-    ReceiptCapacityExceeded, ReceiptExpired, ReceiptExpiryReason, ReceiptReplay, ResponseEnvelope,
-    Retired, ServerDiscriminant, ServerValue,
+    EnrollmentKnown, EnrollmentReceiptCapacityScope, EnrollmentSettlementBackpressure, Generation,
+    IdentityCapacityExceeded, MarkerClosureCapacityExceeded, ObserverBackpressure,
+    ObserverBackpressureState, ReceiptCapacityExceeded, ReceiptExpired, ReceiptExpiryReason,
+    ReceiptReplay, ResponseEnvelope, Retired, ServerDiscriminant, ServerValue,
 };
 
 /// Server response bound to one enrollment request.
@@ -183,6 +183,27 @@ impl EnrollmentResponse {
                 request,
                 state,
             }),
+        }
+    }
+
+    /// A marker candidate is awaiting its drain (participant contract §0.16
+    /// condition 2, enrollment wrapper — amendment A5).
+    ///
+    /// NO epoch label and NO pushed event, by ratified law rather than by
+    /// omission. The enrollment wrapper carries NO membership predicate — an
+    /// `EnrollmentRequest` is `{ conversation_id, enrollment_token }` and the
+    /// token is a replay-dedup key, not a capability — so it cannot tell an
+    /// invited enrollee from a stranger, and any wake or epoch here would be
+    /// granted to both by construction. The enroller retries at its own
+    /// cadence.
+    #[must_use]
+    pub const fn settlement_backpressure(request: &EnrollmentEnvelope) -> Self {
+        Self {
+            value: ServerValue::EnrollmentSettlementBackpressure(
+                EnrollmentSettlementBackpressure {
+                    conversation_id: request.conversation_id,
+                },
+            ),
         }
     }
 

@@ -1968,19 +1968,75 @@ fn allocate_leave_sequence_range(
     Ok(start)
 }
 
+/// Which of amendment A5's clearing conditions raised a `Precedence` refusal.
+///
+/// Participant contract §0.16 rules ONE seam (`apply_live_transition`) into
+/// THREE clearing conditions with no shared retry story, and rules a different
+/// lawful answer for each. The bare `Precedence` variant destroyed that
+/// discriminant, which is why all three wrappers flattened it into the same
+/// bare connection close. The condition is therefore computed AT the seam,
+/// from the exact state the seam's own guard reads, and travels out with the
+/// refusal — no caller re-derives it and no caller enumerates call sites.
+///
+/// [`Self::Unclassified`] exists so the type can never lie: a `Precedence`
+/// raised somewhere that is NOT one of the amendment's three conditions says
+/// so, and the server keeps the pre-amendment bare close for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrecedenceCondition {
+    /// Condition 1 — a pending binding terminal holds the immutable lane. The
+    /// blocked resource is hard-observer progress and the wake is the already
+    /// pushed `0x0200 ObserverProgressed`.
+    BindingTerminal,
+    /// Condition 2 — a compaction-marker candidate is awaiting its drain.
+    MarkerDrain {
+        /// Delivery sequence of the marker candidate that must drain NEXT.
+        ///
+        /// This is the settlement epoch the refusal waits on. It is the head of
+        /// the immutable sequence lane, which is exactly the candidate
+        /// `drain_next_marker_core` consumes (it takes `first()` and refuses a
+        /// binding terminal there), so the epoch a refusal carries is the epoch
+        /// the clearing write announces.
+        settlement_epoch: DeliverySeq,
+    },
+    /// Condition 3 — an armed fenced-recovery block. Excluded by the board #13
+    /// constructor census: no production constructor of
+    /// `StoredAttachModeV3::Fenced` exists, so this arm is unreachable in
+    /// production and gets no wire row. The first production constructor VOIDS
+    /// that exclusion.
+    FencedRecovery,
+    /// Not one of §0.16's three conditions: a `Precedence` raised over a
+    /// retained marker below a measured floor, or with an order-lane candidate
+    /// the sequence lane cannot name. Never presented as a settlement.
+    Unclassified,
+}
+
 /// Protocol-internal failure while deriving a live frontier from a typed lifecycle commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::lifecycle) enum LiveFrontierTransitionError {
     /// The typed commit names another conversation or participant history.
     Authority,
     /// An immutable candidate or recovery interval must be handled by its dedicated transition.
-    Precedence,
+    ///
+    /// Carries WHICH of amendment A5's clearing conditions blocked, computed at
+    /// the raise site from the state the guard itself read.
+    Precedence(PrecedenceCondition),
     /// The commit's retained rows do not immediately follow the current durable high watermark.
     RecordPosition,
     /// Checked claim relocation exceeded the fixed-width sequence or order domain.
     Exhausted,
     /// Derived exact owners disagree with the protocol-produced aggregate ledgers.
     ResultingFrontier,
+}
+
+/// Boxes one classified `Precedence` refusal with its unchanged frontiers.
+fn precedence(
+    frontiers: ClaimFrontiers,
+    condition: PrecedenceCondition,
+) -> Box<(ClaimFrontiers, LiveFrontierTransitionError)> {
+    Box::new((
+        frontiers,
+        LiveFrontierTransitionError::Precedence(condition),
+    ))
 }
 
 fn select_retained_marker_records(records: &[RetainedCausalRecord]) -> Vec<RetainedCausalRecord> {
@@ -2389,6 +2445,53 @@ impl ClaimFrontiers {
         validate_cross_counter(&self.sequence, &self.order).is_ok()
     }
 
+    /// Reports whether an immutable candidate or armed recovery currently has
+    /// precedence over an ordinary live transition.
+    ///
+    /// This IS the guard `apply_live_transition` and
+    /// `apply_pending_binding_terminal` run — they call it rather than
+    /// restating the predicate, so the classifier below can never disagree with
+    /// the condition that fired.
+    #[must_use]
+    pub fn live_transition_blocked(&self) -> bool {
+        !self.sequence.immutable_candidates.is_empty()
+            || self.sequence.recovery.is_some()
+            || !self.order.immutable_candidates.is_empty()
+            || self.order.recovery.is_some()
+    }
+
+    /// Classifies the state that blocks a live transition into one of amendment
+    /// A5's clearing conditions (participant contract §0.16).
+    ///
+    /// Ordering is a ruling, not an accident. An armed recovery outranks
+    /// everything: it is the census-excluded arm and must never be dressed as a
+    /// settlement. Otherwise the answer is the HEAD of the immutable sequence
+    /// lane — the next thing that must clear — because that is the exact
+    /// candidate the drain consumes and therefore the only one whose clearing
+    /// the server can honestly promise to announce. A head binding terminal
+    /// standing in front of a marker candidate is answered as condition 1, and
+    /// the retry that follows its `ObserverProgressed` then hears condition 2:
+    /// each refusal names the live blocker rather than a later one.
+    ///
+    /// An order-lane candidate with an empty sequence lane cannot be named (the
+    /// order lane stores candidate KEYS, not delivery sequences) and is
+    /// therefore [`PrecedenceCondition::Unclassified`] rather than guessed.
+    #[must_use]
+    pub fn precedence_condition(&self) -> PrecedenceCondition {
+        if self.sequence.recovery.is_some() || self.order.recovery.is_some() {
+            return PrecedenceCondition::FencedRecovery;
+        }
+        match self.sequence.immutable_candidates.first() {
+            Some(ImmutableSequenceCandidate::Marker(marker)) => PrecedenceCondition::MarkerDrain {
+                settlement_epoch: marker.delivery_seq,
+            },
+            Some(ImmutableSequenceCandidate::BindingTerminal { .. }) => {
+                PrecedenceCondition::BindingTerminal
+            }
+            None => PrecedenceCondition::Unclassified,
+        }
+    }
+
     /// Applies one protocol-normalized live lifecycle transition.
     ///
     /// Only sibling lifecycle operations can call this seam. They derive the
@@ -2401,12 +2504,12 @@ impl ClaimFrontiers {
         sequence_ledger: SequenceLedger,
         order_ledger: OrderLedger,
     ) -> Result<Self, Box<(Self, LiveFrontierTransitionError)>> {
-        if !self.sequence.immutable_candidates.is_empty()
-            || self.sequence.recovery.is_some()
-            || !self.order.immutable_candidates.is_empty()
-            || self.order.recovery.is_some()
-        {
-            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+        if self.live_transition_blocked() {
+            let condition = self.precedence_condition();
+            return Err(Box::new((
+                self,
+                LiveFrontierTransitionError::Precedence(condition),
+            )));
         }
         let Ok(active) = ActiveIdentityRanks::try_new(
             active_identities,
@@ -2471,12 +2574,12 @@ impl ClaimFrontiers {
         admission_order: super::AdmissionOrder,
         order_ledger: OrderLedger,
     ) -> Result<Self, Box<(Self, LiveFrontierTransitionError)>> {
-        if !self.sequence.immutable_candidates.is_empty()
-            || self.sequence.recovery.is_some()
-            || !self.order.immutable_candidates.is_empty()
-            || self.order.recovery.is_some()
-        {
-            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+        if self.live_transition_blocked() {
+            let condition = self.precedence_condition();
+            return Err(Box::new((
+                self,
+                LiveFrontierTransitionError::Precedence(condition),
+            )));
         }
         let mut participants = self.active_identities.participants().to_vec();
         let Some(participant) = participants
@@ -2544,10 +2647,10 @@ impl ClaimFrontiers {
             return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
         };
         let Some(sequence_recovery) = self.sequence.recovery else {
-            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+            return Err(precedence(self, PrecedenceCondition::FencedRecovery));
         };
         let Some(order_recovery) = self.order.recovery else {
-            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+            return Err(precedence(self, PrecedenceCondition::FencedRecovery));
         };
         if !Self::fenced_recovery_authority_matches(
             current,
@@ -2563,7 +2666,8 @@ impl ClaimFrontiers {
         let candidates_empty = self.sequence.immutable_candidates.is_empty()
             && self.order.immutable_candidates.is_empty();
         if !(candidates_empty || finalizes_pending && pending_terminal_matches) {
-            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+            let condition = self.precedence_condition();
+            return Err(precedence(self, condition));
         }
         if !Self::fenced_records_match(
             participant,
@@ -3546,10 +3650,14 @@ impl ClaimFrontiers {
         LiveFrontierTransitionError,
     > {
         if self.sequence.recovery.is_some() || self.order.recovery.is_some() {
-            return Err(LiveFrontierTransitionError::Precedence);
+            return Err(LiveFrontierTransitionError::Precedence(
+                PrecedenceCondition::FencedRecovery,
+            ));
         }
         let [first] = self.sequence.immutable_candidates.as_slice() else {
-            return Err(LiveFrontierTransitionError::Precedence);
+            return Err(LiveFrontierTransitionError::Precedence(
+                self.precedence_condition(),
+            ));
         };
         let ImmutableSequenceCandidate::BindingTerminal {
             delivery_seq,
@@ -3557,7 +3665,9 @@ impl ClaimFrontiers {
             owner,
         } = *first
         else {
-            return Err(LiveFrontierTransitionError::Precedence);
+            return Err(LiveFrontierTransitionError::Precedence(
+                self.precedence_condition(),
+            ));
         };
         if owner != expected_owner || admission_order != expected_order {
             return Err(LiveFrontierTransitionError::Authority);

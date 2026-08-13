@@ -18,10 +18,10 @@ use liminal_protocol::lifecycle::{
     EnrollmentCommitParameters, EnrollmentFingerprint, EnrollmentLiveReceipt,
     EnrollmentLookupResult, EnrollmentProvenance, EnrollmentTokenPhase,
     FreshParticipantCapacityCounter, InitialEnrollmentCommitValues,
-    InitialEnrollmentOperationDecision, InitialEnrollmentOperationInput, LiveFrontierOwner,
-    ParticipantSlotAllocatorProof, ResolvedIdentity, RetainedRecordCharge,
-    SemanticConnectionCapacityDecision, apply_enrollment_frontier, apply_initial_enrollment,
-    commit_enrollment, decide_enrolled_operation, lookup_enrollment,
+    InitialEnrollmentOperationDecision, InitialEnrollmentOperationInput, LiveFrontierError,
+    LiveFrontierOwner, ParticipantSlotAllocatorProof, PrecedenceCondition, ResolvedIdentity,
+    RetainedRecordCharge, SemanticConnectionCapacityDecision, apply_enrollment_frontier,
+    apply_initial_enrollment, commit_enrollment, decide_enrolled_operation, lookup_enrollment,
     select_enrollment_binding_slot,
 };
 use liminal_protocol::wire::{
@@ -39,7 +39,35 @@ use super::facts::{self, Digest};
 use super::frontier;
 use super::log::{StoredEnrollmentAllocation, StoredEnrollmentRequest, StoredOperation};
 use super::outbox_projection::ReplayedProjectionFacts;
+use super::presented_refusal::PresentedRefusal;
 use super::state::{ConversationAuthority, DurableAppend, Slot, StateError};
+
+/// Selects the lawful §0.16 answer for a subsequent enrollment blocked at the
+/// seam.
+///
+/// The enrollment leg is where the amendment SPLITS. Condition 1 reuses the
+/// register's existing enrollment `ObserverBackpressure` row, so it adds no wire
+/// surface. Condition 2 gets `EnrollmentSettlementBackpressure` — conversation
+/// id only, NO epoch, and NO pushed event of any kind — because this wrapper
+/// carries no membership predicate and therefore holds no mechanism capable of
+/// trading enrollee convenience against stranger disclosure. Conditions 3 and
+/// Unclassified keep the pre-amendment bare close.
+const fn enrollment_settlement_answer(
+    condition: PrecedenceCondition,
+    envelope: EnrollmentEnvelope,
+    observer_progress: u64,
+) -> Option<EnrollmentResponse> {
+    match condition {
+        PrecedenceCondition::BindingTerminal => Some(EnrollmentResponse::observer_backpressure(
+            envelope,
+            liminal_protocol::wire::ObserverBackpressureState::initial(observer_progress),
+        )),
+        PrecedenceCondition::MarkerDrain { .. } => {
+            Some(EnrollmentResponse::settlement_backpressure(&envelope))
+        }
+        PrecedenceCondition::FencedRecovery | PrecedenceCondition::Unclassified => None,
+    }
+}
 
 /// Server-owned participant-slot allocation proof for one enrollment.
 #[derive(Clone, Copy, Debug)]
@@ -92,6 +120,12 @@ impl ConversationAuthority {
     /// shell genesis is minted only on the authorized-new arm, immediately
     /// before the enrollment's own committing append — a refused request on a
     /// never-seen conversation id leaves the durable store byte-identical.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the amendment adds the position-allocator capture and its restore arm to an \
+                  already-long arm; the capture must sit in the same function as the allocator \
+                  it captures, or the pairing stops being checkable by reading"
+    )]
     pub(super) fn apply_enrollment_with_impact(
         &mut self,
         request: &EnrollmentRequest,
@@ -154,6 +188,10 @@ impl ConversationAuthority {
         // an authorized enrollment is about to append its own entry.
         self.ensure_genesis(appender)?;
         let source_log_sequence = self.next_log_sequence;
+        // §0.16 obligation 1: captured before the allocator runs, restored if
+        // the subsequent-enrollment frontier transition presents a settlement
+        // refusal.
+        let captured_positions = self.position_allocators();
         let (attached_order, attached_seq) = self.allocate_position()?;
         let allocation = StoredEnrollmentAllocation {
             participant_id: self.next_participant,
@@ -194,7 +232,15 @@ impl ConversationAuthority {
                     )?,
             }
         } else {
-            self.enroll_commit(request, &allocation, CommitMode::Live(appender))?
+            match self.enroll_commit(request, &allocation, CommitMode::Live(appender)) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if matches!(error, StateError::PresentedRefusal(_)) {
+                        self.restore_position_allocators(captured_positions);
+                    }
+                    return Err(error);
+                }
+            }
         };
         let source = StoredOperation::Enrolled {
             request: request.into(),
@@ -342,6 +388,7 @@ impl ConversationAuthority {
         allocation: &StoredEnrollmentAllocation,
         mode: CommitMode<'_>,
     ) -> Result<EnrollBound, StateError> {
+        let presenting = matches!(mode, CommitMode::Live(_));
         let allocated_slot = AllocatedParticipantSlot::from_allocator(ServerSlotProof {
             conversation_id: request.conversation_id,
             participant_id: allocation.participant_id,
@@ -376,13 +423,55 @@ impl ConversationAuthority {
             committed.attached.admission_order(),
             encoded_charge,
         );
-        let transitioned = apply_enrollment_frontier(self.take_frontier()?, committed, charge)
-            .map_err(|failure| {
-                StateError::invariant(format!(
-                    "subsequent enrollment frontier transition failed: {:?}",
-                    failure.error()
-                ))
-            })?;
+        let transitioned = match apply_enrollment_frontier(self.take_frontier()?, committed, charge)
+        {
+            Ok(transitioned) => transitioned,
+            Err(failure) => {
+                let error = failure.error();
+                // Participant contract §0.16 condition 2, ENROLLMENT
+                // wrapper. The row carries NO epoch and gets NO wake of any
+                // kind, by ratified law rather than by omission: an
+                // `EnrollmentRequest` is `{ conversation_id,
+                // enrollment_token }` and that token is a replay-dedup key,
+                // not a capability, so this wrapper cannot tell an invited
+                // enrollee from a stranger and any label or wake would be
+                // granted to both by construction. The enroller retries at
+                // its own cadence.
+                //
+                // Condition 1 reuses the register's existing enrollment
+                // `ObserverBackpressure` row, which adds no wire surface
+                // anywhere. Conditions 3/Unclassified keep the bare close.
+                //
+                // ⛔ REPLAY IS NEVER PRESENTED.
+                let answer = match (presenting, error) {
+                    (true, LiveFrontierError::Precedence(condition)) => {
+                        enrollment_settlement_answer(
+                            condition,
+                            enrollment_envelope(request),
+                            self.observer_progress,
+                        )
+                    }
+                    _ => None,
+                };
+                let Some(response) = answer else {
+                    return Err(StateError::invariant(format!(
+                        "subsequent enrollment frontier transition failed: {error:?}"
+                    )));
+                };
+                // §0.16 obligation 1. `enroll_commit` consumed the frontier
+                // and nothing else — the slot is inserted later, in
+                // `publish_enrollment` — so the frontier goes straight back
+                // and the arm restores the position allocators. Every
+                // refusal arm on this wrapper returns before the
+                // enrollment's own durable append, so the durable store is
+                // byte-identical across the refusal.
+                let (_, owner) = failure.into_parts();
+                self.install_frontier(owner)?;
+                return Err(StateError::PresentedRefusal(PresentedRefusal::enrollment(
+                    response,
+                )));
+            }
+        };
         let (committed, owner) = transitioned.into_parts();
         self.publish_enrollment(committed, owner, request, allocation, mode)
     }

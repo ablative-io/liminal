@@ -17,7 +17,10 @@ use super::super::{
     ParticipantAckCommit, PendingFinalization, PendingLeaveCommitParameters,
     PrepareLeaveAuthorityError, RetainedCausalRecord, RetainedCausalRecordKind, SequenceLedger,
     StoredEdge, VerifiedLeaveRequest,
-    claim_frontier::{BindingTerminalOwner, FencedMarkerSourceRecord, LiveFrontierTransitionError},
+    claim_frontier::{
+        BindingTerminalOwner, FencedMarkerSourceRecord, LiveFrontierTransitionError,
+        PrecedenceCondition,
+    },
     commit_leave, commit_pending_leave,
 };
 use super::{
@@ -1091,7 +1094,13 @@ pub enum LiveFrontierError {
     /// Commit and live owner name different authority.
     Authority,
     /// A mandatory immutable/recovery transition has precedence.
-    Precedence,
+    ///
+    /// Carries WHICH of amendment A5's clearing conditions blocked
+    /// (participant contract §0.16). The law attaches to the SEAM, so the
+    /// discriminant is produced by `apply_live_transition`'s own guard and
+    /// carried out through every wrapper — a future wrapper inherits it
+    /// without being enumerated anywhere.
+    Precedence(PrecedenceCondition),
     /// Canonical keyed row charges differ from the commit-derived retained rows.
     RetainedCharge,
     /// The retained causal-row cap would be exceeded.
@@ -1658,7 +1667,9 @@ fn transition<T>(
 const fn map_frontier_error(error: LiveFrontierTransitionError) -> LiveFrontierError {
     match error {
         LiveFrontierTransitionError::Authority => LiveFrontierError::Authority,
-        LiveFrontierTransitionError::Precedence => LiveFrontierError::Precedence,
+        LiveFrontierTransitionError::Precedence(condition) => {
+            LiveFrontierError::Precedence(condition)
+        }
         LiveFrontierTransitionError::RecordPosition
         | LiveFrontierTransitionError::Exhausted
         | LiveFrontierTransitionError::ResultingFrontier => LiveFrontierError::Frontier,

@@ -6,9 +6,9 @@ use super::super::{
     ClosureRefusalReason, ClosureSnapshot, ConnectionConversationCapacityExceeded, ConversationId,
     DetachCommitted, DetachEnvelope, DetachInProgress, DetachStaleAuthority, Generation,
     LeaveAttemptToken, LeaveCommitted, LeaveEnvelope, LeaveStaleAuthority,
-    MarkerClosureCapacityExceeded, NoBinding, ObserverBackpressure, ObserverBackpressureState,
-    ParticipantId, ParticipantReferenceEnvelope, ParticipantUnknown, ResponseEnvelope, Retired,
-    ServerDiscriminant, ServerValue, StaleAuthority,
+    MarkerClosureCapacityExceeded, MarkerSettlementBackpressure, NoBinding, ObserverBackpressure,
+    ObserverBackpressureState, ParticipantId, ParticipantReferenceEnvelope, ParticipantUnknown,
+    ResponseEnvelope, Retired, ServerDiscriminant, ServerValue, SettlementEpoch, StaleAuthority,
 };
 
 use alloc::boxed::Box;
@@ -113,6 +113,29 @@ impl DetachResponse {
                 committed_binding_epoch,
                 state,
             }),
+        }
+    }
+
+    /// A marker candidate is awaiting its drain (participant contract §0.16
+    /// condition 2, detach wrapper — amendment A5).
+    ///
+    /// Detach requires an existing attached binding, a membership predicate
+    /// strictly stronger than attach's, so this row carries the settlement
+    /// epoch and is paired with the `0x0202 MarkerSettled` wake. Answering the
+    /// condition with [`Self::observer_backpressure`] is OUTLAWED: it would
+    /// promise an `ObserverProgressed` that nothing sends.
+    #[must_use]
+    pub const fn marker_settlement_backpressure(
+        request: &DetachEnvelope,
+        refused_epoch: SettlementEpoch,
+    ) -> Self {
+        Self {
+            value: ServerValue::MarkerSettlementBackpressure(
+                MarkerSettlementBackpressure::Detach {
+                    conversation_id: request.conversation_id,
+                    refused_epoch,
+                },
+            ),
         }
     }
 

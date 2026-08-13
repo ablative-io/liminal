@@ -101,6 +101,8 @@ mod tests_14_attach_presentation;
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_37_observed_provenance;
 #[cfg(test)]
+mod tests_a5_settlement;
+#[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_binding;
 #[cfg(test)]

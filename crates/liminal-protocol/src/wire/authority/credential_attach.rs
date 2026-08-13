@@ -8,11 +8,11 @@ use super::super::{
     ConnectionConversationCapacityExceeded, ConversationOrderExhausted,
     ConversationSequenceExhausted, DeliverySeq, Generation, MarkerClosureCapacityExceeded,
     MarkerMismatch, MarkerMismatchBody, MarkerNotDelivered, MarkerNotDeliveredReason,
-    MarkerProofRequest, ObserverBackpressure, ObserverBackpressureState,
-    ParticipantReferenceEnvelope, ParticipantUnknown, ReceiptCapacityExceeded,
-    ReceiptCapacityScope, ReceiptExpired, ReceiptExpiryReason, ReceiptReplay, ResponseEnvelope,
-    Retired, SequenceAllocatingEnvelope, SequenceBudget, ServerDiscriminant, ServerValue,
-    StaleAuthority, StaleOrUnknownReceipt,
+    MarkerProofRequest, MarkerSettlementBackpressure, ObserverBackpressure,
+    ObserverBackpressureState, ParticipantReferenceEnvelope, ParticipantUnknown,
+    ReceiptCapacityExceeded, ReceiptCapacityScope, ReceiptExpired, ReceiptExpiryReason,
+    ReceiptReplay, ResponseEnvelope, Retired, SequenceAllocatingEnvelope, SequenceBudget,
+    ServerDiscriminant, ServerValue, SettlementEpoch, StaleAuthority, StaleOrUnknownReceipt,
 };
 use crate::wire::closure::{ClosureCheckedEnvelope, ClosureRefusalReason, ClosureSnapshot};
 
@@ -262,6 +262,34 @@ impl CredentialAttachResponse {
                 request,
                 state,
             }),
+        }
+    }
+
+    /// A marker candidate is awaiting its drain (participant contract §0.16
+    /// condition 2, attach wrapper — amendment A5).
+    ///
+    /// The attach wrapper validates conversation membership TWICE before the
+    /// seam (no slot for this participant refuses `participant_unknown`; the
+    /// credential lookup admits only `AuthorizedFresh`), which is what
+    /// entitles this row to carry the settlement epoch and to be paired with
+    /// the `0x0202 MarkerSettled` wake. Answering this condition with
+    /// [`Self::observer_backpressure`] is OUTLAWED: it would promise an
+    /// `ObserverProgressed` that nothing sends.
+    ///
+    /// The epoch comes from the envelope's own conversation and the frontier's
+    /// head marker candidate, never from the request.
+    #[must_use]
+    pub const fn marker_settlement_backpressure(
+        request: &AttachEnvelope,
+        refused_epoch: SettlementEpoch,
+    ) -> Self {
+        Self {
+            value: ServerValue::MarkerSettlementBackpressure(
+                MarkerSettlementBackpressure::CredentialAttach {
+                    conversation_id: request.conversation_id,
+                    refused_epoch,
+                },
+            ),
         }
     }
 

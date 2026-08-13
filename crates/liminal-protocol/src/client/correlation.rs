@@ -97,7 +97,60 @@ impl RequestKey {
 pub(super) fn matches_request(value: &ServerValue, request: &ClientRequest) -> bool {
     match request {
         ClientRequest::ObserverRecovery(expected) => observer_response_matches(value, expected),
-        _ => response_key(value, 0) == RequestKey::from_request(request, 0),
+        _ => settlement_matches_request(value, request)
+            .unwrap_or_else(|| response_key(value, 0) == RequestKey::from_request(request, 0)),
+    }
+}
+
+/// Correlates a §0.16 settlement refusal to the request it answers, by
+/// conversation and request FAMILY.
+///
+/// # Why this cannot key on identity, and why it is still exact
+///
+/// The ratified rows are `{ conversation_id, refused_epoch }` and, at the
+/// enrollment wrapper, `{ conversation_id }` — fixed schema, and adding a
+/// participant or attempt-token field would be a new amendment rather than a
+/// build detail (seat ruling 4, 2026-08-13). So `response_key` cannot mint a
+/// key that equals an attach, detach, or enrollment key, and without this the
+/// refusal falls to `RequestKey::Unsolicited` and lands as `ForeignResponse` —
+/// converting a LAWFUL presentation back into a client error and defeating the
+/// amendment at the last hop.
+///
+/// The match is nonetheless exact for what it decides, because of where it is
+/// asked. It runs against the ONE outstanding `expected.request` slot, after
+/// `binding.accepts_request` has already refused a foreign binding. What is
+/// left to establish is only that this refusal belongs to that request, and the
+/// wire carries both halves of that: the per-family variant IS the request
+/// family (a `CredentialAttach` row can never answer a detach), and the
+/// conversation id is the scope. A settlement refusal for another conversation,
+/// or of another family, still says no.
+///
+/// Returns `None` for every value that is not a settlement refusal, so the
+/// ordinary identity keying below is untouched.
+const fn settlement_matches_request(value: &ServerValue, request: &ClientRequest) -> Option<bool> {
+    match value {
+        ServerValue::MarkerSettlementBackpressure(refusal) => Some(match (refusal, request) {
+            (
+                crate::wire::MarkerSettlementBackpressure::CredentialAttach {
+                    conversation_id, ..
+                },
+                ClientRequest::CredentialAttach(pending),
+            ) => *conversation_id == pending.conversation_id,
+            (
+                crate::wire::MarkerSettlementBackpressure::Detach {
+                    conversation_id, ..
+                },
+                ClientRequest::Detach(pending),
+            ) => *conversation_id == pending.conversation_id,
+            _ => false,
+        }),
+        ServerValue::EnrollmentSettlementBackpressure(refusal) => Some(match request {
+            ClientRequest::Enrollment(pending) => {
+                refusal.conversation_id == pending.conversation_id
+            }
+            _ => false,
+        }),
+        _ => None,
     }
 }
 
@@ -158,17 +211,17 @@ pub(super) const fn participant_ack_request(
 
 fn response_key(value: &ServerValue, ambiguous_authorization: u64) -> RequestKey {
     let key = match value {
-        // The settlement family rides this arm as a MEASURED LIMIT, not as a
-        // stub. This function keys on the request identity the WIRE carries,
-        // and that family's ratified schema is exactly
-        // `{ conversation_id, refused_epoch }` -- `{ conversation_id }` at the
-        // enrollment wrapper (participant contract §0.16 condition 2) -- with
-        // no participant, generation, or attempt token. No key here can equal
-        // an attach, detach, or enrollment key, so the honest answer is the
-        // bytes' answer rather than a guess at the one outstanding request.
-        // Closing the gap is a client-behavior decision (widen `RequestKey` to
-        // a conversation-scoped match, or carry more in the row) owned by the
-        // leg that builds the retry discipline. Pinned by
+        // The settlement family stays `Unsolicited` HERE and is correlated one
+        // level up, in `settlement_matches_request`. This function keys on the
+        // request IDENTITY the wire carries, and the family's ratified schema
+        // is exactly `{ conversation_id, refused_epoch }` -- `{ conversation_id
+        // }` at the enrollment wrapper (participant contract §0.16 condition 2)
+        // -- with no participant, generation, or attempt token. Minting a key
+        // from a conversation alone would make `same_identity` claim an
+        // identity match the bytes do not carry, and `same_identity` is what
+        // separates `DelayedResponse` from `ForeignResponse` for every other
+        // family. So the identity keying stays honest and the family+
+        // conversation correlation lives beside it. Pinned by
         // `a5_settlement_correlation_tests`.
         ServerValue::ParticipantTransportRejected(_)
         | ServerValue::MarkerSettlementBackpressure(_)

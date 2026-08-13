@@ -19,8 +19,8 @@ use liminal::durability::DurableStore;
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, AttachCommit, AttachFrontierCharges, AttachTransition,
     BindingSlotDecision, BindingState, CredentialAttachLiveReceipt, CredentialAttachLookupResult,
-    LiveFrontierOwner, PresentedIdentity, ReceiptDeadlines, RetainedRecordCharge,
-    SemanticConnectionCapacityDecision, apply_attach_frontier, commit_attach,
+    LiveFrontierError, LiveFrontierOwner, PrecedenceCondition, PresentedIdentity, ReceiptDeadlines,
+    RetainedRecordCharge, SemanticConnectionCapacityDecision, apply_attach_frontier, commit_attach,
     decide_attached_operation, lookup_credential_attach, select_credential_attach_binding_slot,
 };
 use liminal_protocol::wire::{
@@ -51,6 +51,20 @@ use super::state::{
     AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend,
     PendingBindingFate, Slot, StateError,
 };
+
+/// Whether this commit path may PRESENT a §0.16 settlement refusal.
+///
+/// Live requests may; a cold replay may not — see `transition_attach_frontier`.
+#[derive(Clone, Copy)]
+enum AttachPresentation {
+    /// A live request, carrying the observer progress condition 1's row needs.
+    Live {
+        /// Durable hard-observer progress, the initial refusal epoch.
+        observer_progress: u64,
+    },
+    /// A durable row being replayed. Never presented.
+    Replay,
+}
 
 impl ConversationAuthority {
     /// Applies one credential-attach request end to end.
@@ -143,6 +157,11 @@ impl ConversationAuthority {
                 displace,
             } => (reservation, retire, displace),
         };
+        // §0.16 obligation 1. Captured BEFORE the first allocator runs, so a
+        // settlement refusal raised four calls deeper can put the allocators
+        // back — the `Ok` at the funnel retains this owner instead of cold
+        // replaying it, so nothing else ever would.
+        let captured_positions = self.position_allocators();
         let (attached_order, attached_seq, attach_mode) =
             self.allocate_attach_mode(slot.binding, envelope)?;
         let allocation = stored_attach_allocation(
@@ -155,13 +174,21 @@ impl ConversationAuthority {
         let source_log_sequence = self.next_log_sequence;
         let source = attached_source(request, allocation, &attach_mode);
         let projection_facts = capture_projection_prestate(self, &source);
-        let outcome = self.attach_commit(
+        let outcome = match self.attach_commit(
             request,
             &allocation,
             &attach_mode,
             store,
             CommitMode::Live(appender),
-        )?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if matches!(error, StateError::PresentedRefusal(_)) {
+                    self.restore_position_allocators(captured_positions);
+                }
+                return Err(error);
+            }
+        };
         self.record_attached_source(
             AttachedSourceRecord {
                 source_log_sequence,
@@ -273,6 +300,65 @@ impl ConversationAuthority {
         }
     }
 
+    /// Whether this commit path may PRESENT a §0.16 settlement refusal.
+    const fn attach_presentation(&self, mode: &CommitMode<'_>) -> AttachPresentation {
+        match mode {
+            CommitMode::Live(_) => AttachPresentation::Live {
+                observer_progress: self.observer_progress,
+            },
+            CommitMode::Replay { .. } => AttachPresentation::Replay,
+        }
+    }
+
+    /// Restores every authority `attach_commit` consumed before the refusal
+    /// existed, then presents it (participant contract §0.16, build
+    /// obligation 1).
+    ///
+    /// # What must be restored, and why `into_parts` alone is not enough
+    ///
+    /// The refusal is raised inside `attach_commit`, AFTER `slots.remove_entry`,
+    /// `take_frontier`, and `prepare_selected_fenced_finalizer` have run: the
+    /// carrier consumes authority before the refusal exists, and
+    /// `LiveFrontierFailure::into_parts` gives back only the frontier owner.
+    /// So this restores the slot entry and the frontier here, the arm restores
+    /// the position allocators (see [`PositionAllocators`]), and the pin
+    /// measures all three plus the finalizer state rather than asserting them.
+    ///
+    /// # ⛔ The finalizer tripwire
+    ///
+    /// A prepared fenced finalizer has NO inverse: `select_fenced_finalizer`
+    /// has already consumed a fate-occurrence presentation owner and
+    /// `prepare_selected_fenced_finalizer` has moved a pending specific fate
+    /// into a prepared ordinary one. Rather than half-restore, this path
+    /// REFUSES TO PRESENT when a finalizer was selected and falls back to the
+    /// pre-amendment bare close, which discards the part-consumed owner and
+    /// cold-replays durable truth. That arm is unreachable in production today
+    /// — the live path refuses `PendingFinalization` one stage earlier at
+    /// `allocate_attach_mode`, so `select_fenced_finalizer` returns `None` —
+    /// and it is exactly §0.16 condition 3's census-excluded fenced territory.
+    /// The first production `StoredAttachModeV3::Fenced` constructor makes this
+    /// arm live and owes the restore its own lane.
+    fn restore_and_present_attach(
+        &mut self,
+        participant_id: liminal_protocol::wire::ParticipantId,
+        slot: Slot,
+        owner: LiveFrontierOwner,
+        finalizer_selected: bool,
+        response: CredentialAttachResponse,
+    ) -> Result<AttachBound, StateError> {
+        if finalizer_selected {
+            return Err(StateError::invariant(
+                "attach frontier transition failed: a settlement refusal cannot be presented \
+                 after a fenced finalizer was selected -- see restore_and_present_attach",
+            ));
+        }
+        self.install_frontier(owner)?;
+        self.slots.insert(participant_id, slot);
+        Err(StateError::PresentedRefusal(
+            PresentedRefusal::credential_attach(response),
+        ))
+    }
+
     /// Replays one committed attach entry from its stored inputs.
     pub(super) fn replay_attached(
         &mut self,
@@ -305,6 +391,14 @@ impl ConversationAuthority {
     /// active epoch atomically (one ordered `Detached(Superseded)`/`Attached`
     /// handoff through the crate's verified transition). Any other pairing is
     /// a drifted log and fails loudly.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the amendment adds ONE conditional arm (the settlement refusal and its \
+                  restoration) to an already-long commit core; splitting the core to fit the \
+                  lint would move the take/install pairing of the frontier, the slot, and the \
+                  shell across a function boundary, which is exactly the coupling the \
+                  restoration obligation depends on being visible in one place"
+    )]
     pub(super) fn attach_commit(
         &mut self,
         request: &CredentialAttachRequest,
@@ -314,6 +408,7 @@ impl ConversationAuthority {
         mode: CommitMode<'_>,
     ) -> Result<AttachBound, StateError> {
         let source_sequence = self.next_log_sequence;
+        let presentation = self.attach_presentation(&mode);
         let (participant_id, mut slot) = self
             .slots
             .remove_entry(&request.participant_id)
@@ -329,7 +424,10 @@ impl ConversationAuthority {
         let (result_generation, parameters) = stored_attach_parameters(request, allocation)?;
         let frontier_owner = self.take_frontier()?;
         let (verified, frontier_owner) = verify_attach_mode(
-            slot.member,
+            // Cloned rather than moved: §0.16 obligation 1 needs the WHOLE slot
+            // entry intact if the frontier transition below presents a
+            // settlement refusal, and a partial move leaves nothing to restore.
+            slot.member.clone(),
             slot.binding,
             frontier_owner,
             AttachVerification {
@@ -354,8 +452,25 @@ impl ConversationAuthority {
         } else {
             committed.observer_progress_projection()
         };
-        let (committed, frontier_owner) =
-            transition_attach_frontier(frontier_owner, committed, request, allocation)?;
+        let transitioned = transition_attach_frontier(
+            frontier_owner,
+            committed,
+            request,
+            allocation,
+            presentation,
+        )?;
+        let (committed, frontier_owner) = match transitioned {
+            AttachFrontierOutcome::Committed(committed, owner) => (committed, owner),
+            AttachFrontierOutcome::Presented(response, owner) => {
+                return self.restore_and_present_attach(
+                    participant_id,
+                    slot,
+                    owner,
+                    finalizer.is_some(),
+                    *response,
+                );
+            }
+        };
         let (committed, frontier_owner) = if non_presenting {
             NonPresentingFinalizerCommit::new(committed, frontier_owner).into_parts()
         } else {
@@ -511,12 +626,70 @@ const fn attach_metadata(
     )
 }
 
+/// Outcome of coupling one sealed attach commit to the live frontier.
+///
+/// The refusing arm exists because §0.16's law attaches to the SEAM: the
+/// wrapper now reports WHICH clearing condition blocked, and two of the three
+/// have a lawful wire answer. It hands the UNCHANGED owner straight back so the
+/// caller can restore every consumed authority before the refusal exists.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the committed arm carries the whole attach commit and its owner by design -- the \
+              refusing arm is boxed already, and boxing the hot committed arm would pay an \
+              allocation on every successful attach to shrink a value that is moved once"
+)]
+enum AttachFrontierOutcome {
+    /// The transition entered the frontier.
+    Committed(AttachCommit<Digest, Digest>, LiveFrontierOwner),
+    /// Participant contract §0.16: a lawful refusal the register admits for
+    /// credential attach, paired with the intact owner it must be restored
+    /// alongside.
+    Presented(Box<CredentialAttachResponse>, LiveFrontierOwner),
+}
+
+/// Selects the lawful §0.16 answer for a clearing condition, or `None` where the
+/// amendment rules no row.
+///
+/// Condition 1 reuses the register's existing `ObserverBackpressure` row (the
+/// blocked resource IS hard-observer progress, and `ObserverProgressed` is a
+/// wake something actually sends). Condition 2 mints the settlement row with
+/// the epoch the frontier itself named. Condition 3 — armed fenced recovery —
+/// is EXCLUDED BY CENSUS (board #13: zero production constructors of
+/// `StoredAttachModeV3::Fenced`), so it keeps the pre-amendment bare close and
+/// its tripwire; `Unclassified` keeps it for the same reason from the other
+/// side, having never been one of the amendment's conditions at all.
+const fn attach_settlement_answer(
+    condition: PrecedenceCondition,
+    envelope: AttachEnvelope,
+    observer_progress: u64,
+) -> Option<CredentialAttachResponse> {
+    match condition {
+        PrecedenceCondition::BindingTerminal => {
+            Some(CredentialAttachResponse::observer_backpressure(
+                envelope,
+                ObserverBackpressureState::initial(observer_progress),
+            ))
+        }
+        PrecedenceCondition::MarkerDrain { settlement_epoch } => Some(
+            CredentialAttachResponse::marker_settlement_backpressure(&envelope, settlement_epoch),
+        ),
+        // ⛔ TRIPWIRE (§0.16 condition 3). The first production constructor of
+        // `StoredAttachModeV3::Fenced` VOIDS the census exclusion, and the row
+        // question reopens as a blocking prerequisite of that constructor's own
+        // lane — this exclusion may never be cited to land the constructor
+        // without the row. Until then the arm is unreachable in production and
+        // a refusal row for it would be wire surface for nothing.
+        PrecedenceCondition::FencedRecovery | PrecedenceCondition::Unclassified => None,
+    }
+}
+
 fn transition_attach_frontier(
     owner: LiveFrontierOwner,
     committed: AttachCommit<Digest, Digest>,
     request: &CredentialAttachRequest,
     allocation: &StoredAttachAllocation,
-) -> Result<(AttachCommit<Digest, Digest>, LiveFrontierOwner), StateError> {
+    presentation: AttachPresentation,
+) -> Result<AttachFrontierOutcome, StateError> {
     let attached_encoded = frontier::credential_attached_charge(
         request.conversation_id,
         request.participant_id,
@@ -552,18 +725,43 @@ fn transition_attach_frontier(
             })
         })
         .transpose()?;
-    apply_attach_frontier(
+    match apply_attach_frontier(
         owner,
         committed,
         AttachFrontierCharges::new(terminal_charge, attached_charge),
-    )
-    .map_err(|failure| {
-        StateError::invariant(format!(
-            "attach frontier transition failed: {:?}",
-            failure.error()
-        ))
-    })
-    .map(liminal_protocol::lifecycle::LiveFrontierCommit::into_parts)
+    ) {
+        Ok(commit) => {
+            let (committed, owner) = commit.into_parts();
+            Ok(AttachFrontierOutcome::Committed(committed, owner))
+        }
+        Err(failure) => {
+            let error = failure.error();
+            // ⛔ REPLAY IS NEVER PRESENTED. A durable row that replays into a
+            // `Precedence` refusal is a drifted log, not backpressure — there is
+            // no client waiting on it and answering "retry later" to a cold
+            // replay would convert a state defect into a silent success.
+            let answer = match (presentation, error) {
+                (
+                    AttachPresentation::Live { observer_progress },
+                    LiveFrontierError::Precedence(condition),
+                ) => {
+                    attach_settlement_answer(condition, attach_envelope(request), observer_progress)
+                }
+                _ => None,
+            };
+            answer.map_or_else(
+                || {
+                    Err(StateError::invariant(format!(
+                        "attach frontier transition failed: {error:?}"
+                    )))
+                },
+                |response| {
+                    let (_, owner) = failure.into_parts();
+                    Ok(AttachFrontierOutcome::Presented(Box::new(response), owner))
+                },
+            )
+        }
+    }
 }
 
 /// Builds the echo envelope of one credential-attach request.

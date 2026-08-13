@@ -26,10 +26,46 @@ use super::log::{
 };
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::outbox_projection::ReplayedProjectionFacts;
+use super::presented_refusal::PresentedRefusal;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
+
+/// Selects the lawful §0.16 answer for a detach blocked at the seam.
+///
+/// Condition 1 reuses the register's `ObserverBackpressure` row for detach
+/// (register rows 5669, 5673); condition 2 mints the settlement row with the
+/// epoch the frontier itself named. Answering condition 2 with
+/// `ObserverBackpressure` is OUTLAWED — it would promise an
+/// `ObserverProgressed` that nothing sends. Condition 3 (armed fenced recovery)
+/// is EXCLUDED BY CENSUS (board #13) and `Unclassified` was never one of the
+/// amendment's conditions; both keep the pre-amendment bare close.
+const fn detach_settlement_answer(
+    condition: liminal_protocol::lifecycle::PrecedenceCondition,
+    envelope: DetachEnvelope,
+    committed_binding_epoch: BindingEpoch,
+    observer_progress: u64,
+) -> Option<DetachResponse> {
+    use liminal_protocol::lifecycle::PrecedenceCondition as C;
+    match condition {
+        C::BindingTerminal => Some(DetachResponse::observer_backpressure(
+            envelope,
+            committed_binding_epoch,
+            liminal_protocol::wire::ObserverBackpressureState::initial(observer_progress),
+        )),
+        C::MarkerDrain { settlement_epoch } => Some(
+            DetachResponse::marker_settlement_backpressure(&envelope, settlement_epoch),
+        ),
+        C::FencedRecovery | C::Unclassified => None,
+    }
+}
 
 impl ConversationAuthority {
     /// Applies one explicit detach request end to end.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the amendment adds the position-allocator capture and its restore arm; the \
+                  capture must sit in the same function as the allocator it captures, or the \
+                  pairing stops being checkable by reading"
+    )]
     pub(super) fn apply_detach_with_impact(
         &mut self,
         request: &DetachRequest,
@@ -114,6 +150,9 @@ impl ConversationAuthority {
                 ));
             }
         };
+        // §0.16 obligation 1: captured before the allocator runs, restored if
+        // the frontier transition presents a settlement refusal.
+        let captured_positions = self.position_allocators();
         let (terminal_order, terminal_seq) = self.allocate_position()?;
         let source_log_sequence = self.next_log_sequence;
         let position = DetachCommitPosition {
@@ -122,7 +161,15 @@ impl ConversationAuthority {
             terminal_seq,
         };
         let outcome =
-            self.detach_commit(request, verifier, position, CommitMode::Live(appender))?;
+            match self.detach_commit(request, verifier, position, CommitMode::Live(appender)) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if matches!(error, StateError::PresentedRefusal(_)) {
+                        self.restore_position_allocators(captured_positions);
+                    }
+                    return Err(error);
+                }
+            };
         let source = stored_detached_operation(request, verifier, position, Vec::new());
         self.record_produced_source(
             source_log_sequence,
@@ -168,6 +215,13 @@ impl ConversationAuthority {
     /// Detach is ONE event: the consumed transition carries the terminal
     /// append, floor transition, cell replacement, and binding release as one
     /// non-decomposable value through the A3 barrier.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the amendment adds ONE conditional arm (the settlement refusal and its slot \
+                  plus frontier restoration) to an already-long commit core; splitting it would \
+                  move the take/install pairing across a function boundary, which is exactly the \
+                  coupling the restoration obligation depends on being visible in one place"
+    )]
     fn detach_commit(
         &mut self,
         request: &DetachRequest,
@@ -181,6 +235,7 @@ impl ConversationAuthority {
             terminal_seq,
         } = position;
         let source_sequence = self.next_log_sequence;
+        let presenting = matches!(mode, CommitMode::Live(_));
         let (participant_id, mut slot) = self
             .slots
             .remove_entry(&request.participant_id)
@@ -212,7 +267,10 @@ impl ConversationAuthority {
                 StateError::invariant(format!("protocol detach verification failed: {error:?}"))
             })?;
         let committed = commit_detach(
-            slot.member,
+            // Cloned rather than moved: §0.16 obligation 1 needs the WHOLE slot
+            // entry intact if the frontier transition below presents a
+            // settlement refusal, and a partial move leaves nothing to restore.
+            slot.member.clone(),
             verified_request,
             slot.cell,
             CommittedBindingTerminalPosition::new(terminal_order, terminal_seq),
@@ -234,13 +292,50 @@ impl ConversationAuthority {
             terminal.admission_order(),
             encoded_charge,
         );
-        let transitioned = apply_detach_frontier(self.take_frontier()?, committed, charge)
-            .map_err(|failure| {
-                StateError::invariant(format!(
-                    "detach frontier transition failed: {:?}",
-                    failure.error()
-                ))
-            })?;
+        let transitioned = match apply_detach_frontier(self.take_frontier()?, committed, charge) {
+            Ok(transitioned) => transitioned,
+            Err(failure) => {
+                let error = failure.error();
+                // Participant contract §0.16 condition 2, detach wrapper. Detach
+                // requires an existing attached binding — a membership predicate
+                // strictly stronger than attach's two — which is what entitles
+                // this arm to the labelled row and its `0x0202 MarkerSettled`
+                // wake. Condition 1 keeps the register's existing
+                // `ObserverBackpressure` row; conditions 3 and Unclassified keep
+                // the pre-amendment bare close (board #13 census tripwire).
+                //
+                // ⛔ REPLAY IS NEVER PRESENTED: a durable row that replays into
+                // Precedence is a drifted log, not backpressure.
+                let answer = match (presenting, error) {
+                    (
+                        true,
+                        liminal_protocol::lifecycle::LiveFrontierError::Precedence(condition),
+                    ) => detach_settlement_answer(
+                        condition,
+                        detach_envelope(request),
+                        receiving,
+                        self.observer_progress,
+                    ),
+                    _ => None,
+                };
+                let Some(response) = answer else {
+                    return Err(StateError::invariant(format!(
+                        "detach frontier transition failed: {error:?}"
+                    )));
+                };
+                // §0.16 obligation 1: `detach_commit` consumed the slot entry and
+                // the frontier before this refusal existed, and
+                // `LiveFrontierFailure::into_parts` returns only the owner. Both
+                // go back, and the arm puts the position allocators back, before
+                // the refusal leaves this function.
+                let (_, owner) = failure.into_parts();
+                self.install_frontier(owner)?;
+                self.slots.insert(participant_id, slot);
+                return Err(StateError::PresentedRefusal(PresentedRefusal::detach(
+                    response,
+                )));
+            }
+        };
         let (committed, frontier_owner) = transitioned.into_parts();
         let shell = self.take_shell()?;
         let barrier = match decide_detached_operation(shell, committed) {
