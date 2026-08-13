@@ -72,10 +72,17 @@ CLOSE_CAUSE = {
     0x0005: "Superseded",
 }
 
-# Server values in this INCLUSIVE range carry a leading u16 naming the client
-# discriminant that caused them, before their own body. Outside it they do not.
-# crates/liminal-protocol/src/wire/server_codec.rs:49-54 @ 339e81a.
-ORIGIN_RANGE = range(0x0101, 0x0121)
+# A server value carries a leading u16 naming the client discriminant that
+# caused it, before its own body, on every row EXCEPT the origin-free set:
+# 0x0100 (transport-rejected) and the observer-recovery block 0x0121..=0x0124.
+# Stated as that complement rather than as a numeric window because the A5/A4
+# settlement rows (0x0125, 0x0126) sit ABOVE the origin-free block, so no
+# contiguous window expresses the shape. Current rule: `carries_origin` in
+# crates/liminal-protocol/src/wire/server_codec.rs (breaking-window-a5-a4
+# lane); the pre-A5 form was the window `0x0101..=0x0120` at
+# server_codec.rs:49-54 @ 339e81a. Identical behavior for every tag in this
+# capture (all <= 0x0124).
+ORIGIN_FREE = {0x0100, 0x0121, 0x0122, 0x0123, 0x0124}
 
 
 class Reader:
@@ -159,7 +166,7 @@ def client_request(r, tag):
 
 def server_value(r, tag):
     """crates/liminal-protocol/src/wire/server_codec.rs:749-885 @ 339e81a."""
-    if tag in ORIGIN_RANGE:
+    if tag not in ORIGIN_FREE:
         raw = r.uint(2, "originating_request", "")
         head = r.rows[-1]
         r.rows[-1] = (
@@ -168,7 +175,7 @@ def server_value(r, tag):
             head[2],
             head[3],
             f"0x{raw:04X} = ClientDiscriminant::{CLIENT.get(raw, '??')} "
-            "-- present ONLY for 0x0101..=0x0120",
+            "-- absent only on the origin-free set {0x0100, 0x0121..=0x0124}",
         )
     if tag in (0x010A, 0x0111):
         r.uint(8, "conversation_id")

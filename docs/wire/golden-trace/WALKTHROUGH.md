@@ -162,11 +162,18 @@ values, so a decoder selects its registry by **which end it is**
 
 **This is the detail a foreign implementation will get wrong first.**
 
-A server value whose discriminant is in the inclusive range
-`0x0101..=0x0120` carries a leading `u16` naming the `ClientDiscriminant` that
-caused it, *before* its own body. Outside that range there is no such field.
+A server value carries a leading `u16` naming the `ClientDiscriminant` that
+caused it, *before* its own body, on every row EXCEPT the origin-free set:
+`0x0100` (transport-rejected) and the observer-recovery block
+`0x0121..=0x0124`. The rule is stated as that complement (`carries_origin`,
+`crates/liminal-protocol/src/wire/server_codec.rs`, breaking-window-a5-a4
+lane) because the A5/A4 settlement rows (`0x0125`, `0x0126`) sit above the
+origin-free block, so no contiguous window expresses the shape. At the
+capture's own revision the rule was the equivalent window `0x0101..=0x0120`
+— every tag in this capture is `<= 0x0124`, where the two forms agree:
 
-`crates/liminal-protocol/src/wire/server_codec.rs:49-54@339e81a`:
+`crates/liminal-protocol/src/wire/server_codec.rs:49-54@339e81a` (superseded
+form, current at the capture's revision):
 
 ```rust
 if (0x0101..=0x0120).contains(&discriminant.wire_value()) {
@@ -179,8 +186,8 @@ with the mirror on decode at `server_codec.rs:76-86@339e81a`, which additionally
 validates the pairing (`origin_is_valid`) and rejects an implausible
 request/response combination.
 
-Every server value in this capture falls inside that range, so every one of them
-begins its body with two extra bytes:
+Every server value in this capture carries the origin prefix, so every one of
+them begins its body with two extra bytes:
 
 | response | discriminant | leading `originating_request` |
 |----------|--------------|-------------------------------|

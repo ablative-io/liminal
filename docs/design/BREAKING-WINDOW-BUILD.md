@@ -101,3 +101,36 @@ by name in the land record; every red proven against its own fix.
 `cargo fmt --all` is UNSAFE at this repo — never run it. Publish after
 land: reader first (protocol-changes-land-at-both-ends), versions ruled
 per the three-classes law at publish time.
+
+## Seat rulings after Leg 1 (2026-08-13, Hermes)
+
+Leg 1 landed at `071a48e` + `a3cc02a`; verified at the seat (`cargo test -p
+liminal-protocol` re-run: 586/0 over 9 targets, TRUE EXIT 0; registry rows,
+origin arms, and type shapes read at the bytes).
+
+1. **`AttemptTokenBodyConflict::RecordAdmission` carries no `AttemptConflict`
+   selector — ACCEPTED.** Measured basis: the committed-identity key at
+   `answer_committed_record_admission` is `(token, payload_fingerprint,
+   participant_id)` — generation is not in it, so no selector variant is
+   constructible on that arm. §0.15 mandates no selector; minting
+   `AttemptConflict::Payload` would be unratified wire surface. Register
+   precedent (per-variant field presence) followed.
+2. **`SettlementEpoch = u64` as its own alias — ACCEPTED.** A settlement
+   epoch must never read as comparable to observer progress; the type-level
+   firewall is the cheapest pin of that.
+3. **`carries_origin` as the complement of the origin-free set — ACCEPTED,
+   verified at the bytes.** Single source of truth (the complement of
+   `origin_is_valid`'s all-false set), with the why-not-a-window stated in
+   its doc. Golden-trace instrument + walkthrough updated at the seat to the
+   complement form (capture behavior identical — all captured tags
+   `<= 0x0124`); rev-pinned `@339e81a` citations kept as historical.
+4. **Correlation gap — closure REQUIRED IN THIS LANE, client-side, no new
+   wire fields.** A settlement refusal landing as `ForeignResponse` at the
+   client would convert lawful presentation back into a client error and
+   defeat the amendment. The ratified rows are fixed (no participant/token
+   fields may be added — that would be a new amendment), so the closure is
+   client-side correlation: match the settlement refusal against the
+   pending request slot by conversation + request family. Assigned to
+   Leg 2's scope; the Leg 1 pin
+   (`settlement_refusals_carry_no_correlating_request_identity`) inverts
+   when closed — rework it into the closure's positive pin.
