@@ -57,11 +57,25 @@
 //! actually offered rather than guessed — which is exactly what a `current_cursor
 //! = 0` `AckGap` is telling a caller that guessed.
 //!
+//! # BOTH STORE ARMS, because the lane once shipped the difference as prose
+//!
+//! Leg 3 recorded that this sequence died at the clearing write against a
+//! disk-backed haematite store (`haematite store error: ... shard WAL error: wal
+//! tree error: invalid tree node`) while passing against the ephemeral one, and
+//! carried that as a comment on `persistence_path`. It is a measurement now:
+//! [`the_settlement_wake_reaches_the_refused_connection_and_no_other_on_disk`]
+//! runs the identical sequence and the identical assertions with
+//! `persistence_path = Some(dir)`, and it passes. The two arms differ in ONE
+//! argument, and the disk one carries its own control proving it really ran
+//! against a persistent database. A real store-arm divergence therefore shows up
+//! as a red test rather than as a sentence.
+//!
 //! This lives in an integration test for the reason `tests/loopback_sdk_e2e.rs`
 //! documents: `liminal-server` dev-depends on `liminal-sdk` and the SDK depends
 //! back, so only an integration test sees ONE `EmbeddedServer` type.
 
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -164,27 +178,23 @@ impl ParticipantResumeStore for SettlementStore {
 
 type SdkParticipant = RemoteParticipantHandle<SettlementStore>;
 
-fn server_config() -> Result<ServerConfig, Box<dyn Error>> {
+/// The server configuration both store arms run under.
+///
+/// `store_dir` is THE ONLY DIFFERENCE between the two arms: `None` selects the
+/// config's own self-owning ephemeral haematite store, `Some(dir)` a persistent
+/// haematite database rooted there. Both reach the same
+/// `build_durable_store_with` branch shape and the same
+/// `Database::create(DatabaseConfig { shard_count: DEFAULT_SHARD_COUNT, .. })`
+/// on a fresh directory (`server/connection/services.rs`), so a divergence
+/// between the arms would be a real one.
+fn server_config(store_dir: Option<&Path>) -> Result<ServerConfig, Box<dyn Error>> {
     Ok(ServerConfig {
         listen_address: "127.0.0.1:0".parse()?,
         health_listen_address: "127.0.0.1:0".parse()?,
         drain_timeout_ms: 30_000,
         channels: Vec::new(),
         routing_rules: Vec::new(),
-        // ⛔ EPHEMERAL BY MEASUREMENT, NOT BY CONVENIENCE, and named here because
-        // a reader will otherwise assume it was a shortcut. Point this at a
-        // `Some(dir)` haematite database instead and the clearing write dies
-        // inside its durable append with `haematite store error: storage error:
-        // shard operation failed: shard WAL error: wal tree error: invalid tree
-        // node`; the connection process crashes and the client reads EOF. That
-        // failure is in the store layer under the marker-drain row, not in the
-        // settlement mechanics these pins measure, and it is recorded in the
-        // lane evidence
-        // (`gate-logs/breaking-window/leg3-c-e2e-disk-store-marker-drain-failure.log`)
-        // rather than worked around silently. `None` selects the config's own
-        // self-owning ephemeral store — a real deployment configuration, and the
-        // one `push_flush_e2e.rs` runs against.
-        persistence_path: None,
+        persistence_path: store_dir.map(Path::to_path_buf),
         cluster: None,
         auth: None,
         services: ServicesConfig::default(),
@@ -206,8 +216,8 @@ struct SettlementServer {
 }
 
 impl SettlementServer {
-    fn start() -> Result<Self, Box<dyn Error>> {
-        let config = server_config()?;
+    fn start(store_dir: Option<&Path>) -> Result<Self, Box<dyn Error>> {
+        let config = server_config(store_dir)?;
         let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
         let supervisor =
             ConnectionSupervisor::with_services(services as Arc<dyn ConnectionServices>)?;
@@ -514,8 +524,8 @@ struct SettlementWindow {
 /// window is not claimed to exist, it is heard. Running out of commits is a hard
 /// failure — a settlement pin measured over a conversation that never blocked is
 /// exactly the vacuous predicate this fixture exists to prevent.
-fn open_settlement_window() -> Result<SettlementWindow, Box<dyn Error>> {
-    let server = SettlementServer::start()?;
+fn open_settlement_window(store_dir: Option<&Path>) -> Result<SettlementWindow, Box<dyn Error>> {
+    let server = SettlementServer::start(store_dir)?;
 
     // The producer, on its own socket. Its commits generate the marker debt and
     // its attach is the one that will be refused.
@@ -609,6 +619,72 @@ fn open_settlement_window() -> Result<SettlementWindow, Box<dyn Error>> {
 /// inbox is a measurement rather than a broken filter.
 #[test]
 fn the_settlement_wake_reaches_the_refused_connection_and_no_other() -> Result<(), Box<dyn Error>> {
+    settlement_wake_reaches_only_the_refused_connection(None)
+}
+
+/// The SAME sequence, the SAME assertions, on a persistent on-disk haematite
+/// database instead of the config's self-owning ephemeral one.
+///
+/// # Why this arm is shipped rather than assumed
+///
+/// The lane's own evidence
+/// (`gate-logs/breaking-window/leg3-c-e2e-disk-store-marker-drain-failure.log`)
+/// recorded this sequence dying at the clearing write with `haematite store
+/// error: ... shard WAL error: wal tree error: invalid tree node`, and the
+/// ephemeral arm passing, which reads as a store-arm divergence in the
+/// marker-drain path. Whatever produced that log, the divergence it claimed is
+/// not a property of this code: the arm is measured here rather than left to a
+/// comment, so a real one can never again be recorded as prose and shipped
+/// around.
+///
+/// The two arms differ in ONE argument ([`server_config`]); everything from
+/// `open_settlement_window` down is shared code, so a future divergence shows up
+/// as this test failing while the ephemeral one passes.
+///
+/// The `TempDir` is BOUND, not `.path()`-and-dropped: dropping it deletes the
+/// directory out from under the store, which fails at open with "data directory
+/// parent does not exist" and would make this arm a measurement of the harness.
+///
+/// # ⛔ The non-vacuity control
+///
+/// A disk arm that quietly ran ephemeral would be a green measuring nothing, and
+/// nothing in the sequence itself would say so — both arms pass. So the store
+/// directory is measured AFTER the run: `<dir>/durability/config.json` is the
+/// file `build_durable_store_with` creates for a persistent database and never
+/// creates for the ephemeral one (which roots itself in its own
+/// `liminal-durability-*` temporary directory instead). It is asserted ABSENT
+/// before the run and PRESENT after, so the assertion is over a file this run
+/// made rather than one that was already there.
+#[test]
+fn the_settlement_wake_reaches_the_refused_connection_and_no_other_on_disk()
+-> Result<(), Box<dyn Error>> {
+    let store_dir = tempfile::tempdir()?;
+    let path: PathBuf = store_dir.path().to_path_buf();
+    println!("disk arm persistence_path = {}", path.display());
+    let database_config = path.join("durability").join("config.json");
+    assert!(
+        !database_config.exists(),
+        "the before-image must be an empty directory, or the control below proves nothing: {}",
+        database_config.display()
+    );
+
+    settlement_wake_reaches_only_the_refused_connection(Some(&path))?;
+
+    assert!(
+        database_config.exists(),
+        "this arm must have run against a PERSISTENT haematite database rooted at the configured \
+         path -- {} is the config file build_durable_store_with writes for persistence_path = \
+         Some(..) and never for the ephemeral store. Its absence means this test passed as a \
+         second ephemeral run and measured nothing.",
+        database_config.display()
+    );
+    Ok(())
+}
+
+/// The body both store arms run.
+fn settlement_wake_reaches_only_the_refused_connection(
+    store_dir: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
     let SettlementWindow {
         server,
         mut refused,
@@ -616,7 +692,7 @@ fn the_settlement_wake_reaches_the_refused_connection_and_no_other() -> Result<(
         refused_epoch,
         commits,
         ..
-    } = open_settlement_window()?;
+    } = open_settlement_window(store_dir)?;
     println!("settlement window opened after {commits} commits, refused_epoch = {refused_epoch}");
 
     // Nothing has been settled yet, so neither inbox may hold a wake. This is
@@ -705,7 +781,7 @@ fn the_refused_attach_binds_when_retried_after_its_matching_wake() -> Result<(),
         refused_epoch,
         refused_attempt_token,
         ..
-    } = open_settlement_window()?;
+    } = open_settlement_window(None)?;
 
     // ⛔ THE CLEARING WRITE, again by the other participant.
     let cleared = uninvolved.commit_record(0xE2)?;
