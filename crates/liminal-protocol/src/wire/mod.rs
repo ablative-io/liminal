@@ -43,7 +43,7 @@ pub use envelope::{
 pub use primitives::{
     AttachAttemptToken, AttachSecret, BindingEpoch, ConnectionIncarnation, ConversationId,
     DeliverySeq, DetachAttemptToken, EnrollmentToken, Generation, LeaveAttemptToken, ObserverEpoch,
-    ParticipantId, ParticipantIndex, ProtocolVersion, RecordAdmissionAttemptToken,
+    ParticipantId, ParticipantIndex, ProtocolVersion, RecordAdmissionAttemptToken, SettlementEpoch,
     TransactionOrder,
 };
 pub use push::{DetachedCause, DiedCause, ParticipantDelivery, ParticipantRecord, ServerPush};

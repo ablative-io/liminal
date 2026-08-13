@@ -40,6 +40,14 @@ pub type TransactionOrder = u64;
 /// Observer refusal/progress epoch.
 pub type ObserverEpoch = u64;
 
+/// Marker-settlement refusal/clearing epoch.
+///
+/// Deliberately distinct from [`ObserverEpoch`]: the settlement family is
+/// cleared by another participant's record admission or by boot drain, never by
+/// observer progress, so the two epochs are never comparable even though both
+/// serialize as `u64` (participant contract §0.16 condition 2).
+pub type SettlementEpoch = u64;
+
 /// Participant protocol version carried in every inner frame prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProtocolVersion {

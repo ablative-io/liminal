@@ -60,7 +60,9 @@
 //! return through this carrier releases it on drop exactly as an early return
 //! through any other refusal does.
 
-use liminal_protocol::wire::{CredentialAttachResponse, DetachResponse, ServerValue};
+use liminal_protocol::wire::{
+    CredentialAttachResponse, DetachResponse, EnrollmentResponse, ServerValue,
+};
 
 /// A refusal the frozen R-D1 register admits on the participant wire, carried
 /// out of a transition that cannot answer for itself.
@@ -86,13 +88,27 @@ impl PresentedRefusal {
 
     /// Presents a detach refusal selected by the operation's own
     /// register-bound response authority.
-    #[expect(
-        dead_code,
-        reason = "the detach arm's Class B sinks are named in the lane report and blocked on \
-                  contract surface for the candidate-lane refusal; the constructor lands with \
-                  the funnel so the next sink is a one-line change and not a redesign"
-    )]
+    ///
+    /// Dormant no longer. Participant contract §0.16 (amendment A5, RATIFIED
+    /// 2026-08-13) is the contract surface this constructor's own
+    /// `#[expect(dead_code)]` named as its unblocking condition, and its first
+    /// sink is the detach twin of the attach flatten — `detach_commit`'s
+    /// frontier transition, refused while a marker candidate awaits its drain.
     pub(super) fn detach(response: DetachResponse) -> Self {
+        Self {
+            value: Box::new(response.into_server_value()),
+        }
+    }
+
+    /// Presents an enrollment refusal selected by the operation's own
+    /// register-bound response authority.
+    ///
+    /// The third wrapper of `apply_live_transition` was found by the
+    /// reviewer-of-record's census, which is why §0.16's law attaches to the
+    /// SEAM rather than to a call-site list: a fourth wrapper cannot re-open
+    /// the gap by falling outside an enumeration. Its condition-2 answer
+    /// carries no epoch and no wake.
+    pub(super) fn enrollment(response: EnrollmentResponse) -> Self {
         Self {
             value: Box::new(response.into_server_value()),
         }

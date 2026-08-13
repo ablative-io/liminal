@@ -118,7 +118,7 @@ pub use claim_frontier::{
     InitialEnrollmentFrontierCommit, InitialEnrollmentFrontierError,
     InitialEnrollmentFrontierFailure, MarkerCandidateAuthority, MarkerProvenance,
     MarkerSequenceOwner, MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontier,
-    OrderClaimFrontierRestore, OrderDirectOwner, PrepareLeaveAuthorityError,
+    OrderClaimFrontierRestore, OrderDirectOwner, PrecedenceCondition, PrepareLeaveAuthorityError,
     RecoveryClaimProvenance, RecoveryOrderActiveBindingRestore, RecoveryOrderBlock,
     RecoveryOrderBlockRestore, RecoverySequenceBlock, RecoverySequenceBlockRestore,
     RecoverySequenceTerminalRestore, ReplacementTerminalProductRange,

@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.43s
+     Running tests/leg4_disk_matrix_e2e.rs (target/debug/deps/leg4_disk_matrix_e2e-3429dc809e7b3eb8)
+
+running 1 test
+dropped-tempdir persistence_path = /var/folders/87/tdf6vfls1fj_4ydz_y6sk3580000gn/T/.tmpMTWIiH
+Error: ConfigValidation { message: "failed to open durable store at /var/folders/87/tdf6vfls1fj_4ydz_y6sk3580000gn/T/.tmpMTWIiH/durability: failed to create database directory: data directory parent does not exist: /var/folders/87/tdf6vfls1fj_4ydz_y6sk3580000gn/T/.tmpMTWIiH/durability — create the parent directory and ensure it is durably linked (fsync it, or use an existing long-lived location)" }
+test hypothesis_dropped_tempdir ... FAILED
+
+failures:
+
+failures:
+    hypothesis_dropped_tempdir
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p liminal-server --test leg4_disk_matrix_e2e`

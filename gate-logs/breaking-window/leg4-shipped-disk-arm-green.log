@@ -1,0 +1,20 @@
+   Compiling liminal-server v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.52s
+     Running tests/a5_settlement_wake_e2e.rs (target/debug/deps/a5_settlement_wake_e2e-5a289efa915d2a26)
+
+running 3 tests
+disk arm persistence_path = /var/folders/87/tdf6vfls1fj_4ydz_y6sk3580000gn/T/.tmpmRLEyN
+settlement window opened after 1 commits, refused_epoch = 8
+settlement window opened after 1 commits, refused_epoch = 8
+before the clearing write: refused drained 0, uninvolved drained 0
+before the clearing write: refused drained 0, uninvolved drained 0
+test the_refused_attach_binds_when_retried_after_its_matching_wake ... ok
+refused client drained 4 pushes after the clearing write
+refused client drained 4 pushes after the clearing write
+uninvolved client drained 2 pushes after the clearing write
+uninvolved client drained 2 pushes after the clearing write
+test the_settlement_wake_reaches_the_refused_connection_and_no_other ... ok
+test the_settlement_wake_reaches_the_refused_connection_and_no_other_on_disk ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.79s
+

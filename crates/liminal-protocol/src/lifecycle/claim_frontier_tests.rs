@@ -30,7 +30,7 @@ use super::{
         HistoricalCausalFactRestore, HistoricalMarkerDeliveryFactRestore,
         ImmutableOrderCandidateMajorRestore, ImmutableSequenceCandidate, MarkerCandidateAuthority,
         MarkerProvenance, MarkerRecordRequest, MarkerSequenceOwner, MovableOrderClaim,
-        MovableSequenceClaim, OrderClaimFrontierRestore, OrderDirectOwner,
+        MovableSequenceClaim, OrderClaimFrontierRestore, OrderDirectOwner, PrecedenceCondition,
         RecoveryOrderActiveBindingRestore, RecoveryOrderBlockRestore, RecoverySequenceBlockRestore,
         RecoverySequenceTerminalRestore, ReplacementTerminalProductRangeRestore,
         RetainedCausalRecord, RetainedCausalRecordKind, SequenceClaimFrontierRestore,
@@ -1622,4 +1622,102 @@ fn initial_frontier_crash_replay_is_deterministic() {
         )
     };
     assert_eq!(run(), run());
+}
+
+/// §0.16 seat ruling 1's OWED MEASUREMENT (Leg 3): is
+/// [`PrecedenceCondition::Unclassified`] reachable through any wrapper of the
+/// `apply_live_transition` seam?
+///
+/// # The measurement, and why it is a proof rather than a sample
+///
+/// `apply_live_transition` classifies only when `live_transition_blocked()` is
+/// true, and `precedence_condition()` answers `Unclassified` on exactly one
+/// input: both recoveries absent AND the sequence lane's candidate list empty.
+/// With the sequence lane empty, `live_transition_blocked()` can only be true
+/// because the ORDER lane holds a candidate — so `Unclassified` requires an
+/// order candidate with no sequence twin.
+///
+/// That state is refused by the cross-counter validator's candidate-key
+/// bijection, which every construction path of `ClaimFrontiers` runs through
+/// (initial mint, the ordinary-projection extend, both unreserved rebuilds,
+/// and `restore`). There is therefore no `ClaimFrontiers` in existence on
+/// which `precedence_condition()` returns `Unclassified`, and the three
+/// wrappers cannot produce it. The variant stays as the honest fourth arm the
+/// ruling accepted — a type that cannot lie — and the server keeps the
+/// pre-amendment bare close for a condition nothing can reach.
+///
+/// # ⛔ The tripwire this pin IS
+///
+/// The flatten is void the moment `Unclassified` becomes constructible. Two
+/// changes would do it and both land on this test: a construction path that
+/// admits an order candidate without its sequence twin (part A goes green
+/// where it must stay red), or a new `precedence_condition()` arm answering
+/// `Unclassified` from a state the sequence lane CAN hold (part C). Either one
+/// is a §0.16 premise gap — "Precedence has THREE clearing conditions" — and
+/// goes back to the two-key holders, not into a patch.
+#[test]
+fn precedence_is_never_unclassified_because_a_lone_order_candidate_cannot_exist() {
+    // Part B first — the positive control. The unmodified fixture restores,
+    // is blocked, and classifies as condition 2. Without this, part A's
+    // refusal would measure the fixture rather than the invariant.
+    let (restore, sequence, order) = single_bound_marker_fixture(0, false);
+    let frontiers = ClaimFrontiers::restore(restore, sequence, order)
+        .expect("the unmodified single-bound-marker fixture must restore");
+    assert!(
+        frontiers.live_transition_blocked(),
+        "the control fixture must be in the blocked state the seam classifies"
+    );
+    assert_eq!(
+        frontiers.precedence_condition(),
+        PrecedenceCondition::MarkerDrain { settlement_epoch: 1 },
+        "the control fixture must classify as condition 2, not as the arm under test"
+    );
+
+    // Part A — the unreachability itself, both ways round. Emptying the
+    // sequence lane while the order lane keeps its candidate is the ONLY
+    // shape that reaches `Unclassified`, and it is refused; the mirrored
+    // shape (sequence candidate with no order key) is refused too, so the
+    // bijection is measured in both directions rather than assumed from one.
+    let (mut lone_order, sequence, order) = single_bound_marker_fixture(0, false);
+    lone_order.sequence.immutable_candidates = vec![];
+    let lone_order_error = ClaimFrontiers::restore(lone_order, sequence, order).expect_err(
+        "an order candidate with no sequence twin is the Unclassified precondition and \
+         must never restore",
+    );
+
+    let (mut lone_sequence, sequence, order) = single_bound_marker_fixture(0, false);
+    lone_sequence.order.immutable_candidates = vec![];
+    let lone_sequence_error = ClaimFrontiers::restore(lone_sequence, sequence, order).expect_err(
+        "a sequence candidate with no order key must never restore either -- the bijection \
+         is proven in both directions",
+    );
+    assert!(
+        matches!(
+            lone_order_error,
+            ParticipantStateCorruptReason::ClaimFrontierInvalid { .. }
+        ) && matches!(
+            lone_sequence_error,
+            ParticipantStateCorruptReason::ClaimFrontierInvalid { .. }
+        ),
+        "both lone-lane refusals must come from frontier validation: \
+         {lone_order_error:?} / {lone_sequence_error:?}"
+    );
+
+    // Part C — the classifier answers a reachable blocked state with a
+    // reachable condition. A hand-swapped binding-terminal head is NOT the way
+    // to show this and was not left here pretending to: swapping the fixture's
+    // head candidate for a `BindingTerminal` produces a restore that FAILS
+    // (`ClaimFrontierInvalid { counter: DeliverySeq, first_bad_position: 2 }`,
+    // measured), so an `if let Ok(..)` around it would have been a branch that
+    // never ran — a pin asserting nothing while reading as though it asserted
+    // condition 1. Condition 1 is pinned where it is actually reachable, at
+    // the server seam:
+    // `liminal-server`'s `production/tests_a5_settlement.rs`, whose fixtures
+    // drive a real pending binding terminal. What THIS test owns is the
+    // negative: no restorable frontier answers the fourth arm.
+    assert_ne!(
+        frontiers.precedence_condition(),
+        PrecedenceCondition::Unclassified,
+        "a restorable blocked frontier must never answer the unreachable arm"
+    );
 }

@@ -1,6 +1,6 @@
 use super::{
     ActiveIdentityRanks, BindingEpoch, ClaimFrontiers, DeliverySeq, FrontierBinding,
-    FrontierParticipant, LiveFrontierTransitionError, ParticipantId,
+    FrontierParticipant, LiveFrontierTransitionError, ParticipantId, PrecedenceCondition,
 };
 
 pub(in crate::lifecycle) struct BindingFateFrontierPlan {
@@ -40,7 +40,12 @@ impl ClaimFrontiers {
             .iter()
             .any(|record| u128::from(record.delivery_seq) < resulting_floor)
         {
-            return Err(LiveFrontierTransitionError::Precedence);
+            // A retained marker sitting below the measured floor is NOT one of
+            // §0.16's three clearing conditions: nothing the amendment names
+            // clears it, so it must never be dressed as a settlement.
+            return Err(LiveFrontierTransitionError::Precedence(
+                PrecedenceCondition::Unclassified,
+            ));
         }
         let resulting_cursor = if reserve_finalizer {
             cursor
@@ -99,7 +104,12 @@ impl ClaimFrontiers {
             .iter()
             .any(|record| u128::from(record.delivery_seq) < resulting_floor)
         {
-            return Err(LiveFrontierTransitionError::Precedence);
+            // A retained marker sitting below the measured floor is NOT one of
+            // §0.16's three clearing conditions: nothing the amendment names
+            // clears it, so it must never be dressed as a settlement.
+            return Err(LiveFrontierTransitionError::Precedence(
+                PrecedenceCondition::Unclassified,
+            ));
         }
         self.retained_floor = resulting_floor;
         self.retained_records

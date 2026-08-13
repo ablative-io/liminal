@@ -23,9 +23,30 @@ use super::transport::{
     normalize_configured_frame_limit,
 };
 use super::{
-    ObserverPublicationTarget, ParticipantOfferedProgress, ParticipantPublication,
-    ParticipantPublicationInbox, ParticipantPublicationRegistry,
+    MarkerSettledPublication, ObserverPublicationTarget, ParticipantOfferedProgress,
+    ParticipantPublication, ParticipantPublicationInbox, ParticipantPublicationRegistry,
 };
+
+/// One connection waiting on one settlement epoch, installed by its OWN refusal.
+///
+/// ⛔ This registry is the whole of §0.16 build obligation 3. The wake is
+/// delivered "exactly to connections that received the refusal in this process
+/// lifetime": a waiter can only be created from a
+/// `ServerValue::MarkerSettlementBackpressure` leaving THIS connection's own
+/// request, and the fire path walks waiters — never conversation membership,
+/// never the publication registry's incarnation map. There is deliberately no
+/// code path from a conversation id to a set of connections here, because that
+/// is exactly the settlement-timing side channel the amendment outlaws.
+///
+/// A connection refused at the ENROLLMENT wrapper cannot appear: its refusal is
+/// `EnrollmentSettlementBackpressure`, a different `ServerValue` variant with no
+/// epoch, and the registration match does not admit it.
+#[derive(Debug)]
+struct MarkerSettlementWaiter {
+    connection_incarnation: ConnectionIncarnation,
+    refused_epoch: u64,
+    target: ObserverPublicationTarget,
+}
 
 /// Connection-local semantic-conversation dispatch map (contract R-D1: the
 /// connection's binding/interest/dispatch maps are bounded by the signed
@@ -630,6 +651,11 @@ pub struct InstalledParticipantService {
     durable_store: Arc<dyn DurableStore>,
     frame_limit: ValidatedFrameLimit,
     publication_registry: Arc<ParticipantPublicationRegistry>,
+    /// Connections refused `MarkerSettlementBackpressure` in this process
+    /// lifetime, by conversation. See [`MarkerSettlementWaiter`].
+    settlement_waiters: Arc<
+        std::sync::Mutex<std::collections::BTreeMap<ConversationId, Vec<MarkerSettlementWaiter>>>,
+    >,
 }
 
 impl InstalledParticipantService {
@@ -654,6 +680,7 @@ impl InstalledParticipantService {
             durable_store,
             frame_limit: normalize_configured_frame_limit(configured_wf)?,
             publication_registry: Arc::new(ParticipantPublicationRegistry::default()),
+            settlement_waiters: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         })
     }
 
@@ -716,10 +743,150 @@ impl InstalledParticipantService {
         self.handler.record_publication_offer(publication)
     }
 
+    /// Installs the waiter a `MarkerSettlementBackpressure` refusal earns.
+    ///
+    /// The match is the scope: only that ONE `ServerValue` variant registers,
+    /// so an enrollment-wrapper refusal (which carries no epoch and no wake) and
+    /// every other refusal on the same arm install nothing. Re-refusing the same
+    /// conversation on the same connection REPLACES the waiter, because a
+    /// connection waits on its most recent refusal and never on two epochs at
+    /// once.
+    fn register_settlement_waiter(
+        &self,
+        context: ParticipantConnectionContext,
+        value: &ServerValue,
+    ) -> Result<(), ParticipantSemanticError> {
+        let ServerValue::MarkerSettlementBackpressure(refusal) = value else {
+            return Ok(());
+        };
+        let (conversation_id, refused_epoch) = match *refusal {
+            liminal_protocol::wire::MarkerSettlementBackpressure::CredentialAttach {
+                conversation_id,
+                refused_epoch,
+            }
+            | liminal_protocol::wire::MarkerSettlementBackpressure::Detach {
+                conversation_id,
+                refused_epoch,
+            } => (conversation_id, refused_epoch),
+        };
+        let incarnation = context.connection_incarnation();
+        let Some(target) = self
+            .publication_registry
+            .observer_target(incarnation)
+            .map_err(|error| ParticipantSemanticError::Internal {
+                message: format!("settlement publication target failed: {error}"),
+            })?
+        else {
+            return Ok(());
+        };
+        let mut waiters =
+            self.settlement_waiters
+                .lock()
+                .map_err(|_| ParticipantSemanticError::Internal {
+                    message: "settlement waiter registry is poisoned".to_owned(),
+                })?;
+        let entry = waiters.entry(conversation_id).or_default();
+        entry.retain(|waiter| waiter.connection_incarnation != incarnation);
+        entry.push(MarkerSettlementWaiter {
+            connection_incarnation: incarnation,
+            refused_epoch,
+            target,
+        });
+        drop(waiters);
+        Ok(())
+    }
+
+    /// Test hook onto [`Self::register_settlement_waiter`].
+    ///
+    /// The registry §0.16 obligation 3 rests on is private and is exercised in
+    /// production only as a side effect of a refusal travelling out of `handle`.
+    /// A pin that can only reach it that way measures the refusal path and the
+    /// registry at once, and cannot tell which of the two is scoping the wake.
+    /// These two hooks let the registry be measured ALONE.
+    #[cfg(test)]
+    pub(super) fn register_settlement_waiter_for_test(
+        &self,
+        context: ParticipantConnectionContext,
+        value: &ServerValue,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.register_settlement_waiter(context, value)
+    }
+
+    /// Test hook onto [`Self::fire_settlements`].
+    #[cfg(test)]
+    pub(super) fn fire_settlements_for_test(
+        &self,
+        conversation_id: ConversationId,
+        settled_epochs: &[u64],
+    ) -> Result<(), ParticipantSemanticError> {
+        self.fire_settlements(conversation_id, settled_epochs)
+    }
+
+    /// Number of waiters currently installed for one conversation.
+    #[cfg(test)]
+    pub(super) fn settlement_waiter_count(&self, conversation_id: ConversationId) -> usize {
+        self.settlement_waiters
+            .lock()
+            .map_or(0, |waiters| {
+                waiters.get(&conversation_id).map_or(0, Vec::len)
+            })
+    }
+
+    /// Fires the settlement wake for every connection whose OWN refusal named
+    /// this exact epoch, and for no one else.
+    ///
+    /// Epoch equality is load-bearing: it is what the stage-11 retry discipline
+    /// matches on, and it is also what keeps a connection waiting on a later
+    /// candidate from being told its own wait is over. Waiters are one-shot —
+    /// fired or dead, they leave the registry.
+    fn fire_settlements(
+        &self,
+        conversation_id: ConversationId,
+        settled_epochs: &[u64],
+    ) -> Result<(), ParticipantSemanticError> {
+        if settled_epochs.is_empty() {
+            return Ok(());
+        }
+        let mut waiters =
+            self.settlement_waiters
+                .lock()
+                .map_err(|_| ParticipantSemanticError::Internal {
+                    message: "settlement waiter registry is poisoned".to_owned(),
+                })?;
+        let Some(entry) = waiters.get_mut(&conversation_id) else {
+            return Ok(());
+        };
+        let mut fired = Vec::new();
+        entry.retain(|waiter| {
+            if settled_epochs.contains(&waiter.refused_epoch) {
+                fired.push((waiter.target.clone(), waiter.refused_epoch));
+                false
+            } else {
+                true
+            }
+        });
+        if entry.is_empty() {
+            waiters.remove(&conversation_id);
+        }
+        drop(waiters);
+        for (target, refused_epoch) in fired {
+            target
+                .publish_marker_settled(MarkerSettledPublication {
+                    conversation_id,
+                    refused_epoch,
+                })
+                .map_err(|error| ParticipantSemanticError::Internal {
+                    message: format!("marker settled publication failed: {error}"),
+                })?;
+        }
+        Ok(())
+    }
+
     fn notify_impact(&self, impact: &DispatchImpact) -> Result<(), ParticipantSemanticError> {
         let Some(conversation_id) = impact.conversation_id() else {
             return Ok(());
         };
+        self.fire_settlements(conversation_id, impact.settled_epochs())?;
         for target in impact.target_union() {
             self.publication_registry
                 .notify(
@@ -810,7 +977,13 @@ impl ParticipantSemanticHandler for InstalledParticipantService {
             .handler
             .handle_with_impact(context, conversations, request);
         let (result, impact) = outcome.into_parts();
+        // Fire before registering: a request that both drained and was refused
+        // must not wake itself with its own drain, and within one request the
+        // settlement it cleared is never the one it is now waiting on.
         self.notify_impact(&impact)?;
+        if let Ok(value) = &result {
+            self.register_settlement_waiter(context, value)?;
+        }
         result
     }
 }

@@ -376,7 +376,7 @@ fn clean_session(
 /// Names the two permanent-brick error shapes explicitly.
 fn assert_not_bricked(step: &str, error: &RemoteParticipantError) -> String {
     match error {
-        RemoteParticipantError::StateUnavailable => format!(
+        RemoteParticipantError::StateUnavailable { .. } => format!(
             "{step}: the client aggregate is permanently unavailable (StateUnavailable) — the \
              tear bricked the handle"
         ),

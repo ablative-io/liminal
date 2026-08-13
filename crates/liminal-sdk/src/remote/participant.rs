@@ -89,8 +89,29 @@ impl ParticipantResponseProvenance {
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteParticipantError {
     /// A prior commit could not be persisted, so no aggregate authority remains reachable.
-    #[error("participant state is unavailable after an unreleased durability failure")]
-    StateUnavailable,
+    ///
+    /// `source` is the RETAINED cause: the exact [`SdkError`] the caller's own
+    /// store returned at the seam that bricked the handle. It travels on the
+    /// error itself, so a caller who merely CAUGHT this value -- through a `?`,
+    /// across a channel, out of a join -- can attribute the hold by matching a
+    /// typed value rather than parsing rendered text. It is also this error's
+    /// [`source`](core::error::Error::source).
+    ///
+    /// A `None` means the aggregate is unreachable for a reason that did not
+    /// originate in the store. That discrimination is why the field is an
+    /// `Option` and not an `SdkError`: there is no store failure to name, so
+    /// [`source`](core::error::Error::source) reports `None` rather than
+    /// inventing a link, and the rendered message drops the durability clause it
+    /// would otherwise be asserting without evidence.
+    #[error(
+        "participant state is unavailable{}",
+        source.as_ref().map_or("", |_| " after an unreleased durability failure")
+    )]
+    StateUnavailable {
+        /// The store failure that made the aggregate unreachable, when that is why.
+        #[source]
+        source: Option<SdkError>,
+    },
     /// The protocol crate could not encode the current aggregate as canonical LPCR.
     #[error("client resume record encode failed: {0:?}")]
     ResumeEncode(ClientResumeRecordEncodeError),
@@ -286,11 +307,13 @@ pub(super) struct RemoteParticipantState<S> {
     pub(super) store: S,
     /// The store failure that made the aggregate unreachable, if that is why.
     ///
-    /// `take_aggregate` reports [`RemoteParticipantError::StateUnavailable`],
-    /// which names the CONDITION and carries no cause — and the cause is gone by
-    /// then, because the failure was returned to whoever made the failing call
-    /// and to nobody else. This retains it so the question "why is this handle
-    /// dead" has a typed answer for every later caller.
+    /// The failure itself is returned to whoever made the failing call and to
+    /// nobody else. This retains it so the question "why is this handle dead"
+    /// has a typed answer for every later caller: `take_aggregate` reads it back
+    /// out of here onto the
+    /// [`StateUnavailable`](RemoteParticipantError::StateUnavailable) it reports,
+    /// and [`unavailability_cause`](RemoteParticipantHandle::unavailability_cause)
+    /// answers it without a failing call.
     pub(super) unavailable: Option<SdkError>,
 }
 
@@ -377,25 +400,19 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
     /// Returns the store failure that made this handle unavailable, if that is
     /// why it is unavailable.
     ///
-    /// [`RemoteParticipantError::StateUnavailable`] names a CONDITION and
-    /// carries no cause: a handle reports it on every call after a durability
-    /// failure bricked it, long after the failure itself was returned to the one
-    /// caller who happened to make the failing call. Every later caller sees an
-    /// unavailability it cannot attribute, and the only thing distinguishing a
-    /// store-originated hold from any other was the rendered text of an error
-    /// nobody still holds.
-    ///
     /// A `Some` names the exact [`SdkError`] the caller's own store returned, so
     /// a hold can be attributed by matching a typed value. A `None` means the
     /// handle is either live or unavailable for a reason that did not originate
     /// in the store — which is itself the discrimination this exists to provide.
     ///
-    /// This is deliberately an accessor rather than a payload on
-    /// `StateUnavailable`. Carrying the source on the variant is the better
-    /// shape and remains the intended destination, but these enums are
-    /// exhaustive by a standing ruling so a consumer can `match` them and be
-    /// told when a case is added; changing that variant is therefore a breaking
-    /// change and not this lane's to make.
+    /// The same retained value is carried on
+    /// [`StateUnavailable`](RemoteParticipantError::StateUnavailable) and is that
+    /// error's [`source`](core::error::Error::source), so a caller who CAUGHT
+    /// that error already holds the cause and does not need this. This accessor
+    /// answers the other question — one asked of a handle you still HOLD, rather
+    /// than of an error you caught — and it answers it without making a call
+    /// that must fail in order to find out. Its `None` therefore covers one case
+    /// the variant's `None` cannot: a handle that is simply still live.
     #[must_use]
     pub fn unavailability_cause(&self) -> Option<SdkError> {
         self.state.lock().unavailable.clone()
@@ -664,10 +681,10 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
 pub(super) fn take_aggregate<S>(
     state: &mut RemoteParticipantState<S>,
 ) -> Result<ClientParticipantAggregate, RemoteParticipantError> {
-    state
-        .aggregate
-        .take()
-        .ok_or(RemoteParticipantError::StateUnavailable)
+    let aggregate = state.aggregate.take();
+    aggregate.ok_or_else(|| RemoteParticipantError::StateUnavailable {
+        source: state.unavailable.clone(),
+    })
 }
 
 pub(super) fn persist<S: ParticipantResumeStore>(

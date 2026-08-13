@@ -1,0 +1,28 @@
+   Compiling liminal-server v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.6.2 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.55s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-908b5e3fc404f363)
+
+running 4 tests
+test server::participant::production::tests_a4_body_conflict::identical_bytes_re_present_still_dedups_after_the_conflict_arm ... ok
+test server::participant::production::tests_a4_body_conflict::same_participant_same_token_different_body_refuses_and_commits_nothing ... ok
+test server::participant::production::tests_a4_body_conflict::a_stale_presenter_is_answered_by_authority_never_by_the_token_arm ... FAILED
+test server::participant::production::tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal ... ok
+
+failures:
+
+---- server::participant::production::tests_a4_body_conflict::a_stale_presenter_is_answered_by_authority_never_by_the_token_arm stdout ----
+
+thread 'server::participant::production::tests_a4_body_conflict::a_stale_presenter_is_answered_by_authority_never_by_the_token_arm' (2994857) panicked at crates/liminal-server/src/server/participant/production/tests_a4_body_conflict.rs:486:5:
+a stale presenter reached the token arm -- the lookup must run after authority verification: AttemptTokenBodyConflict(RecordAdmission { token: RecordAdmissionAttemptToken([106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106, 106]), conversation_id: 9404, presented_participant_id: 0, presented_generation: Generation(1) })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    server::participant::production::tests_a4_body_conflict::a_stale_presenter_is_answered_by_authority_never_by_the_token_arm
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 720 filtered out; finished in 1.39s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+error: 1 target failed:
+    `-p liminal-server --lib`

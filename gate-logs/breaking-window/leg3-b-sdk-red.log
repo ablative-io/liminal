@@ -1,0 +1,28 @@
+   Compiling liminal-protocol v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+   Compiling liminal-sdk v0.6.2 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+error[E0026]: variant `remote::participant::RemoteParticipantError::StateUnavailable` does not have a field named `source`
+   --> crates/liminal-sdk/src/remote/participant/tests/replay.rs:273:9
+    |
+273 |         source: Some(carried),
+    |         ^^^^^^ variant `remote::participant::RemoteParticipantError::StateUnavailable` does not have this field
+
+error[E0559]: variant `remote::participant::RemoteParticipantError::StateUnavailable` has no field named `source`
+   --> crates/liminal-sdk/src/remote/participant/tests/replay.rs:317:9
+    |
+317 |         source: Some(cause.clone()),
+    |         ^^^^^^ `remote::participant::RemoteParticipantError::StateUnavailable` does not have this field
+    |
+    = note: all struct fields are already assigned
+
+error[E0559]: variant `remote::participant::RemoteParticipantError::StateUnavailable` has no field named `source`
+   --> crates/liminal-sdk/src/remote/participant/tests/replay.rs:325:74
+    |
+325 |     let unattributed = super::RemoteParticipantError::StateUnavailable { source: None };
+    |                                                                          ^^^^^^ `remote::participant::RemoteParticipantError::StateUnavailable` does not have this field
+    |
+    = note: all struct fields are already assigned
+
+Some errors have detailed explanations: E0026, E0559.
+For more information about an error, try `rustc --explain E0026`.
+error: could not compile `liminal-sdk` (lib test) due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...

@@ -4,11 +4,12 @@
 use alloc::boxed::Box;
 
 use super::super::{
-    ConnectionConversationCapacityExceeded, ConversationId, ConversationOrderExhausted,
-    ConversationSequenceExhausted, InvalidObserverEpoch, InvalidObserverEpochList,
-    MarkerClosureCapacityExceeded, NoBinding, ObserverBackpressure, ObserverRecoveryAccepted,
-    ParticipantUnknown, RecordAdmissionEnvelope, RecordCommitted, RecordTooLarge, ResponseEnvelope,
-    Retired, ServerDiscriminant, ServerValue, StaleAuthority,
+    AttemptTokenBodyConflict, ConnectionConversationCapacityExceeded, ConversationId,
+    ConversationOrderExhausted, ConversationSequenceExhausted, Generation, InvalidObserverEpoch,
+    InvalidObserverEpochList, MarkerClosureCapacityExceeded, NoBinding, ObserverBackpressure,
+    ObserverRecoveryAccepted, ParticipantId, ParticipantUnknown, RecordAdmissionAttemptToken,
+    RecordAdmissionEnvelope, RecordCommitted, RecordTooLarge, ResponseEnvelope, Retired,
+    ServerDiscriminant, ServerValue, StaleAuthority,
 };
 
 /// Server response bound to one ordinary record admission.
@@ -22,6 +23,41 @@ pub struct RecordAdmissionResponse {
 }
 
 impl RecordAdmissionResponse {
+    /// Exact committed attempt token re-presented by its OWN verified
+    /// participant under different canonical payload bytes (register row 5639,
+    /// whose admitted-request set gains `RecordAdmission` under contract
+    /// §0.15 amendment A4).
+    ///
+    /// Ordinary admission selects no [`AttemptConflict`](super::super::AttemptConflict)
+    /// selector, in the same way Leave selects no marker one: the committed
+    /// identity is the (token, canonical-payload fingerprint, verified
+    /// participant) triple, so the one conflicting axis is the canonical body
+    /// this row is named for.
+    ///
+    /// ⛔ Only the SAME-participant arm may reach this constructor. A token
+    /// hit belonging to a DIFFERENT participant is a dedup miss that commits
+    /// silently: any token-correlated answer across participants is a probe
+    /// channel A4 outlaws permanently, and the server-side range that finds
+    /// such a hit stays warn-and-fall-through.
+    #[must_use]
+    pub const fn attempt_token_body_conflict(
+        token: RecordAdmissionAttemptToken,
+        conversation_id: ConversationId,
+        presented_participant_id: ParticipantId,
+        presented_generation: Generation,
+    ) -> Self {
+        Self {
+            value: ServerValue::AttemptTokenBodyConflict(
+                AttemptTokenBodyConflict::RecordAdmission {
+                    token,
+                    conversation_id,
+                    presented_participant_id,
+                    presented_generation,
+                },
+            ),
+        }
+    }
+
     /// First decoded semantic operation for an untracked conversation
     /// exceeded the connection-conversation limit (register row 5641).
     #[must_use]

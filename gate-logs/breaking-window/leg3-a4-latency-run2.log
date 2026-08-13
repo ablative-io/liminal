@@ -1,0 +1,36 @@
+   Compiling liminal-server v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+warning: variable does not need to be mutable
+   --> crates/liminal-server/src/server/participant/production/tests_a4_body_conflict.rs:729:9
+    |
+729 |     let mut measure = |mint: &dyn Fn(u64) -> RecordAdmissionAttemptToken| -> Result<f64, Box<dyn Error>> {
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `liminal-server` (lib test) generated 1 warning (run `cargo fix --lib -p liminal-server --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 36.22s
+     Running unittests src/lib.rs (target/release/deps/liminal_server-eba83dde89974ae9)
+
+running 2 tests
+A4 latency measurement -- population 10200 committed identities
+  trials per probe class: 200000
+  presenter-scoped HIT  (hot token, 1 of 200 entries): 69.30 ns/probe
+  wide           HIT  (hot token, 200 entries spanned): 83.69 ns/probe
+  presenter-scoped MISS (uncommitted token): 55.43 ns/probe
+  wide           MISS (uncommitted token): 44.23 ns/probe
+  HIT  differential (presenter - wide): -14.39 ns
+  MISS differential (presenter - wide): +11.20 ns
+test server::participant::production::tests_a4_body_conflict::a4_presenter_scoped_versus_wide_lookup_latency ... ok
+test server::participant::production::tests_a4_body_conflict::a4_cross_participant_collision_is_not_observable_in_response_time has been running for over 60 seconds
+A4 cross-participant observability -- 400 dispatches per class
+  fresh token, pass 1      : 89574928 ns/dispatch
+  COLLIDING token (wide hit + warn): 97502449 ns/dispatch
+  fresh token, pass 2      : 99448102 ns/dispatch
+  store drift across the two fresh passes: +9873175 ns
+  collision signal vs the fresh mean      : +2990934 ns
+test server::participant::production::tests_a4_body_conflict::a4_cross_participant_collision_is_not_observable_in_response_time ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 724 filtered out; finished in 146.33s
+

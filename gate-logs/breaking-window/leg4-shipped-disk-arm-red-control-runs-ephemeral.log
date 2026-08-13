@@ -1,0 +1,24 @@
+   Compiling liminal-server v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.87s
+     Running tests/a5_settlement_wake_e2e.rs (target/debug/deps/a5_settlement_wake_e2e-5a289efa915d2a26)
+
+running 1 test
+disk arm persistence_path = /var/folders/87/tdf6vfls1fj_4ydz_y6sk3580000gn/T/.tmpfKplme
+settlement window opened after 1 commits, refused_epoch = 8
+before the clearing write: refused drained 0, uninvolved drained 0
+refused client drained 4 pushes after the clearing write
+uninvolved client drained 2 pushes after the clearing write
+
+thread 'the_settlement_wake_reaches_the_refused_connection_and_no_other_on_disk' (3627877) panicked at crates/liminal-server/tests/a5_settlement_wake_e2e.rs:660:5:
+this arm must have run against a PERSISTENT haematite database rooted at the configured path -- /var/folders/87/tdf6vfls1fj_4ydz_y6sk3580000gn/T/.tmpfKplme/durability/config.json is the config file build_durable_store_with writes for persistence_path = Some(..) and never for the ephemeral store. Its absence means this test passed as a second ephemeral run and measured nothing.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test the_settlement_wake_reaches_the_refused_connection_and_no_other_on_disk ... FAILED
+
+failures:
+
+failures:
+    the_settlement_wake_reaches_the_refused_connection_and_no_other_on_disk
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 32.69s
+
+error: test failed, to rerun pass `-p liminal-server --test a5_settlement_wake_e2e`

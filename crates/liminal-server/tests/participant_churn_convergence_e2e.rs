@@ -599,7 +599,7 @@ fn clean_session(
 /// failure says WHICH failure it is rather than "an error happened".
 fn assert_not_bricked(step: &str, error: &RemoteParticipantError) -> String {
     match error {
-        RemoteParticipantError::StateUnavailable => format!(
+        RemoteParticipantError::StateUnavailable { .. } => format!(
             "{step}: the client aggregate is permanently unavailable after the churn \
              (StateUnavailable) — a torn exchange bricked the handle"
         ),

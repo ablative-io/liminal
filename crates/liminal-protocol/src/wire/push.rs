@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 
 use super::{
     BindingEpoch, CloseCause, ConversationId, DeliverySeq, ObserverEpoch, ParticipantId,
-    PushDiscriminant, RecordKind,
+    PushDiscriminant, RecordKind, SettlementEpoch,
 };
 
 /// Causes valid only for a `Detached` lifecycle record.
@@ -164,6 +164,26 @@ pub enum ServerPush {
     },
     /// Participant record delivery (`0x0201`).
     ParticipantDelivery(ParticipantDelivery),
+    /// Marker-settlement clearing wake (`0x0202`).
+    ///
+    /// Paired with the `MarkerSettlementBackpressure` refusal and delivered
+    /// CONNECTION-SCOPED: exactly to the connections that received that refusal
+    /// in this process lifetime, mirroring `ObserverProgressed`'s connection-level
+    /// delivery. A refused attach client holds no binding and therefore receives
+    /// no `ParticipantDelivery`, so without this wake the only honest client
+    /// behavior would be polling.
+    ///
+    /// It is NEVER sent to a connection refused at the enrollment wrapper: that
+    /// wrapper carries no membership predicate, so its refusal
+    /// (`EnrollmentSettlementBackpressure`) carries neither epoch nor wake
+    /// (participant contract §0.16 condition 2, enrollment wrapper).
+    MarkerSettled {
+        /// Conversation whose marker settlement cleared.
+        conversation_id: ConversationId,
+        /// Refusal epoch this clearing wakes; matched by the stage-11 retry
+        /// against the refusal's own `refused_epoch`.
+        refused_epoch: SettlementEpoch,
+    },
 }
 
 impl ServerPush {
@@ -173,6 +193,7 @@ impl ServerPush {
         match self {
             Self::ObserverProgressed { .. } => PushDiscriminant::ObserverProgressed,
             Self::ParticipantDelivery(_) => PushDiscriminant::ParticipantDelivery,
+            Self::MarkerSettled { .. } => PushDiscriminant::MarkerSettled,
         }
     }
 }

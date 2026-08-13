@@ -64,9 +64,20 @@ pub enum DispatchImpact {
     Changed {
         /// Conversation whose locked authority produced the effects.
         conversation_id: ConversationId,
-        /// Nonempty effect map. Individual truthful effects may have no current
-        /// binding target.
+        /// Effect map. Individual truthful effects may have no current binding
+        /// target. May be empty when only a settlement cleared.
         effects: BTreeMap<DispatchEffect, BTreeSet<DispatchTarget>>,
+        /// Marker settlement epochs this request's durable drains CLEARED
+        /// (participant contract §0.16 condition 2).
+        ///
+        /// A separate lane from `effects` on purpose: an effect names a
+        /// participant BINDING eligible to be told about changed dispatch
+        /// permission, and a connection refused `MarkerSettlementBackpressure`
+        /// holds no binding — that is precisely why the amendment needs a
+        /// pushed wake instead of a `ParticipantDelivery`. Routing settlements
+        /// through `DispatchTarget` would therefore be routing them to the one
+        /// population that cannot receive them.
+        settled_epochs: Vec<u64>,
     },
 }
 
@@ -79,6 +90,15 @@ impl DispatchImpact {
             Self::Changed {
                 conversation_id, ..
             } => Some(*conversation_id),
+        }
+    }
+
+    /// Returns the marker settlement epochs cleared by this request.
+    #[must_use]
+    pub fn settled_epochs(&self) -> &[u64] {
+        match self {
+            Self::Unchanged => &[],
+            Self::Changed { settled_epochs, .. } => settled_epochs,
         }
     }
 
@@ -110,6 +130,7 @@ impl DispatchImpact {
 pub struct DispatchImpactAccumulator {
     effects: BTreeMap<DispatchEffect, BTreeSet<DispatchTarget>>,
     staged_effects: BTreeMap<DispatchEffect, BTreeSet<DispatchTarget>>,
+    settled_epochs: Vec<u64>,
 }
 
 impl DispatchImpactAccumulator {
@@ -119,6 +140,7 @@ impl DispatchImpactAccumulator {
         Self {
             effects: BTreeMap::new(),
             staged_effects: BTreeMap::new(),
+            settled_epochs: Vec::new(),
         }
     }
 
@@ -181,13 +203,24 @@ impl DispatchImpactAccumulator {
     /// Converts the request accumulator into its externally carried impact.
     #[must_use]
     pub fn finish(self, conversation_id: ConversationId) -> DispatchImpact {
-        if self.effects.is_empty() {
+        if self.effects.is_empty() && self.settled_epochs.is_empty() {
             DispatchImpact::Unchanged
         } else {
             DispatchImpact::Changed {
                 conversation_id,
                 effects: self.effects,
+                settled_epochs: self.settled_epochs,
             }
         }
+    }
+
+    /// Records one marker settlement epoch AFTER its drain row is durable.
+    ///
+    /// Ordering is the whole point: the wake promises the refused connection
+    /// that retrying now will not meet the same candidate, so it may only be
+    /// recorded once the drain that removed the candidate has appended and the
+    /// resulting owner is installed.
+    pub(crate) fn record_marker_settled(&mut self, refused_epoch: u64) {
+        self.settled_epochs.push(refused_epoch);
     }
 }

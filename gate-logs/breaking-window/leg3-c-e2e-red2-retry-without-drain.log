@@ -1,0 +1,16 @@
+   Compiling liminal-server v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.68s
+     Running tests/a5_settlement_wake_e2e.rs (target/debug/deps/a5_settlement_wake_e2e-5a289efa915d2a26)
+
+running 1 test
+test the_refused_attach_binds_when_retried_after_its_matching_wake ... Error: "the retry after a matching MarkerSettled must bind, got MarkerSettlementBackpressure(CredentialAttach { conversation_id: 42262, refused_epoch: 8 })"
+FAILED
+
+failures:
+
+failures:
+    the_refused_attach_binds_when_retried_after_its_matching_wake
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 10.34s
+
+error: test failed, to rerun pass `-p liminal-server --test a5_settlement_wake_e2e`

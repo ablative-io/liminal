@@ -178,7 +178,7 @@ fn failed_checkpoint_withholds_successor_authority() -> TestResult {
     ));
     assert!(matches!(
         handle.record_explicit_reconnect(),
-        Err(super::RemoteParticipantError::StateUnavailable)
+        Err(super::RemoteParticipantError::StateUnavailable { .. })
     ));
     Ok(())
 }
@@ -217,7 +217,7 @@ fn a_store_originated_unavailability_names_its_typed_cause() -> TestResult {
     ));
     assert!(matches!(
         handle.record_explicit_reconnect(),
-        Err(super::RemoteParticipantError::StateUnavailable)
+        Err(super::RemoteParticipantError::StateUnavailable { .. })
     ));
 
     let Some(cause) = handle.unavailability_cause() else {
@@ -236,6 +236,98 @@ fn a_store_originated_unavailability_names_its_typed_cause() -> TestResult {
         "the retained cause must be the caller's own store error, by value"
     );
     Ok(())
+}
+
+/// RED AT 8d9fe5d (P0 #62, leg B, breaking window): the cause was reachable only
+/// through the handle, never through the ERROR.
+///
+/// `unavailability_cause()` answers a caller who still holds the handle. A
+/// caller who caught the error -- through a `?`, across a channel, out of a join
+/// -- holds a value with no handle behind it, and the value said only that the
+/// state was unavailable. The cause existed and could not be reached from the
+/// thing that was actually propagated.
+///
+/// The claim here is that the retained cause travels ON the returned error: as a
+/// typed field, and as `Error::source()` for a caller walking the chain.
+#[test]
+fn a_bricked_handle_carries_its_typed_cause_on_the_state_unavailable_error() -> TestResult {
+    let config = RemoteConfig::new(
+        "participant-checkpoint.invalid:1",
+        "participant-tests",
+        "participant-tests",
+        ConnectionPoolConfig::new(1, 1, 1),
+    )?;
+    let handle = RemoteParticipantHandle::new(&config, FailSecondWrite::default())?;
+    assert!(matches!(
+        handle.record_explicit_reconnect(),
+        Err(super::RemoteParticipantError::Storage(_))
+    ));
+
+    let expected = SdkError::Store {
+        description: "injected checkpoint failure".to_string(),
+    };
+    let Err(error) = handle.record_explicit_reconnect() else {
+        return Err("a handle bricked by a store failure must refuse every later call".into());
+    };
+    let super::RemoteParticipantError::StateUnavailable {
+        source: Some(carried),
+    } = &error
+    else {
+        return Err(format!(
+            "#62 leg B REPRODUCED: the propagated error names the condition and not the cause, so \
+             a caller holding only this value cannot attribute the hold: {error:?}"
+        )
+        .into());
+    };
+    assert_eq!(
+        *carried, expected,
+        "the carried cause must be the caller's own store error, by value"
+    );
+
+    let walked = std::error::Error::source(&error).ok_or(
+        "a StateUnavailable carrying a cause must expose it as Error::source, or the chain \
+         walker still falls off at the rendered text",
+    )?;
+    assert_eq!(
+        walked.downcast_ref::<SdkError>(),
+        Some(&expected),
+        "the source must be the retained SdkError itself, not a re-wrapped copy"
+    );
+    Ok(())
+}
+
+/// RED AT 8d9fe5d (P0 #62, leg B, breaking window): the discrimination the
+/// payload must not destroy.
+///
+/// A `None` cause is load-bearing: it means the handle is unavailable for a
+/// reason that did not originate in the store. Making the cause a payload is
+/// only correct if that case survives AND keeps `Error::source()` honest --
+/// a source invented for a hold that had no store cause would be a fabricated
+/// chain, and an absent source on a hold that HAD one is the bug above.
+///
+/// Both directions are asserted here on purpose, in the same predicate: the
+/// `Some` arm is the positive control that proves the `None` assertion is
+/// measuring the shape rather than a `source()` that never returns anything.
+#[test]
+fn a_state_unavailable_reports_a_source_exactly_when_a_store_cause_was_retained() {
+    let cause = SdkError::Store {
+        description: "injected checkpoint failure".to_string(),
+    };
+    let attributed = super::RemoteParticipantError::StateUnavailable {
+        source: Some(cause.clone()),
+    };
+    assert_eq!(
+        std::error::Error::source(&attributed).and_then(|source| source.downcast_ref::<SdkError>()),
+        Some(&cause),
+        "a retained store cause must be reachable as Error::source"
+    );
+
+    let unattributed = super::RemoteParticipantError::StateUnavailable { source: None };
+    assert!(
+        std::error::Error::source(&unattributed).is_none(),
+        "an unavailability that did not originate in the store must report no source rather \
+         than a fabricated one"
+    );
 }
 
 /// RED AT 3a9b8ce (P0 #62, leg B): `Storage` and `Transport` wrap an `SdkError`
@@ -448,7 +540,10 @@ fn rotated_broker_refusal(token: DetachAttemptToken) -> Result<ServerValue, io::
 /// Fails only on the one error that means the handle's state is gone. Any other
 /// typed failure is a refusal the caller can still act on.
 fn alive<T>(result: &Result<T, super::RemoteParticipantError>, seam: &str) -> TestResult {
-    if matches!(result, Err(super::RemoteParticipantError::StateUnavailable)) {
+    if matches!(
+        result,
+        Err(super::RemoteParticipantError::StateUnavailable { .. })
+    ) {
         return Err(io::Error::other(format!(
             "#59 REPRODUCED: {seam} reported destroyed state after a pure encode refusal"
         ))

@@ -1,0 +1,9 @@
+   Compiling liminal-protocol v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.04s
+     Running unittests src/lib.rs (target/debug/deps/liminal_protocol-8a5f5a28a83d7911)
+
+running 1 test
+test lifecycle::claim_frontier_tests::precedence_is_never_unclassified_because_a_lone_order_candidate_cannot_exist ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 473 filtered out; finished in 0.00s
+

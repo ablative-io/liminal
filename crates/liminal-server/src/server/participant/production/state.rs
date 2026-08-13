@@ -183,6 +183,15 @@ pub(super) struct Slot {
     pub(super) exact_detach_token: Option<DetachAttemptToken>,
 }
 
+/// Key of one committed ordinary-admission identity: the A2 identity triple in
+/// the component order A4's presenter-scoped range needs.
+///
+/// Ordered (attempt token, verified participant, canonical payload
+/// fingerprint). The order is documented at the field this keys — see
+/// [`ConversationAuthority::committed_admissions`] — and is a correctness
+/// requirement of §0.15, not a preference.
+pub(super) type CommittedAdmissionKey = ([u8; 16], ParticipantId, Digest);
+
 /// Sole live owner of one conversation's protocol state.
 #[derive(Debug)]
 pub(super) struct ConversationAuthority {
@@ -250,7 +259,27 @@ pub(super) struct ConversationAuthority {
     /// answers, never change one. A re-present whose witness row has been
     /// compacted commits a second copy — the NAMED dedup window, not a
     /// silent one.
-    pub(super) committed_admissions: BTreeMap<([u8; 16], Digest, ParticipantId), DeliverySeq>,
+    ///
+    /// # ⛔ The component ORDER inside the key is load-bearing (A4, §0.15)
+    ///
+    /// The triple is ordered (token, participant, fingerprint) and not
+    /// (token, fingerprint, participant), because A4's refusal must probe a
+    /// range scoped to ONE presenter and a `BTreeMap` range compares
+    /// lexicographically. With the fingerprint in the middle, a range whose
+    /// endpoints pin the participant and span the fingerprints
+    /// (`(token, [0x00; 32], presenter) ..= (token, [0xFF; 32], presenter)`)
+    /// selects on the fingerprint alone and returns every participant's
+    /// entries — it is the WIDE range wearing a presenter-scoped label, and a
+    /// refusal hung on it answers cross-participant token collisions, which is
+    /// precisely the probe channel §0.15 outlaws permanently. This ordering is
+    /// what makes the presenter-scoped range actually presenter-scoped; it is
+    /// measured by
+    /// `tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal`,
+    /// which goes red against the middle-fingerprint layout.
+    ///
+    /// The order is invisible outside this map: it is rebuilt from durable
+    /// rows on every replay and no durable or wire byte encodes it.
+    pub(super) committed_admissions: BTreeMap<CommittedAdmissionKey, DeliverySeq>,
     /// F8B R-SEAL closed marker (§6.6). Set by the Died-flavor drain apply that
     /// erases this conversation's FINAL enrollment token, on the live apply and
     /// on every replay alike, and never appended as a row of its own — closure
@@ -275,6 +304,23 @@ pub(super) struct ConversationAuthority {
     observer_progress_witnesses: ObserverProgressWitnessState,
     /// Durable hard-observer progress for this conversation.
     pub(super) observer_progress: DeliverySeq,
+}
+
+/// The two position allocators captured before a request consumes them.
+///
+/// ⛔ Load-bearing, not tidiness. `StateError::PresentedRefusal` is answered
+/// with `Ok`, so the conversation owner is RETAINED rather than discarded and
+/// cold replayed — a consumed delivery sequence is therefore never re-derived
+/// from durable rows. Leaving the gap in place would make the very next attach
+/// allocate `high_watermark + 2` and meet the seam's record-position check as
+/// `LiveFrontierError::Frontier`: the presentation would have bought a frame
+/// with a broken conversation. Restoring them makes an A5 settlement refusal
+/// indistinguishable from one that returned before allocation ran at all
+/// (participant contract §0.16 presentation law, build obligation 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PositionAllocators {
+    next_order: TransactionOrder,
+    next_seq: DeliverySeq,
 }
 
 /// Failure while applying or replaying one production operation.
@@ -682,6 +728,34 @@ impl ConversationAuthority {
         self.pending_debt_dispatch_transition = None;
         self.obligation_debt_dispatch = None;
         self.install_frontier(frontier)
+    }
+
+    /// Captures the two position allocators for a lawful presented refusal.
+    ///
+    /// See [`PositionAllocators`] for why an A5 settlement refusal MUST put
+    /// them back. Kept `pub(super)` so any future presented-refusal site
+    /// reaches the same pair rather than inventing its own rollback.
+    pub(super) const fn position_allocators(&self) -> PositionAllocators {
+        PositionAllocators {
+            next_order: self.next_order,
+            next_seq: self.next_seq,
+        }
+    }
+
+    /// Restores allocators consumed by a request that committed nothing.
+    ///
+    /// Only ever called on the `StateError::PresentedRefusal` path, where
+    /// nothing durable was appended and the owner is retained rather than cold
+    /// replayed.
+    pub(super) const fn restore_position_allocators(&mut self, captured: PositionAllocators) {
+        self.next_order = captured.next_order;
+        self.next_seq = captured.next_seq;
+    }
+
+    /// The next order/sequence pair, for the A5 restoration pins.
+    #[cfg(test)]
+    pub(super) const fn next_position_for_test(&self) -> (TransactionOrder, DeliverySeq) {
+        (self.next_order, self.next_seq)
     }
 
     /// Allocates the next transaction order and delivery sequence pair.

@@ -31,7 +31,7 @@ use super::log::{
     StoredRecordAdmissionRequest, StoredResourceVector, StoredRetainedCharge,
 };
 use super::outbox_projection::ReplayedProjectionFacts;
-use super::state::{ConversationAuthority, DurableAppend, StateError};
+use super::state::{CommittedAdmissionKey, ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
     #[cfg(test)]
@@ -108,15 +108,41 @@ impl ConversationAuthority {
     /// disclosure check needed — the miss IS the guard), and every committed
     /// identity stays independently re-presentable.
     ///
+    /// # Contract amendment A4 (§0.15): the same-participant conflict refuses
+    ///
+    /// A4 converts exactly one of A2's two miss arms. Same token, SAME
+    /// verified participant, different canonical payload bytes, committed
+    /// match inside the retained op-log window is now a typed
+    /// `AttemptTokenBodyConflict::RecordAdmission` refusal that commits
+    /// nothing; the other arm — a token hit belonging to a DIFFERENT
+    /// participant — keeps A2's warn-and-fall-through exactly, forever.
+    ///
+    /// ## ⛔ Why this reads two ranges instead of one
+    ///
+    /// The presenter-scoped range below is a strict SUBSET of the wide range
+    /// beneath it, so the natural implementation is to delete one of them and
+    /// refuse on the wide hit. That build is outlawed by §0.15 obligation 1:
+    /// refusing on a wide hit answers a CROSS-participant token collision, and
+    /// any token-correlated answer across participants — refusal, warning,
+    /// even latency — is a probe channel that lets one participant test
+    /// whether another has spent a token. A4 refuses that leg as a matter of
+    /// register law, not as a deferral, and states that a one-widened-arm
+    /// implementation "violates the cross-participant clause of this amendment
+    /// regardless of its test results". The two ranges are therefore the
+    /// mechanism, not a redundancy to be optimised away. The pin standing
+    /// under this is
+    /// `tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal`.
+    ///
+    /// The refusal discloses nothing: the presenter has already been proven by
+    /// `classify_record_admission_authority` to BE the committed identity's own
+    /// verified participant, so "you already committed different bytes under
+    /// this token" reveals only the presenter's own history.
+    ///
     /// `None` means no committed identity matched and the caller admits
-    /// normally. Consumes nothing either way.
+    /// normally. Consumes nothing on any of the three paths.
     fn answer_committed_record_admission(&self, request: &RecordAdmission) -> Option<ArmOutcome> {
         let dedup_token = request.record_admission_attempt_token.into_bytes();
-        let dedup_key = (
-            dedup_token,
-            ordinary_payload_fingerprint(&request.payload),
-            request.participant_id,
-        );
+        let dedup_key = committed_admission_key(request);
         if let Some(committed_delivery_seq) = self.committed_admissions.get(&dedup_key) {
             return Some(ArmOutcome::respond(
                 RecordAdmissionResponse::record_committed(RecordCommitted::new(
@@ -126,30 +152,58 @@ impl ConversationAuthority {
                 .into_server_value(),
             ));
         }
+        // A4's own range, scoped to the PRESENTER and touching not one foreign
+        // entry: the key's participant component sits ahead of the
+        // fingerprint precisely so these endpoints select on the presenter
+        // (see `committed_admissions`' own doc, where the ordering is the
+        // documented mechanism). Reached only after the exact-identity lookup
+        // above missed, so any hit here is by construction the same
+        // participant's same token under DIFFERENT canonical bytes -- the one
+        // conflicting axis this refusal is named for, and the reason it needs
+        // no `AttemptConflict` selector.
         if self
             .committed_admissions
             .range(
-                (dedup_token, [0_u8; 32], ParticipantId::MIN)
-                    ..=(dedup_token, [0xFF_u8; 32], ParticipantId::MAX),
+                (dedup_token, request.participant_id, [0_u8; 32])
+                    ..=(dedup_token, request.participant_id, [0xFF_u8; 32]),
             )
             .next()
             .is_some()
         {
-            // The token is already committed under a different payload or
-            // participant. Never answered with any prior commit (a changed
-            // body must not be silently discarded; a foreign participant
-            // must learn nothing) and never refused (no admitted refusal
-            // shape exists inside A2; the conflict arm is a separate
-            // register decision). Falls through to a normal admission,
-            // loudly. No sibling delivery sequence is logged: range order is
-            // fingerprint order, so any single sibling would be an
-            // arbitrary one wearing a confident label.
+            return Some(ArmOutcome::respond(
+                RecordAdmissionResponse::attempt_token_body_conflict(
+                    request.record_admission_attempt_token,
+                    request.conversation_id,
+                    request.participant_id,
+                    request.capability_generation,
+                )
+                .into_server_value(),
+            ));
+        }
+        if self
+            .committed_admissions
+            .range(
+                (dedup_token, ParticipantId::MIN, [0_u8; 32])
+                    ..=(dedup_token, ParticipantId::MAX, [0xFF_u8; 32]),
+            )
+            .next()
+            .is_some()
+        {
+            // A2's surviving arm, now reachable ONLY across participants: the
+            // presenter-scoped return above has already taken every
+            // same-participant hit. The token is committed by SOMEBODY ELSE.
+            // Never answered with any prior commit and never refused -- a
+            // foreign participant must learn nothing, permanently (A4). Falls
+            // through to a normal admission, loudly and only into the server's
+            // own log. No sibling delivery sequence is logged: range order is
+            // participant order and then fingerprint order, so any single
+            // sibling would be an arbitrary one wearing a confident label.
             tracing::warn!(
                 conversation_id = self.conversation_id,
                 participant_id = request.participant_id,
-                "ordinary admission attempt token already committed under a \
-                 different payload or participant -- dedup bypassed, \
-                 committing as a new record"
+                "ordinary admission attempt token already committed by a \
+                 different participant -- dedup bypassed, committing as a new \
+                 record"
             );
         }
         None
@@ -318,6 +372,19 @@ impl ConversationAuthority {
         {
             self.record_episode_changed(impact);
         }
+        // ⛔ THE CLEARING WRITE (participant contract §0.16 condition 2). This
+        // is the `RecordAdmissionDecision::DrainFirst` arm's marker lane and the
+        // boot drain's shared core, and it is the ONLY place a `MarkerSettled`
+        // wake originates. Recorded AFTER the drain row appended and the
+        // resulting owner installed, so the wake cannot promise a candidate is
+        // gone before it is.
+        //
+        // The epoch is `candidate.delivery_seq()`, the head of the immutable
+        // sequence lane, which is the same value `precedence_condition`
+        // published as `refused_epoch` when it refused this candidate: the
+        // stage-11 retry discipline matches the two, so removing either would
+        // remove the match.
+        impact.record_marker_settled(candidate.delivery_seq());
         Ok(())
     }
 
@@ -356,15 +423,7 @@ impl ConversationAuthority {
         let response = persistence.outcome.clone();
         let order = persistence.order.major();
         let sequence = persistence.record.delivery_seq();
-        let dedup_key = (
-            persistence
-                .record
-                .request()
-                .record_admission_attempt_token
-                .into_bytes(),
-            ordinary_payload_fingerprint(&persistence.record.request().payload),
-            persistence.record.request().participant_id,
-        );
+        let dedup_key = committed_admission_key(persistence.record.request());
         let owner = LiveFrontierOwner::from_record_admission_persistence(
             persistence,
             retained_record_limit,
@@ -537,11 +596,7 @@ impl ConversationAuthority {
         config: &ParticipantConfig,
     ) -> Result<(), StateError> {
         let request = row.request.clone().into_request()?;
-        let dedup_key = (
-            request.record_admission_attempt_token.into_bytes(),
-            ordinary_payload_fingerprint(&request.payload),
-            request.participant_id,
-        );
+        let dedup_key = committed_admission_key(&request);
         let dedup_seq = row.delivery_seq;
         let receiving_epoch = row.receiving_epoch.to_epoch()?;
         let tracking = if row.newly_tracked {
@@ -638,7 +693,7 @@ impl ConversationAuthority {
         commit: RecordAdmissionCommit,
         row: &StoredRecordAdmission,
         retained_record_limit: u64,
-        dedup_key: ([u8; 16], Digest, ParticipantId),
+        dedup_key: CommittedAdmissionKey,
         dedup_seq: DeliverySeq,
     ) -> Result<(), StateError> {
         let persistence = commit.into_persistence_parts();
@@ -721,6 +776,20 @@ const fn stored_retained_charge(
 }
 
 /// Builds the echo envelope of one ordinary record admission.
+/// Builds one committed ordinary-admission identity key.
+///
+/// The single construction site of the A2 identity triple, so its component
+/// ORDER -- (token, participant, fingerprint), which A4's presenter-scoped
+/// range depends on for correctness -- has one place to be right and one place
+/// to read about it (`ConversationAuthority::committed_admissions`).
+fn committed_admission_key(request: &RecordAdmission) -> CommittedAdmissionKey {
+    (
+        request.record_admission_attempt_token.into_bytes(),
+        request.participant_id,
+        ordinary_payload_fingerprint(&request.payload),
+    )
+}
+
 const fn record_envelope(
     request: &RecordAdmission,
 ) -> liminal_protocol::wire::RecordAdmissionEnvelope {

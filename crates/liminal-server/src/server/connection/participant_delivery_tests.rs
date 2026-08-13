@@ -242,6 +242,17 @@ fn decoded_deliveries(frames: &[Frame]) -> Result<Vec<ParticipantDelivery>, Stri
         .iter()
         .map(|frame| match decode_push(frame)? {
             ServerPush::ParticipantDelivery(delivery) => Ok(delivery),
+            // A `0x0202 MarkerSettled` reaching a fixture that asked for
+            // durable participant deliveries is a SCOPING FAILURE, not a
+            // decoding inconvenience: §0.16 obligation 3 delivers it only to
+            // connections that were themselves refused
+            // `MarkerSettlementBackpressure`, and none of these fixtures issues
+            // a refusal at all. Named separately from the observer arm so the
+            // failure text says which invariant broke.
+            other @ ServerPush::MarkerSettled { .. } => Err(format!(
+                "expected participant delivery, got an unscoped settlement wake {other:?} -- \
+                 §0.16 obligation 3 forbids MarkerSettled on a connection that was never refused"
+            )),
             other @ ServerPush::ObserverProgressed { .. } => {
                 Err(format!("expected participant delivery, got {other:?}"))
             }
@@ -380,6 +391,16 @@ fn push_slice_budget_and_round_robin_are_exact() -> Result<(), Box<dyn std::erro
                     refused_epoch: _,
                     observer_progress: _,
                 } => (*conversation_id, 0),
+                // Same scoping assertion as `decoded_deliveries`: this fixture
+                // drives durable deliveries and observer wakes only, so a
+                // settlement wake here would mean one was delivered to a
+                // connection that never received a settlement refusal. The
+                // sentinel sequence is unmatchable by the expectation below, so
+                // it cannot pass silently.
+                ServerPush::MarkerSettled {
+                    conversation_id,
+                    refused_epoch: _,
+                } => (*conversation_id, u64::MAX),
             })
             .collect::<Vec<_>>(),
         vec![(1, 1), (2, 1), (3, 0), (4, 0), (5, 0), (6, 0)]
@@ -391,6 +412,15 @@ fn push_slice_budget_and_round_robin_are_exact() -> Result<(), Box<dyn std::erro
             .count(),
         4,
         "observer wakes debit the same exact 32-push slice"
+    );
+    assert_eq!(
+        first
+            .iter()
+            .filter(|push| matches!(push, ServerPush::MarkerSettled { .. }))
+            .count(),
+        0,
+        "§0.16 obligation 3: no connection here was refused MarkerSettlementBackpressure, so \
+         none of them may receive a settlement wake"
     );
     assert_eq!(
         first

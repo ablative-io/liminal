@@ -334,7 +334,11 @@ fn admit_refusal(
 const fn map_live_frontier_error(error: LiveFrontierError) -> BindingTerminalAdmitError {
     match error {
         LiveFrontierError::Authority => BindingTerminalAdmitError::Authority,
-        LiveFrontierError::Precedence => BindingTerminalAdmitError::Precedence,
+        // The binding-terminal admission arm is not one of A5's three
+        // wrappers (§0.16 attaches to `apply_live_transition`; this path is
+        // the F8B connection-fate admission), so it keeps the undiscriminated
+        // reason its own consumers already type-match on.
+        LiveFrontierError::Precedence(_) => BindingTerminalAdmitError::Precedence,
         LiveFrontierError::RetainedCharge => BindingTerminalAdmitError::CandidateCharge,
         LiveFrontierError::RetainedRecordLimit => BindingTerminalAdmitError::RetainedRecordLimit,
         LiveFrontierError::Frontier => BindingTerminalAdmitError::Frontier,

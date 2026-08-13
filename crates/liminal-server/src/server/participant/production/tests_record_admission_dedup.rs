@@ -248,23 +248,29 @@ fn distinct_tokens_identical_bodies_commit_twice() -> Result<(), Box<dyn Error>>
 }
 
 /// PIN 4 — the guard, re-derived against the PAIR-KEYED map (review
-/// finding, Cally Ray 2026-08-08): same token + DIFFERENT payload bytes
-/// bypasses dedup and commits a NEW record; it is specifically never
-/// answered with any prior commit, which would silently discard the changed
-/// body. The server-side warning is a diagnostic, not the mechanism, and is
-/// not asserted here (no capture harness in this suite); the two-commits
-/// outcome is the mechanism and is.
+/// finding, Cally Ray 2026-08-08): same token + DIFFERENT payload bytes is a
+/// DISTINCT identity and is specifically never answered with any prior
+/// commit, which would silently discard the changed body.
 ///
-/// Because a record's identity is (token, bytes) and each identity owns its
-/// own map entry, there is no one-slot policy left to defend: after a
-/// bypass commit under a reused token, an answer-lost re-present of the
-/// EDITED bytes dedups against the edited commit AND an answer-lost
-/// re-present of the ORIGINAL bytes dedups against the original commit.
-/// Under the rejected token-only key the second half duplicated — the field
-/// bug re-opened for the original record; this pin holds both halves.
+/// ⚠ **SUPERSEDED IN PART by §0.15 amendment A4.** Under A2 this arm bypassed
+/// dedup and committed a NEW record; A4 converts the SAME-participant half of
+/// it into a typed `AttemptTokenBodyConflict::RecordAdmission` refusal that
+/// commits nothing. What this pin still holds — and what A4 does not touch —
+/// is the half that mattered to the review finding: the conflicting
+/// presentation is NEVER answered with the first commit, and after it, BOTH
+/// the original identity and any later distinct identity remain independently
+/// re-presentable. Under the rejected token-only key an answer-lost
+/// re-present of the ORIGINAL bytes duplicated — the field bug re-opened for
+/// the original record — and that half is pinned here unchanged.
+///
+/// The commits-a-new-record half now lives in
+/// `tests_a4_body_conflict::same_participant_same_token_different_body_refuses_and_commits_nothing`
+/// as its refusal twin, and the CROSS-participant half (which A4 leaves
+/// committing, forever) in
+/// `tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal`
+/// and in PIN 5 below.
 #[test]
-fn same_token_different_body_commits_new_record_and_never_answers_first()
--> Result<(), Box<dyn Error>> {
+fn same_token_different_body_is_refused_and_never_answers_first() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let conversation_id = 949;
@@ -292,7 +298,7 @@ fn same_token_different_body_commits_new_record_and_never_answers_first()
             original_body.clone(),
         ),
     )?)?;
-    let edited = require_committed(dispatch(
+    let edited = dispatch(
         &handler,
         connection,
         admission(
@@ -302,15 +308,16 @@ fn same_token_different_body_commits_new_record_and_never_answers_first()
             token,
             edited_body.clone(),
         ),
-    )?)?;
+    )?;
     assert!(
-        edited.delivery_seq() > first.delivery_seq(),
-        "a mismatched body must commit anew, never receive the first answer"
+        matches!(edited, ServerValue::AttemptTokenBodyConflict(_)),
+        "under A4 a mismatched body is refused, and under neither amendment \
+         may it receive the first answer: {edited:?}"
     );
 
-    // Each committed identity owns its own answer: an answer-lost re-present
-    // of the edited bytes dedups against the edited commit...
-    let edited_replay = require_committed(dispatch(
+    // A repeat of the conflicting presentation is answered identically: the
+    // refusal is stateless and wrote nothing to the map.
+    let edited_again = dispatch(
         &handler,
         connection,
         admission(
@@ -320,10 +327,11 @@ fn same_token_different_body_commits_new_record_and_never_answers_first()
             token,
             edited_body,
         ),
-    )?)?;
-    assert_eq!(edited_replay.delivery_seq(), edited.delivery_seq());
-    // ...AND an answer-lost re-present of the ORIGINAL bytes dedups against
-    // the original commit — the half that duplicated under a token-only key.
+    )?;
+    assert_eq!(edited_again, edited);
+    // An answer-lost re-present of the ORIGINAL bytes still dedups against
+    // the original commit — the half that duplicated under a token-only key,
+    // held here across the intervening refusal.
     let original_replay = require_committed(dispatch(
         &handler,
         connection,

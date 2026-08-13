@@ -1,0 +1,24 @@
+   Compiling liminal-server v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.25s
+     Running tests/a5_settlement_wake_e2e.rs (target/debug/deps/a5_settlement_wake_e2e-5a289efa915d2a26)
+
+running 1 test
+test the_settlement_wake_reaches_the_refused_connection_and_no_other ... settlement window opened after 1 commits, refused_epoch = 8
+before the clearing write: refused drained 0, uninvolved drained 0
+refused client drained 0 pushes after the clearing write
+
+thread 'the_settlement_wake_reaches_the_refused_connection_and_no_other' (3135908) panicked at crates/liminal-server/tests/a5_settlement_wake_e2e.rs:627:5:
+assertion `left == right` failed: the refused connection must receive exactly its own wake, carrying the conversation and the epoch its refusal named -- refused_epoch is load-bearing, it is what the stage-11 retry discipline matches on. Its inbox held: [ParticipantDelivery(ParticipantDelivery { conversation_id: 42262, delivery_seq: 2, record: Attached { affected_participant_id: 1, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(1) } } }), ParticipantDelivery(ParticipantDelivery { conversation_id: 42262, delivery_seq: 3, record: Detached { affected_participant_id: 1, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(1) }, cause: Superseded } }), ParticipantDelivery(ParticipantDelivery { conversation_id: 42262, delivery_seq: 4, record: Attached { affected_participant_id: 1, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(2) } } }), ParticipantDelivery(ParticipantDelivery { conversation_id: 42262, delivery_seq: 2, record: Attached { affected_participant_id: 1, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(1) } } }), ParticipantDelivery(ParticipantDelivery { conversation_id: 42262, delivery_seq: 3, record: Detached { affected_participant_id: 1, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(1) }, cause: Superseded } }), ParticipantDelivery(ParticipantDelivery { conversation_id: 42262, delivery_seq: 4, record: Attached { affected_participant_id: 1, binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 1 }, capability_generation: Generation(2) } } })]
+  left: []
+ right: [(42262, 8)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    the_settlement_wake_reaches_the_refused_connection_and_no_other
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 22.41s
+
+error: test failed, to rerun pass `-p liminal-server --test a5_settlement_wake_e2e`

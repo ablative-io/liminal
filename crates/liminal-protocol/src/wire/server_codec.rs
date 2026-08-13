@@ -46,7 +46,7 @@ pub fn encode_server_value_body(
     let discriminant = value.discriminant();
     let mut encoder = Encoder::default();
 
-    if (0x0101..=0x0120).contains(&discriminant.wire_value()) {
+    if carries_origin(discriminant) {
         let originating_request = value
             .originating_request()
             .ok_or(CodecError::InvalidValue)?;
@@ -73,7 +73,7 @@ pub fn decode_server_value_body(
 ) -> Result<(r::ServerValue, ProtocolVersion), CodecError> {
     require_v1(version)?;
     let mut decoder = Decoder::new(body);
-    let originating_request = if (0x0101..=0x0120).contains(&discriminant.wire_value()) {
+    let originating_request = if carries_origin(discriminant) {
         let raw = decoder.take_u16()?;
         let request = t::ClientDiscriminant::try_from(raw)
             .map_err(|_| decode_error(t::DecodeClass::InvalidField))?;
@@ -655,6 +655,18 @@ fn encode_server_suffix(value: &r::ServerValue, encoder: &mut Encoder) -> Result
                 encoder.put_generation(*presented_generation);
                 encoder.put_u16(t::AttemptConflict::Generation.wire_value());
             }
+            r::AttemptTokenBodyConflict::RecordAdmission {
+                token,
+                conversation_id,
+                presented_participant_id,
+                presented_generation,
+            } => {
+                encoder.put_fixed(token.as_bytes());
+                encoder.put_u16(t::AttemptOperation::RecordAdmission.wire_value());
+                encoder.put_u64(*conversation_id);
+                encoder.put_u64(*presented_participant_id);
+                encoder.put_generation(*presented_generation);
+            }
         },
         r::ServerValue::ConnectionConversationCapacityExceeded(value) => match value {
             r::ConnectionConversationCapacityExceeded::SemanticRequest { request, limit } => {
@@ -947,6 +959,22 @@ fn encode_server_suffix(value: &r::ServerValue, encoder: &mut Encoder) -> Result
                 }
             }
         }
+        r::ServerValue::MarkerSettlementBackpressure(value) => match value {
+            r::MarkerSettlementBackpressure::CredentialAttach {
+                conversation_id,
+                refused_epoch,
+            }
+            | r::MarkerSettlementBackpressure::Detach {
+                conversation_id,
+                refused_epoch,
+            } => {
+                encoder.put_u64(*conversation_id);
+                encoder.put_u64(*refused_epoch);
+            }
+        },
+        r::ServerValue::EnrollmentSettlementBackpressure(value) => {
+            encoder.put_u64(value.conversation_id);
+        }
     }
     Ok(())
 }
@@ -1180,6 +1208,26 @@ fn put_receipt_replay(value: &r::ReceiptReplay, encoder: &mut Encoder) {
     }
 }
 
+/// Returns whether a body is prefixed by its originating-request selector.
+///
+/// Exactly the rows [`origin_is_valid`] admits some origin for, stated as that
+/// complement rather than as a numeric window: the old `0x0101..=0x0120` range
+/// was contiguous only until the settlement rows were appended ABOVE the
+/// origin-free observer-recovery block (`0x0121..=0x0124`), and a window cannot
+/// express that shape without silently dropping a row's origin prefix.
+const fn carries_origin(discriminant: t::ServerDiscriminant) -> bool {
+    use t::ServerDiscriminant as D;
+
+    !matches!(
+        discriminant,
+        D::ParticipantTransportRejected
+            | D::ObserverRecoveryAccepted
+            | D::InvalidObserverEpoch
+            | D::InvalidObserverEpochList
+            | D::ObserverRecoveryConnectionCapacityExceeded
+    )
+}
+
 const fn origin_is_valid(
     discriminant: t::ServerDiscriminant,
     origin: t::ClientDiscriminant,
@@ -1188,9 +1236,10 @@ const fn origin_is_valid(
     use t::ServerDiscriminant as D;
 
     match discriminant {
-        D::AttemptTokenBodyConflict => {
-            matches!(origin, O::CredentialAttachRequest | O::LeaveRequest)
-        }
+        D::AttemptTokenBodyConflict => matches!(
+            origin,
+            O::CredentialAttachRequest | O::LeaveRequest | O::RecordAdmission
+        ),
         D::ConnectionConversationCapacityExceeded => {
             !matches!(origin, O::ObserverRecoveryHandshake)
         }
@@ -1247,6 +1296,10 @@ const fn origin_is_valid(
         D::LeaveCommitted => matches!(origin, O::LeaveRequest),
         D::MarkerAckCommitted => matches!(origin, O::MarkerAck),
         D::RecordCommitted | D::RecordTooLarge => matches!(origin, O::RecordAdmission),
+        D::MarkerSettlementBackpressure => {
+            matches!(origin, O::CredentialAttachRequest | O::DetachRequest)
+        }
+        D::EnrollmentSettlementBackpressure => matches!(origin, O::EnrollmentRequest),
         D::ParticipantTransportRejected
         | D::ObserverRecoveryAccepted
         | D::InvalidObserverEpoch
@@ -1656,6 +1709,19 @@ fn decode_server_suffix(
                     }
                     Ok(r::ServerValue::AttemptTokenBodyConflict(value))
                 }
+                t::ClientDiscriminant::RecordAdmission => {
+                    if operation != t::AttemptOperation::RecordAdmission {
+                        return Err(decode_error(t::DecodeClass::InvalidField));
+                    }
+                    Ok(r::ServerValue::AttemptTokenBodyConflict(
+                        r::AttemptTokenBodyConflict::RecordAdmission {
+                            token: RecordAdmissionAttemptToken::new(token),
+                            conversation_id: decoder.take_u64()?,
+                            presented_participant_id: decoder.take_u64()?,
+                            presented_generation: decoder.take_generation()?,
+                        },
+                    ))
+                }
                 _ => Err(decode_error(t::DecodeClass::InvalidField)),
             }
         }
@@ -1994,6 +2060,33 @@ fn decode_server_suffix(
                 r::ConnectionConversationCapacityExceeded::ObserverRecovery {
                     conversation_id: decoder.take_u64()?,
                     limit: decoder.take_u64()?,
+                },
+            ))
+        }
+        D::MarkerSettlementBackpressure => {
+            let origin = required_origin(origin)?;
+            let conversation_id = decoder.take_u64()?;
+            let refused_epoch = decoder.take_u64()?;
+            let value = match origin {
+                t::ClientDiscriminant::CredentialAttachRequest => {
+                    r::MarkerSettlementBackpressure::CredentialAttach {
+                        conversation_id,
+                        refused_epoch,
+                    }
+                }
+                t::ClientDiscriminant::DetachRequest => r::MarkerSettlementBackpressure::Detach {
+                    conversation_id,
+                    refused_epoch,
+                },
+                _ => return Err(decode_error(t::DecodeClass::InvalidField)),
+            };
+            Ok(r::ServerValue::MarkerSettlementBackpressure(value))
+        }
+        D::EnrollmentSettlementBackpressure => {
+            required_origin(origin)?;
+            Ok(r::ServerValue::EnrollmentSettlementBackpressure(
+                r::EnrollmentSettlementBackpressure {
+                    conversation_id: decoder.take_u64()?,
                 },
             ))
         }

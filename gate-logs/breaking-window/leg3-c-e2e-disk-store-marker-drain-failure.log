@@ -1,0 +1,24 @@
+   Compiling liminal-server v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.03s
+     Running tests/a5_settlement_wake_e2e.rs (target/debug/deps/a5_settlement_wake_e2e-5a289efa915d2a26)
+
+running 1 test
+test the_settlement_wake_reaches_the_refused_connection_and_no_other ... [2m2026-08-13T08:47:21.215587Z[0m [32m INFO[0m [2mliminal_server::server::listener[0m[2m:[0m liminal server listener bound [3mlisten_address[0m[2m=[0m127.0.0.1:50656
+settlement window opened after 1 commits, refused_epoch = 8
+before the clearing write: refused drained 0, uninvolved drained 0
+[2m2026-08-13T08:47:32.728571Z[0m [33m WARN[0m [2mliminal_server::server::connection::apply[0m[2m:[0m participant request failed closed [3merror[0m[2m=[0mparticipant semantic service failed: participant production operation failed: haematite store error: storage error: shard operation failed: shard WAL error: wal tree error: invalid tree node
+[2m2026-08-13T08:47:32.728822Z[0m [34mDEBUG[0m [2mliminal_server::server::connection::supervisor[0m[2m:[0m connection readiness deregistration acknowledged [3mregistered_fd[0m[2m=[0m16
+[2m2026-08-13T08:47:32.730211Z[0m [31mERROR[0m [2mliminal_server::server::connection::incarnation[0m[2m:[0m incarnation stream had an AMBIGUOUS durable result: admission is held until a replay re-establishes ground truth [3mphase[0m[2m=[0m"connection-fate Open persistence" [3merror[0m[2m=[0m"haematite store error: storage error: shard operation failed: shard WAL error: wal tree error: invalid tree node"
+[2m2026-08-13T08:47:32.730267Z[0m [31mERROR[0m [2mliminal_server::server::connection::process[0m[2m:[0m connection fate fold failed [3mconnection_pid[0m[2m=[0m1 [3merror[0m[2m=[0mparticipant incarnation connection-fate Open persistence failed: haematite store error: storage error: shard operation failed: shard WAL error: wal tree error: invalid tree node
+[2m2026-08-13T08:47:32.730305Z[0m [33m WARN[0m [2mliminal_server::server::connection::supervisor[0m[2m:[0m connection process crashed [3mconnection_pid[0m[2m=[0m1 [3mpeer_addr[0m[2m=[0mSome(127.0.0.1:50657) [3mmount[0m[2m=[0mSome(Tcp) [3mreason[0m[2m=[0mError
+Error: "[a5-uninvolved] receive failed: Transport(Connection { description: \"server closed the connection before a full frame arrived\" })"
+FAILED
+
+failures:
+
+failures:
+    the_settlement_wake_reaches_the_refused_connection_and_no_other
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 11.64s
+
+error: test failed, to rerun pass `-p liminal-server --test a5_settlement_wake_e2e`
