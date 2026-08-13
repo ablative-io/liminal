@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/golden_trace_participant_wire.rs (target/debug/deps/golden_trace_participant_wire-871b85edba3269f1)
+
+running 1 test
+test the_canonical_participant_session_matches_the_committed_golden_trace ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
