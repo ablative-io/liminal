@@ -538,6 +538,8 @@ pub use resume::{
 };
 
 #[cfg(test)]
+mod a5_settlement_correlation_tests;
+#[cfg(test)]
 mod authority_property_tests;
 #[cfg(test)]
 mod d1_flip_tests;
