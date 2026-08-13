@@ -1,0 +1,215 @@
+   Compiling liminal-sdk v0.6.2 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.28s
+     Running unittests src/lib.rs (target/debug/deps/liminal_sdk-cd5e3885ac53bd83)
+
+running 80 tests
+test connection::pool::tests::invalid_pool_size_is_rejected ... ok
+test connection::lifecycle::tests::disconnected_to_connected_is_rejected ... ok
+test connection::lifecycle::tests::externally_authorized_reconnect_has_no_delay_or_retry_counter ... ok
+test connection::lifecycle::tests::disconnect_from_disconnected_is_rejected_without_mutation ... ok
+test connection::lifecycle::tests::disconnect_from_reconnecting_is_observable ... ok
+test connection::lifecycle::tests::observers_receive_successful_transitions ... ok
+test connection::lifecycle::tests::disconnect_from_connecting_is_observable ... ok
+test connection::pool::tests::non_reconnect_transition_does_not_resume ... ok
+test connection::pool::tests::multiple_subscriptions_share_configured_connections ... ok
+test connection::pool::tests::pooled_recovery_builds_resume_requests_on_reconnect ... ok
+test connection::pool::tests::subscriptions_are_distributed_across_connections ... ok
+test connection::pool::tests::unsubscribe_removes_assignment ... ok
+test connection::recovery::tests::acknowledged_subscriptions_resume_after_last_sequence ... ok
+test connection::recovery::tests::maximum_sequence_does_not_wrap_to_zero ... ok
+test connection::recovery::tests::non_recovery_transition_builds_no_resume_requests ... ok
+test connection::recovery::tests::reconnect_to_connected_transition_builds_resume_requests ... ok
+test connection::recovery::tests::subscriptions_without_acknowledgement_resume_from_zero ... ok
+test connection::recovery::tests::unsubscribe_clears_recovery_state ... ok
+test embedded::tests::embedded_config_does_not_require_server_address ... ok
+test embedded::tests::embedded_subscribe_is_local_and_empty ... ok
+test embedded::tests::embedded_publish_uses_direct_message_reference ... ok
+test remote::framing::tests::the_pump_window_is_shorter_than_the_reply_owed_deadline ... ok
+test remote::framing::tests::the_response_deadline_outlives_a_single_receive_window ... ok
+test remote::framing::tests::a_zero_budget_polls_without_arming_a_read ... ok
+test remote::participant::tests::replay::a_bricked_handle_carries_its_typed_cause_on_the_state_unavailable_error ... ok
+test remote::participant::tests::lpcr_round_trip_recovers_unissued_and_resolves_issued_testimony ... ok
+test remote::participant::tests::replay::a_state_unavailable_reports_a_source_exactly_when_a_store_cause_was_retained ... ok
+test remote::participant::tests::nonmatching_attach_preserves_inflight_then_matching_attach_supersedes ... ok
+test remote::participant::tests::replay::a_storage_error_exposes_its_store_failure_as_a_typed_source ... ok
+test remote::participant::tests::committed_delivery_seq_reaches_the_record_admission_return_path ... ok
+test remote::participant::tests::replay::a_store_originated_unavailability_names_its_typed_cause ... ok
+test remote::participant::tests::replay::failed_checkpoint_withholds_successor_authority ... ok
+test remote::participant::tests::contract_c34_ack_values_cross_the_real_receive_path ... ok
+test remote::participant::tests::replay::a_refused_detach_authority_checkpoints_and_restores_steerable ... ok
+test remote::participant::tests::replay::durable_leave_from_real_receive_supersedes_inflight_detach ... ok
+test remote::participant::tests::replay::issued_tokenless_restore_reports_durable_abandonment ... ok
+test remote::participant::tests::replay::in_progress_real_reconnect_restores_take_once_testimony ... ok
+test remote::participant::tests::restored_issued_reconnect_permit_resolves_take_once_testimony ... ok
+test remote::participant::tests::replay::refused_detach_authority_never_destroys_live_participant_state ... ok
+test remote::participant::tests::tokenless_restore_surfaces_durable_abandonment_for_rerecord ... ok
+test remote::protocol::tests::publish_frame_uses_protocol_header ... ok
+test remote::protocol::tests::subscribe_and_resume_use_distinct_frame_types ... ok
+test remote::protocol::tests::subscription_connection_slot_zero_maps_to_application_stream_one ... ok
+test remote::participant::tests::response_loss_reconnects_once_and_replays_exact_detach_token ... ok
+test remote::participant::tests::sent_is_not_receipt_real_receive_releases_exact_d1_slot ... ok
+test remote::participant::tests::replay::all_detach_terminal_arms_apply_and_survive_lpcr_restore ... ok
+test remote::tcp::flush::tests::rejections_surface_in_wire_order_verbatim ... ok
+test remote::tcp::flush::tests::second_drain_covers_only_its_own_boundary ... ok
+test remote::tcp::flush::tests::concurrent_drains_serialize_without_misattribution ... ok
+test remote::tcp::flush::tests::surplus_verdict_is_a_typed_mechanism_error ... ok
+test remote::tcp::push_client::tests::a_supplied_setup_deadline_is_disarmed_before_the_reader_starts ... ok
+test remote::tcp::push_client::tests::publish_frame_round_trips_through_codec ... ok
+test remote::tcp::push_client::tests::push_client_source_has_no_retired_reader_poll_family ... ok
+test remote::tcp::push_client::tests::pushed_frame_exposes_correlation_and_payload ... ok
+test remote::tcp::push_client::tests::reply_frame_round_trips_through_codec ... ok
+test remote::tcp::push_client::tests::the_push_reader_carries_no_read_window_in_steady_state ... ok
+test remote::tcp::subscription::tests::deliver_frame_round_trips_through_codec ... ok
+test remote::tcp::subscription::tests::delivered_message_exposes_seq_and_payload ... ok
+test remote::tcp::flush::tests::budget_expiry_counts_unresolved_and_is_not_an_error ... ok
+test remote::framing::tests::a_closed_receive_window_is_a_wait_not_a_lost_connection ... ok
+test remote::tcp::subscription::tests::subscription_source_has_no_retired_reader_poll_family ... ok
+test remote::tcp::subscription::tests::the_subscription_reader_carries_no_read_window_in_steady_state ... ok
+test remote::tcp::tests::conversation_ids_are_stable ... ok
+test remote::tcp::tests::publish_ack_maps_to_accept ... ok
+test remote::tcp::tests::publish_error_maps_to_backpressure ... ok
+test remote::tcp::tests::schema_ids_are_deterministic_and_distinct ... ok
+test remote::tests::builder_switches_channel_mode_by_config ... ok
+test remote::tests::remote_config_requires_server_address ... ok
+test remote::tests::remote_handle_uses_lifecycle_and_recovery_on_reconnect ... ok
+test remote::websocket::subscription::tests::the_named_setup_deadline_is_the_ratified_five_seconds ... ok
+test remote::websocket::subscription::tests::websocket_subscription_source_has_no_retired_reader_poll_family ... ok
+test remote::tcp::push_client::tests::a_supplied_setup_deadline_bounds_the_control_frame_reply ... ok
+test remote::framing::tests::a_quiet_pump_read_reports_silence_within_the_callers_budget ... ok
+test remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno ... ok
+test remote::tcp::push_client::tests::connect_survives_a_control_reply_slower_than_the_retired_poll_cadence ... ok
+test remote::tcp::subscription::tests::open_preserves_deliveries_coalesced_with_the_subscribe_ack ... ok
+test remote::tcp::subscription::tests::open_survives_control_replies_slower_than_the_retired_poll_cadence ... ok
+test remote::tcp::push_client::tests::a_peer_that_never_answers_the_handshake_is_refused_at_the_named_deadline ... ok
+test remote::framing::tests::a_pump_read_spends_the_callers_budget_not_one_receive_window ... ok
+test remote::framing::tests::a_real_socket_survives_a_reply_slower_than_its_receive_window ... ok
+
+test result: ok. 80 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.01s
+
+     Running tests/conformance.rs (target/debug/deps/conformance-e3f7011e7989e920)
+
+running 1 test
+test rust_sdk_conformance_scenarios_match_shared_expectations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/deployment_modes.rs (target/debug/deps/deployment_modes-eab38b6e6de164f9)
+
+running 1 test
+test switching_between_embedded_and_remote_changes_only_config ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/push_flush.rs (target/debug/deps/push_flush-a0314111118ef2bf)
+
+running 5 tests
+test close_with_live_clone_is_verdict_only_and_keeps_socket_open ... ok
+test close_sole_owner_half_closes_and_discloses_mode ... ok
+test unsolicited_publish_response_is_a_typed_mechanism_error ... ok
+test flush_pairs_verdicts_fifo_and_excludes_observability ... ok
+test budget_expiry_reports_unresolved_not_an_error ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.01s
+
+     Running tests/ws_authority_binding.rs (target/debug/deps/ws_authority_binding-aaa72a69342ea4b3)
+
+running 10 tests
+test loss_reported_while_parked_is_refused_unchanged ... ok
+test stale_attempt_from_foreign_aggregate_is_refused_unchanged ... ok
+test fate_injection_before_any_open_is_refused_unchanged ... ok
+test detach_in_flight_socket_loss_parks_replay_via_typed_fate ... ok
+test established_loss_retains_permit_for_one_reconnect_open ... ok
+test loss_during_open_in_progress_is_refused_unchanged ... ok
+test open_failure_returns_parked_with_no_retry_authority ... ok
+test detach_loss_without_in_flight_send_is_refused_unchanged ... ok
+test terminal_diagnostics_never_select_aggregate_transitions ... ok
+test explicit_connect_authorizes_exactly_one_open ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ws_browser_mirror_trace.rs (target/debug/deps/ws_browser_mirror_trace-c5a557943b5dfb01)
+
+running 13 tests
+test abnormal_close_without_error_is_typed_transport_failure ... ok
+test blob_message_is_refused_as_typed_transport_failure ... ok
+test array_buffer_message_mirrors_to_binary_with_canonical_bytes ... ok
+test browser_mirror_and_std_shapes_share_the_decision_trace ... ok
+test clean_close_mirrors_to_closed_peer_fate ... ok
+test commanded_close_echo_completes_through_mirror ... ok
+test extension_free_open_mirrors_to_opened ... ok
+test f3_browser_error_then_close_echo_stays_single_fate ... ok
+test mirror_defers_frame_validation_to_core ... ok
+test negotiated_extension_open_is_typed_failure_and_closes ... ok
+test open_command_is_construction_not_a_runtime_action ... ok
+test text_message_mirrors_to_the_cores_unsupported_text_failure ... ok
+test unrecognized_message_data_is_refused_as_typed_transport_failure ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ws_driver_trace.rs (target/debug/deps/ws_driver_trace-6bc4bf1336b1b347)
+
+running 19 tests
+test at_most_one_outstanding_correlated_exchange ... ok
+test correlated_response_resolves_single_outstanding_exchange ... ok
+test declared_length_beyond_frame_bound_is_typed_violation ... ok
+test deliver_frames_stay_unsolicited_even_mid_exchange ... ok
+test empty_message_is_typed_violation_and_closes ... ok
+test every_post_terminal_event_is_a_typed_no_op ... ok
+test f3_abnormal_loss_error_then_close_mints_exactly_one_fate ... ok
+test f3_clean_close_mints_peer_closed_alone ... ok
+test f3_commanded_close_echo_mints_close_completed_once ... ok
+test non_deliver_frame_without_exchange_is_unsolicited_frame ... ok
+test open_command_then_opened_reaches_established ... ok
+test open_is_single_use_and_refused_after_first_command ... ok
+test opened_without_open_command_is_typed_refusal ... ok
+test send_refused_before_open_and_after_terminal ... ok
+test std_and_fake_browser_adapters_share_one_trace ... ok
+test text_message_socket_failure_is_typed_terminal ... ok
+test trailing_bytes_and_concatenated_frames_are_typed_violations ... ok
+test truncated_body_is_typed_violation ... ok
+test truncated_header_is_typed_violation ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ws_transport_parity.rs (target/debug/deps/ws_transport_parity-2887c9f57d280c13)
+
+running 22 tests
+test deliver_discriminant_matches_canonical_registry ... ok
+test frame_bound_is_the_named_product_limit ... ok
+test non_ws_scheme_is_typed_refusal ... ok
+test auth_refusal_parity ... ok
+test auth_success_parity ... ok
+test delivered_ack_parity ... ok
+test participant_send_receive_parity ... ok
+test handle_traverses_trait_object_for_both_transports ... ok
+test malformed_message_parity ... ok
+test resume_parity ... ok
+test publish_parity_with_cross_transport_byte_identity ... ok
+test subscription_auth_parity ... ok
+test subscription_auth_refusal_parity ... ok
+test subscription_delivery_parity ... ok
+test request_reply_parity ... ok
+test f2_oversize_declared_message_fails_at_pinned_bound ... ok
+test silent_send_parity ... ok
+test server_close_parity ... ok
+test participant_reconnect_provenance_parity ... ok
+test ws_reconnect_traverses_typed_permit_path ... ok
+test a_slow_participant_reply_survives_the_receive_window_on_both_transports ... ok
+test a_correlated_reply_slower_than_the_receive_window_survives_on_both_transports ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.02s
+
+   Doc-tests liminal_sdk
+
+running 1 test
+test crates/liminal-sdk/src/types.rs - types::SchemaValidate (line 44) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 1 test
+test crates/liminal-sdk/src/channel.rs - channel::ChannelHandle (line 25) - compile fail ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+all doctests ran in 1.14s; merged doctests compilation took 0.59s
