@@ -1,0 +1,29 @@
+   Compiling liminal-server v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.6.2 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.32s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-908b5e3fc404f363)
+
+running 4 tests
+test server::participant::production::tests_a4_body_conflict::identical_bytes_re_present_still_dedups_after_the_conflict_arm ... FAILED
+test server::participant::production::tests_a4_body_conflict::same_participant_same_token_different_body_refuses_and_commits_nothing ... FAILED
+test server::participant::production::tests_a4_body_conflict::a_stale_presenter_is_answered_by_authority_never_by_the_token_arm ... ok
+test server::participant::production::tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal ... ok
+
+failures:
+
+---- server::participant::production::tests_a4_body_conflict::identical_bytes_re_present_still_dedups_after_the_conflict_arm stdout ----
+Error: "A4 fixture admission did not commit: AttemptTokenBodyConflict(RecordAdmission { token: RecordAdmissionAttemptToken([104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104]), conversation_id: 9403, presented_participant_id: 0, presented_generation: Generation(1) })"
+
+---- server::participant::production::tests_a4_body_conflict::same_participant_same_token_different_body_refuses_and_commits_nothing stdout ----
+Error: "A4 fixture admission did not commit: AttemptTokenBodyConflict(RecordAdmission { token: RecordAdmissionAttemptToken([98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98]), conversation_id: 9401, presented_participant_id: 0, presented_generation: Generation(1) })"
+
+
+failures:
+    server::participant::production::tests_a4_body_conflict::identical_bytes_re_present_still_dedups_after_the_conflict_arm
+    server::participant::production::tests_a4_body_conflict::same_participant_same_token_different_body_refuses_and_commits_nothing
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 720 filtered out; finished in 1.50s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+error: 1 target failed:
+    `-p liminal-server --lib`

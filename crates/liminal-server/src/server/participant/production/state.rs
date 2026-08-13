@@ -183,6 +183,15 @@ pub(super) struct Slot {
     pub(super) exact_detach_token: Option<DetachAttemptToken>,
 }
 
+/// Key of one committed ordinary-admission identity: the A2 identity triple in
+/// the component order A4's presenter-scoped range needs.
+///
+/// Ordered (attempt token, verified participant, canonical payload
+/// fingerprint). The order is documented at the field this keys — see
+/// [`ConversationAuthority::committed_admissions`] — and is a correctness
+/// requirement of §0.15, not a preference.
+pub(super) type CommittedAdmissionKey = ([u8; 16], ParticipantId, Digest);
+
 /// Sole live owner of one conversation's protocol state.
 #[derive(Debug)]
 pub(super) struct ConversationAuthority {
@@ -250,7 +259,27 @@ pub(super) struct ConversationAuthority {
     /// answers, never change one. A re-present whose witness row has been
     /// compacted commits a second copy — the NAMED dedup window, not a
     /// silent one.
-    pub(super) committed_admissions: BTreeMap<([u8; 16], Digest, ParticipantId), DeliverySeq>,
+    ///
+    /// # ⛔ The component ORDER inside the key is load-bearing (A4, §0.15)
+    ///
+    /// The triple is ordered (token, participant, fingerprint) and not
+    /// (token, fingerprint, participant), because A4's refusal must probe a
+    /// range scoped to ONE presenter and a `BTreeMap` range compares
+    /// lexicographically. With the fingerprint in the middle, a range whose
+    /// endpoints pin the participant and span the fingerprints
+    /// (`(token, [0x00; 32], presenter) ..= (token, [0xFF; 32], presenter)`)
+    /// selects on the fingerprint alone and returns every participant's
+    /// entries — it is the WIDE range wearing a presenter-scoped label, and a
+    /// refusal hung on it answers cross-participant token collisions, which is
+    /// precisely the probe channel §0.15 outlaws permanently. This ordering is
+    /// what makes the presenter-scoped range actually presenter-scoped; it is
+    /// measured by
+    /// `tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal`,
+    /// which goes red against the middle-fingerprint layout.
+    ///
+    /// The order is invisible outside this map: it is rebuilt from durable
+    /// rows on every replay and no durable or wire byte encodes it.
+    pub(super) committed_admissions: BTreeMap<CommittedAdmissionKey, DeliverySeq>,
     /// F8B R-SEAL closed marker (§6.6). Set by the Died-flavor drain apply that
     /// erases this conversation's FINAL enrollment token, on the live apply and
     /// on every replay alike, and never appended as a row of its own — closure

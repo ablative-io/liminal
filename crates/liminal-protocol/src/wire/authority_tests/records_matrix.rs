@@ -19,15 +19,27 @@ use super::super::{
     CommonStaleAuthorityEnvelope, InvalidObserverEpoch, InvalidObserverEpochList, NoBinding,
     ObserverBackpressure, ObserverBackpressureState, ObserverRecoveryAccepted,
     ObserverRecoveryResponse, OrderAllocatingEnvelope, ParticipantReferenceEnvelope,
-    ParticipantUnknown, RecordAdmissionResponse, RecordCommitted, RecordTooLarge, Retired,
-    SequenceAllocatingEnvelope, ServerDiscriminant, StaleAuthority,
+    ParticipantUnknown, RecordAdmissionAttemptToken, RecordAdmissionResponse, RecordCommitted,
+    RecordTooLarge, Retired, SequenceAllocatingEnvelope, ServerDiscriminant, StaleAuthority,
 };
 
-/// Ordinary-admission legal set: register rows 5641, 5644, 5645, 5646, 5647,
+/// Ordinary-admission legal set: register rows 5639 (admitted for ordinary
+/// admission by contract §0.15 amendment A4), 5641, 5644, 5645, 5646, 5647,
 /// 5648, 5649, and 5685-5687.
 #[test]
 fn record_admission_constructors_stay_inside_the_register_rows() {
     let responses = vec![
+        // Row 5639 as amended by A4: the presenter's own committed token
+        // re-presented under different canonical bytes.
+        (
+            RecordAdmissionResponse::attempt_token_body_conflict(
+                RecordAdmissionAttemptToken::new([9; 16]),
+                7,
+                3,
+                generation(2),
+            ),
+            ServerDiscriminant::AttemptTokenBodyConflict,
+        ),
         // Row 5641: connection-conversation capacity.
         (
             RecordAdmissionResponse::connection_conversation_capacity_exceeded(

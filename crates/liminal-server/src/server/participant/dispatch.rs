@@ -796,6 +796,42 @@ impl InstalledParticipantService {
         Ok(())
     }
 
+    /// Test hook onto [`Self::register_settlement_waiter`].
+    ///
+    /// The registry §0.16 obligation 3 rests on is private and is exercised in
+    /// production only as a side effect of a refusal travelling out of `handle`.
+    /// A pin that can only reach it that way measures the refusal path and the
+    /// registry at once, and cannot tell which of the two is scoping the wake.
+    /// These two hooks let the registry be measured ALONE.
+    #[cfg(test)]
+    pub(super) fn register_settlement_waiter_for_test(
+        &self,
+        context: ParticipantConnectionContext,
+        value: &ServerValue,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.register_settlement_waiter(context, value)
+    }
+
+    /// Test hook onto [`Self::fire_settlements`].
+    #[cfg(test)]
+    pub(super) fn fire_settlements_for_test(
+        &self,
+        conversation_id: ConversationId,
+        settled_epochs: &[u64],
+    ) -> Result<(), ParticipantSemanticError> {
+        self.fire_settlements(conversation_id, settled_epochs)
+    }
+
+    /// Number of waiters currently installed for one conversation.
+    #[cfg(test)]
+    pub(super) fn settlement_waiter_count(&self, conversation_id: ConversationId) -> usize {
+        self.settlement_waiters
+            .lock()
+            .map_or(0, |waiters| {
+                waiters.get(&conversation_id).map_or(0, Vec::len)
+            })
+    }
+
     /// Fires the settlement wake for every connection whose OWN refusal named
     /// this exact epoch, and for no one else.
     ///

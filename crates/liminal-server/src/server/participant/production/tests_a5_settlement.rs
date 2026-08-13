@@ -567,3 +567,151 @@ fn earlier_stages_still_win_inside_the_settlement_window() -> Result<(), Box<dyn
     );
     Ok(())
 }
+
+/// §0.16 build obligation 3, measured on the REGISTRY ITSELF (Leg 3 gap
+/// closure (a)).
+///
+/// # Why this pin exists when the wake is already exercised end to end
+///
+/// Obligation 3 is "no broadcast": the wake reaches "exactly the connections
+/// that received the refusal in this process lifetime", and the lazy
+/// every-connection-on-the-conversation push is outlawed. Every other pin on
+/// this path reaches the registry only as a side effect of a refusal
+/// travelling out of `handle`, which means a green there is consistent with
+/// TWO different mechanisms — a correctly scoped registry, or a broadcast that
+/// happens to have one connection in range. Those are the same observation and
+/// different laws.
+///
+/// This pin separates them. Two live connections are registered on ONE
+/// conversation with their own inboxes. Exactly one of them is handed a
+/// `MarkerSettlementBackpressure`, so exactly one waiter exists. The fire then
+/// has a genuine choice about who to wake, and the pin measures that it makes
+/// the scoped one:
+///
+/// * the refused connection's inbox holds exactly one `MarkerSettled`, at its
+///   own epoch;
+/// * the uninvolved connection's inbox holds ZERO — and that zero is not a
+///   measurement of a dead instrument, because the SAME predicate over the
+///   SAME inbox type finds the refused connection's wake in the same assertion
+///   block. The positive control is inside the test, through the identical
+///   read.
+///
+/// It also pins the three non-broadcast edges the registry owns: an epoch that
+/// nobody named wakes nobody, a waiter is ONE-SHOT (a second fire at the same
+/// epoch delivers nothing), and an `EnrollmentSettlementBackpressure` installs
+/// no waiter at all (§0.16: never to a connection refused at the enrollment
+/// wrapper).
+#[test]
+fn the_settlement_registry_wakes_only_the_refused_connection() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::AtomicU64;
+
+    use liminal_protocol::wire::MarkerSettlementBackpressure;
+
+    use crate::server::connection::ReadyWaker;
+    use crate::server::mount::MountKind;
+    use crate::server::participant::{
+        InstalledParticipantService, ParticipantConnectionContext, ParticipantSemanticHandler,
+    };
+
+    const REFUSED_EPOCH: u64 = 11;
+
+    let store = store()?;
+    let config = marker_fixture_config();
+    let handler: Arc<dyn ParticipantSemanticHandler> = Arc::new(
+        ProductionParticipantHandler::new(Arc::clone(&store), config)?,
+    );
+    let service = InstalledParticipantService::new(handler, store, config.wire_frame_limit)
+        .map_err(|error| format!("settlement registry fixture failed: {error:?}"))?;
+
+    let refused_incarnation = ConnectionIncarnation::new(0xA5, 1);
+    let bystander_incarnation = ConnectionIncarnation::new(0xA5, 2);
+    let refused_wakes = Arc::new(AtomicU64::new(0));
+    let bystander_wakes = Arc::new(AtomicU64::new(0));
+    let refused_inbox = service.new_publication_inbox();
+    let bystander_inbox = service.new_publication_inbox();
+    service.publication_registry().register(
+        refused_incarnation,
+        &refused_inbox,
+        ReadyWaker::for_test(Arc::clone(&refused_wakes)),
+    )?;
+    service.publication_registry().register(
+        bystander_incarnation,
+        &bystander_inbox,
+        ReadyWaker::for_test(Arc::clone(&bystander_wakes)),
+    )?;
+
+    // BOTH connections are live on the conversation; only one is refused. A
+    // broadcast implementation has two reachable inboxes here and would be
+    // indistinguishable from the scoped one if the bystander were absent.
+    service.register_settlement_waiter_for_test(
+        ParticipantConnectionContext::new(refused_incarnation, MountKind::Tcp),
+        &ServerValue::MarkerSettlementBackpressure(MarkerSettlementBackpressure::Detach {
+            conversation_id: CONVERSATION,
+            refused_epoch: REFUSED_EPOCH,
+        }),
+    )?;
+    // The enrollment-wrapper refusal carries no epoch and earns no wake, so it
+    // must leave the registry at one waiter, not two.
+    service.register_settlement_waiter_for_test(
+        ParticipantConnectionContext::new(bystander_incarnation, MountKind::Tcp),
+        &ServerValue::EnrollmentSettlementBackpressure(
+            liminal_protocol::wire::EnrollmentSettlementBackpressure {
+                conversation_id: CONVERSATION,
+            },
+        ),
+    )?;
+    assert_eq!(
+        service.settlement_waiter_count(CONVERSATION),
+        1,
+        "only the marker-settlement refusal installs a waiter"
+    );
+
+    // An epoch nobody named wakes nobody.
+    service.fire_settlements_for_test(CONVERSATION, &[REFUSED_EPOCH + 1])?;
+    assert!(
+        refused_inbox.take_ready()?.marker_settled.is_empty(),
+        "a fire at an unnamed epoch must wake no one"
+    );
+    assert_eq!(
+        service.settlement_waiter_count(CONVERSATION),
+        1,
+        "an unmatched fire must not consume the waiter"
+    );
+
+    // The clearing fire.
+    service.fire_settlements_for_test(CONVERSATION, &[REFUSED_EPOCH])?;
+
+    let refused_batch = refused_inbox.take_ready()?;
+    let bystander_batch = bystander_inbox.take_ready()?;
+    assert_eq!(
+        refused_batch.marker_settled.len(),
+        1,
+        "the refused connection must receive exactly one settlement wake"
+    );
+    assert_eq!(
+        refused_batch.marker_settled[0].refused_epoch, REFUSED_EPOCH,
+        "the wake must carry the epoch the refusal named"
+    );
+    assert_eq!(refused_batch.marker_settled[0].conversation_id, CONVERSATION);
+    // The negative, read through the SAME accessor that just found the wake
+    // above -- so the empty is the registry's answer and not a dead read.
+    assert!(
+        bystander_batch.marker_settled.is_empty(),
+        "an uninvolved connection on the same conversation must receive nothing: \
+         {:?}",
+        bystander_batch.marker_settled
+    );
+
+    // One-shot: fired waiters leave the registry.
+    assert_eq!(
+        service.settlement_waiter_count(CONVERSATION),
+        0,
+        "a fired waiter must not survive its own wake"
+    );
+    service.fire_settlements_for_test(CONVERSATION, &[REFUSED_EPOCH])?;
+    assert!(
+        refused_inbox.take_ready()?.marker_settled.is_empty(),
+        "a second fire at the same epoch must deliver nothing"
+    );
+    Ok(())
+}

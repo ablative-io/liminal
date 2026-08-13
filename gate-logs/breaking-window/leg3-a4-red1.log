@@ -1,0 +1,39 @@
+   Compiling liminal-protocol v0.6.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+   Compiling liminal-server v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.6.2 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.97s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-908b5e3fc404f363)
+
+running 4 tests
+test server::participant::production::tests_a4_body_conflict::same_participant_same_token_different_body_refuses_and_commits_nothing ... FAILED
+test server::participant::production::tests_a4_body_conflict::identical_bytes_re_present_still_dedups_after_the_conflict_arm ... FAILED
+test server::participant::production::tests_a4_body_conflict::a_stale_presenter_is_answered_by_authority_never_by_the_token_arm ... ok
+test server::participant::production::tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal ... FAILED
+
+failures:
+
+---- server::participant::production::tests_a4_body_conflict::same_participant_same_token_different_body_refuses_and_commits_nothing stdout ----
+Error: "A4: a same-participant same-token different-body presentation must be refused, got RecordCommitted(RecordCommitted { request: RecordAdmissionEnvelope { conversation_id: 9401, participant_id: 0, capability_generation: Generation(1), record_admission_attempt_token: RecordAdmissionAttemptToken([98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98]) }, delivery_seq: 3 })"
+
+---- server::participant::production::tests_a4_body_conflict::identical_bytes_re_present_still_dedups_after_the_conflict_arm stdout ----
+
+thread 'server::participant::production::tests_a4_body_conflict::identical_bytes_re_present_still_dedups_after_the_conflict_arm' (2949471) panicked at crates/liminal-server/src/server/participant/production/tests_a4_body_conflict.rs:389:5:
+expected the A4 refusal between the two dedup answers: RecordCommitted(RecordCommitted { request: RecordAdmissionEnvelope { conversation_id: 9403, participant_id: 0, capability_generation: Generation(1), record_admission_attempt_token: RecordAdmissionAttemptToken([104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104, 104]) }, delivery_seq: 3 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- server::participant::production::tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal stdout ----
+
+thread 'server::participant::production::tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal' (2949469) panicked at crates/liminal-server/src/server/participant/production/tests_a4_body_conflict.rs:320:5:
+the presenter's own conflict must still refuse: RecordCommitted(RecordCommitted { request: RecordAdmissionEnvelope { conversation_id: 9402, participant_id: 0, capability_generation: Generation(1), record_admission_attempt_token: RecordAdmissionAttemptToken([102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102]) }, delivery_seq: 6 })
+
+
+failures:
+    server::participant::production::tests_a4_body_conflict::a_cross_participant_token_hit_still_commits_with_no_refusal
+    server::participant::production::tests_a4_body_conflict::identical_bytes_re_present_still_dedups_after_the_conflict_arm
+    server::participant::production::tests_a4_body_conflict::same_participant_same_token_different_body_refuses_and_commits_nothing
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 720 filtered out; finished in 1.35s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+error: 1 target failed:
+    `-p liminal-server --lib`
