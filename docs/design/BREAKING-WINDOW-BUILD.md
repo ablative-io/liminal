@@ -134,3 +134,38 @@ origin arms, and type shapes read at the bytes).
    Leg 2's scope; the Leg 1 pin
    (`settlement_refusals_carry_no_correlating_request_identity`) inverts
    when closed — rework it into the closure's positive pin.
+
+## Seat rulings after Leg 2 (2026-08-13, Hermes)
+
+Leg 2 landed at `c13698a`; verified at the seat: three-crate gate re-run at
+my hands — only failures are the declared F8 pair BY NAME, TRUE EXIT 101
+(expected form); registry/classifier/closure structures read at the bytes;
+red evidence in `gate-logs/breaking-window/leg2-*.log`.
+
+1. **`PrecedenceCondition::Unclassified` — ACCEPTED, with a measurement
+   owed.** An honest fourth variant beats forcing foreign sites into the
+   family's three conditions. OWED (Leg 3): measure whether `Unclassified`
+   is REACHABLE through any of the three wrappers. If unreachable, pin the
+   tripwire (first reachable construction voids the flatten). If reachable,
+   STOP — that is a §0.16 premise gap ("Precedence has THREE clearing
+   conditions") and goes back to the two-key holders before land.
+2. **`PresentedRefusal::enrollment()` — ACCEPTED.** The third wrapper's row
+   needs a carrier; §0.16 named only `detach()` because only `detach()`
+   existed to name. Same register-bound pattern, no bare `ServerValue` path.
+3. **Position-allocator restoration — ACCEPTED, no contract change
+   needed.** §0.16 obligation 1 states the granularity as "the carrier's
+   own granularity" with finalizer state "explicitly included" — a floor,
+   not a ceiling. Restoring MORE consumed authority the build discovered
+   (allocators; `high_watermark + 2` otherwise) is compliance, not
+   deviation. Recorded for the land message so the key-holders see it.
+
+**Gap closures assigned to Leg 3** (Leg 2's honest remainder):
+(a) obligation 3's dedicated registry pin — exercise
+`register_settlement_waiter` + `fire_settlements` directly, two live
+inboxes on one conversation, one refused one not, exactly one wake;
+(b) end-to-end wake proof over a real transport — a refused client
+receives `MarkerSettled` after the `DrainFirst` clearing write, an
+uninvolved client on the same conversation receives nothing;
+(c) the drain-then-retry round trip if the ack-contiguity harness allows —
+otherwise name it in the land record as not covered and why;
+(d) ruling 1's reachability measurement.
