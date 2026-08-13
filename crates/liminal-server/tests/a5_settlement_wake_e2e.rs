@@ -83,7 +83,7 @@ use liminal_server::server::connection::{
 use liminal_server::server::listener::ServerListener;
 
 /// The one conversation both clients live in.
-const SETTLEMENT_CONVERSATION: ConversationId = 0x_A5_16;
+const SETTLEMENT_CONVERSATION: ConversationId = 0xA516;
 
 /// Frame-count bound on a reply-owed demultiplex. A step that reaches it failed.
 const MAX_DEMUX_FRAMES: usize = 128;

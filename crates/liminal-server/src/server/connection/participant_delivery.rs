@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use liminal::protocol::{Frame, encoded_len};
+use liminal::protocol::{encoded_len, Frame};
 use liminal_protocol::wire::{CodecError, ConversationId, ServerPush};
 
 use super::delivery::DeliverySink;
@@ -14,9 +14,9 @@ use super::outbound::OutboundError;
 use super::state::ConnectionProcessState;
 use crate::server::participant::publication::ReadyPublicationBatch;
 use crate::server::participant::{
-    InstalledParticipantService, MarkerSettledPublication, ObserverPublication,
+    encode_server_push, InstalledParticipantService, MarkerSettledPublication, ObserverPublication,
     ParticipantOfferedProgress, ParticipantPublication, ParticipantPublicationError,
-    ParticipantSemanticError, encode_server_push,
+    ParticipantSemanticError,
 };
 
 /// Signed participant/observer push budget for one connection scheduler slice.
@@ -204,41 +204,26 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
             break;
         };
         if let Some(observer) = work.observer.take() {
-            let outcome = match service_one_observer(
+            match service_observer_arm(
                 state,
                 sink,
-                work.conversation_id,
-                &observer,
+                &mut remaining,
+                &mut enqueued,
+                work,
+                observer,
                 held_limit,
-            ) {
-                Ok(outcome) => outcome,
-                Err(error) if error.is_capacity_refusal() => {
-                    // Preserve the exact typed observer payload and every
-                    // later work item in the bounded inbox. The incumbent
-                    // encoded participant head remains held and unoffered.
-                    work.observer = Some(observer);
+            )? {
+                ObserverArmFlow::Requeue(work) => queue.push_back(work),
+                ObserverArmFlow::Defer(conversation_id) => {
+                    deferred_participants.insert(conversation_id);
+                }
+                ObserverArmFlow::Done => {}
+                ObserverArmFlow::CapacityRefused { work, error } => {
                     queue.push_front(work);
                     state.held_pushes.mark_capacity_refused();
                     requeue_deferred_work(state, queue, deferred_participants)?;
                     return Err(error);
                 }
-                Err(error) => return Err(error),
-            };
-            match outcome {
-                ConversationOutcome::Enqueued { fresh_encode } => {
-                    remaining -= usize::from(fresh_encode);
-                    enqueued += 1;
-                    if work.participant {
-                        queue.push_back(work);
-                    }
-                }
-                ConversationOutcome::Held { fresh_encode } => {
-                    remaining -= usize::from(fresh_encode);
-                    if work.participant {
-                        deferred_participants.insert(work.conversation_id);
-                    }
-                }
-                ConversationOutcome::Done => {}
             }
             continue;
         }
@@ -351,6 +336,71 @@ fn requeue_deferred_work(
     inbox.requeue_observers(observers)?;
     inbox.requeue_marker_settled(settled)?;
     Ok(())
+}
+
+/// One serviced observer arm's instruction to the slice loop.
+enum ObserverArmFlow {
+    /// Serviced; the participant lane is still owed, requeue at the back.
+    Requeue(ConversationWork),
+    /// Serviced but held; the participant lane waits behind the held head.
+    Defer(ConversationId),
+    /// Serviced; nothing further for this conversation in this slice.
+    Done,
+    /// Held-push capacity refused. The caller owns the front-requeue and the
+    /// slice exit, because `requeue_deferred_work` consumes the queue and
+    /// deferred set by value.
+    CapacityRefused {
+        work: ConversationWork,
+        error: ParticipantPumpError,
+    },
+}
+
+/// Services one conversation's observer wake and applies its budget debit.
+///
+/// Hard errors propagate as `Err`. A capacity refusal is handed back with the
+/// work item (its observer payload restored) rather than requeued here — the
+/// exit path belongs to the slice loop. See `ObserverArmFlow`.
+fn service_observer_arm<Sink: DeliverySink>(
+    state: &mut ConnectionProcessState,
+    sink: &mut Sink,
+    remaining: &mut usize,
+    enqueued: &mut usize,
+    mut work: ConversationWork,
+    observer: ObserverWork,
+    held_limit: u64,
+) -> Result<ObserverArmFlow, ParticipantPumpError> {
+    let outcome =
+        match service_one_observer(state, sink, work.conversation_id, &observer, held_limit) {
+            Ok(outcome) => outcome,
+            Err(error) if error.is_capacity_refusal() => {
+                // Preserve the exact typed observer payload and every later
+                // work item in the bounded inbox. The incumbent encoded
+                // participant head remains held and unoffered.
+                work.observer = Some(observer);
+                return Ok(ObserverArmFlow::CapacityRefused { work, error });
+            }
+            Err(error) => return Err(error),
+        };
+    Ok(match outcome {
+        ConversationOutcome::Enqueued { fresh_encode } => {
+            *remaining -= usize::from(fresh_encode);
+            *enqueued += 1;
+            if work.participant {
+                ObserverArmFlow::Requeue(work)
+            } else {
+                ObserverArmFlow::Done
+            }
+        }
+        ConversationOutcome::Held { fresh_encode } => {
+            *remaining -= usize::from(fresh_encode);
+            if work.participant {
+                ObserverArmFlow::Defer(work.conversation_id)
+            } else {
+                ObserverArmFlow::Done
+            }
+        }
+        ConversationOutcome::Done => ObserverArmFlow::Done,
+    })
 }
 
 fn service_one_observer<Sink: DeliverySink>(

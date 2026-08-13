@@ -96,10 +96,13 @@ fn admission(
 /// The store-assigned timestamp is deliberately excluded: it is not a fact the
 /// server wrote, and including it would make the comparison measure the clock
 /// rather than the refusal.
+/// One durable row: its sequence and its payload bytes.
+type DurableRow = (u64, Vec<u8>);
+
 fn durable_rows(
     store: &Arc<dyn DurableStore>,
     conversation_id: u64,
-) -> Result<Vec<(u64, Vec<u8>)>, Box<dyn Error>> {
+) -> Result<Vec<DurableRow>, Box<dyn Error>> {
     let stream_key = format!("liminal:participant-production:{conversation_id}");
     let entries = block_on(store.read_from(&stream_key, 0, 4096))??;
     Ok(entries
@@ -759,7 +762,7 @@ fn a4_cross_participant_collision_is_not_observable_in_response_time()
     println!("  COLLIDING token (wide hit + warn): {colliding:.0} ns/dispatch");
     println!("  fresh token, pass 2      : {fresh_second:.0} ns/dispatch");
     let drift = fresh_second - fresh_first;
-    let signal = colliding - (fresh_first + fresh_second) / 2.0;
+    let signal = colliding - f64::midpoint(fresh_first, fresh_second);
     println!("  store drift across the two fresh passes: {drift:+.0} ns");
     println!("  collision signal vs the fresh mean      : {signal:+.0} ns");
     Ok(())
