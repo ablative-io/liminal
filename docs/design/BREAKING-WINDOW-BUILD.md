@@ -169,3 +169,38 @@ uninvolved client on the same conversation receives nothing;
 (c) the drain-then-retry round trip if the ack-contiguity harness allows —
 otherwise name it in the land record as not covered and why;
 (d) ruling 1's reachability measurement.
+
+## Seat record after Leg 4 (2026-08-13, Hermes) — the disk-store question CLOSED BY MEASUREMENT
+
+Two-step resolution, both at the bytes:
+1. **Base repro (b200718, isolated worktree):** the window + DrainFirst
+   clearing write on a disk store is GREEN at base, deterministically, at
+   both the semantic seam and the full connection stack. Hunk-by-hunk diff
+   classification: NO durable byte shape, append call, or write ordering
+   changed on the drain path in this lane.
+2. **Lane-tip 2×2 (0dc3163):** {disk, ephemeral} × {refused attach, none}
+   — ALL FOUR GREEN, disk+refused-attach repeated 8× total including a
+   tracing-subscriber arm matching the original log's format. Every
+   mechanism that reaches haematite's `InvalidNode` was driven and
+   excluded (second concurrent writer → refused at open by the store's
+   own lock; reused directory → clean reopen; dropped TempDir → fails at
+   open, differently). The original failure log's "second stream" is the
+   same store failure surfacing at teardown, not independent evidence.
+
+VERDICT: **the recorded failure does not reproduce under matched
+conditions.** The harness that produced it was never committed and left
+no residue, so what it actually ran is unknowable. The claim is retired
+from prose and converted to a shipped measurement:
+`the_settlement_wake_reaches_the_refused_connection_and_no_other_on_disk`
+(a5_settlement_wake_e2e.rs, landed 7571267) runs the identical sequence
+disk-backed, with an instrument control proving the arm really runs a
+persistent database (config.json presence; red-proven — pointing the body
+at `None` passes the sequence while the control fires, TRUE EXIT 101,
+`gate-logs/breaking-window/leg4-shipped-disk-arm-red-control-runs-ephemeral.log`).
+Honest caveat, carried: 8 greens cannot exclude a rare haematite-level
+flake; if one ever recurs it is a store-layer bug and the shipped arm is
+the tripwire that catches it.
+
+Also at Leg 4: gate 1565/2/3 over 45 (delta vs 145027f exactly +1, the
+new test), clippy --all-targets zero across all three crates, restoration
+pins green unmodified, no src file touched.
