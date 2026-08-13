@@ -158,7 +158,21 @@ pub(super) const fn participant_ack_request(
 
 fn response_key(value: &ServerValue, ambiguous_authorization: u64) -> RequestKey {
     let key = match value {
-        ServerValue::ParticipantTransportRejected(_) => RequestKey::Unsolicited,
+        // The settlement family rides this arm as a MEASURED LIMIT, not as a
+        // stub. This function keys on the request identity the WIRE carries,
+        // and that family's ratified schema is exactly
+        // `{ conversation_id, refused_epoch }` -- `{ conversation_id }` at the
+        // enrollment wrapper (participant contract §0.16 condition 2) -- with
+        // no participant, generation, or attempt token. No key here can equal
+        // an attach, detach, or enrollment key, so the honest answer is the
+        // bytes' answer rather than a guess at the one outstanding request.
+        // Closing the gap is a client-behavior decision (widen `RequestKey` to
+        // a conversation-scoped match, or carry more in the row) owned by the
+        // leg that builds the retry discipline. Pinned by
+        // `a5_settlement_correlation_tests`.
+        ServerValue::ParticipantTransportRejected(_)
+        | ServerValue::MarkerSettlementBackpressure(_)
+        | ServerValue::EnrollmentSettlementBackpressure(_) => RequestKey::Unsolicited,
         ServerValue::AttemptTokenBodyConflict(value) => attempt_conflict(value),
         ServerValue::ConnectionConversationCapacityExceeded(value) => connection_capacity(value),
         ServerValue::ConnectionConversationBindingOccupied(value) => binding_occupied(value),
@@ -261,6 +275,17 @@ const fn attempt_conflict(value: &crate::wire::AttemptTokenBodyConflict) -> Requ
             presented_participant_id,
             presented_generation,
         } => RequestKey::Leave(
+            *conversation_id,
+            *presented_participant_id,
+            *presented_generation,
+            *token,
+        ),
+        crate::wire::AttemptTokenBodyConflict::RecordAdmission {
+            token,
+            conversation_id,
+            presented_participant_id,
+            presented_generation,
+        } => RequestKey::Record(
             *conversation_id,
             *presented_participant_id,
             *presented_generation,

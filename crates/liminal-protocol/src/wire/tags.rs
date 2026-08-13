@@ -150,6 +150,11 @@ u16_registry! {
         InvalidObserverEpochList = 0x0123,
         /// Observer-recovery preflight exceeded connection capacity.
         ObserverRecoveryConnectionCapacityExceeded = 0x0124,
+        /// A marker candidate awaiting its drain blocks a membership-validated
+        /// frontier transition.
+        MarkerSettlementBackpressure = 0x0125,
+        /// A marker candidate awaiting its drain blocks a subsequent enrollment.
+        EnrollmentSettlementBackpressure = 0x0126,
     }
 }
 
@@ -160,6 +165,8 @@ u16_registry! {
         ObserverProgressed = 0x0200,
         /// Participant record delivery.
         ParticipantDelivery = 0x0201,
+        /// Marker-settlement clearing wake.
+        MarkerSettled = 0x0202,
     }
 }
 
@@ -278,6 +285,8 @@ u16_registry! {
         CredentialAttachRequest = 1,
         /// Terminal Leave.
         LeaveRequest = 2,
+        /// Ordinary record admission.
+        RecordAdmission = 3,
     }
 }
 

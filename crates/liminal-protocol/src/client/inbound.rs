@@ -390,7 +390,13 @@ fn apply_correlated_value(aggregate: &mut ClientParticipantAggregate, value: &Se
         | ServerValue::RecordTooLarge(_)
         | ServerValue::ObserverRecoveryAccepted(_)
         | ServerValue::InvalidObserverEpoch(_)
-        | ServerValue::InvalidObserverEpochList(_) => {}
+        | ServerValue::InvalidObserverEpochList(_)
+        // Settlement backpressure commits nothing and restores what it
+        // consumed, so no aggregate state moves here. The waiting state its
+        // retry discipline persists is the SDK's, not the aggregate's
+        // (participant contract §0.16 condition 2).
+        | ServerValue::MarkerSettlementBackpressure(_)
+        | ServerValue::EnrollmentSettlementBackpressure(_) => {}
     }
 }
 

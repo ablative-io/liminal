@@ -73,6 +73,10 @@ fn push_frames() -> Result<Vec<ParticipantFrame>, CodecError> {
             },
             40,
         ),
+        ParticipantFrame::ServerPush(ServerPush::MarkerSettled {
+            conversation_id: 42,
+            refused_epoch: 43,
+        }),
     ])
 }
 
@@ -86,6 +90,66 @@ fn exact_push_bytes(discriminant: u16, body: &[u8]) -> Result<Vec<u8>, CodecErro
     bytes.extend_from_slice(&discriminant.to_be_bytes());
     bytes.extend_from_slice(body);
     Ok(bytes)
+}
+
+#[test]
+fn marker_settled_is_client_bound_and_strictly_bounded() -> Result<(), CodecError> {
+    let frame = ParticipantFrame::ServerPush(ServerPush::MarkerSettled {
+        conversation_id: 42,
+        refused_epoch: 43,
+    });
+    let mut body = Vec::new();
+    body.extend_from_slice(&42_u64.to_be_bytes());
+    body.extend_from_slice(&43_u64.to_be_bytes());
+    let bytes = exact_push_bytes(0x0202, &body)?;
+    assert_eq!(encoded(&frame)?, bytes);
+    assert_eq!(decode(&bytes, ReceiverDirection::Client)?, frame);
+
+    // A server never receives its own push.
+    assert_eq!(
+        decode(&bytes, ReceiverDirection::Server),
+        Err(CodecError::Decode {
+            class: DecodeClass::UnknownDiscriminant,
+        })
+    );
+
+    // The registry above 0x0202 stays closed, and 0xFFFF stays the permanent
+    // unknown-value fixture: both refuse rather than being ignored.
+    for unassigned in [0x0203, 0xFFFF] {
+        assert_eq!(
+            decode(
+                &exact_push_bytes(unassigned, &body)?,
+                ReceiverDirection::Client
+            ),
+            Err(CodecError::Decode {
+                class: DecodeClass::UnknownDiscriminant,
+            })
+        );
+    }
+
+    let mut trailing = body.clone();
+    trailing.push(0);
+    assert_eq!(
+        decode(
+            &exact_push_bytes(0x0202, &trailing)?,
+            ReceiverDirection::Client
+        ),
+        Err(CodecError::Decode {
+            class: DecodeClass::CanonicalEncoding,
+        })
+    );
+
+    let short = body.get(..8).ok_or(CodecError::InvalidValue)?.to_vec();
+    assert_eq!(
+        decode(
+            &exact_push_bytes(0x0202, &short)?,
+            ReceiverDirection::Client
+        ),
+        Err(CodecError::Decode {
+            class: DecodeClass::MissingRequiredField,
+        })
+    );
+    Ok(())
 }
 
 #[test]
@@ -160,6 +224,10 @@ fn server_push_direction_and_codec_round_trip_all_record_kinds() -> Result<(), C
     compacted_body.extend_from_slice(&38_u64.to_be_bytes());
     compacted_body.extend_from_slice(&39_u64.to_be_bytes());
 
+    let mut settled_body = Vec::new();
+    settled_body.extend_from_slice(&42_u64.to_be_bytes());
+    settled_body.extend_from_slice(&43_u64.to_be_bytes());
+
     let expected = [
         exact_push_bytes(0x0200, &observer_body)?,
         exact_push_bytes(0x0201, &ordinary_body)?,
@@ -168,6 +236,7 @@ fn server_push_direction_and_codec_round_trip_all_record_kinds() -> Result<(), C
         exact_push_bytes(0x0201, &died_body)?,
         exact_push_bytes(0x0201, &left_body)?,
         exact_push_bytes(0x0201, &compacted_body)?,
+        exact_push_bytes(0x0202, &settled_body)?,
     ];
     for (frame, exact_bytes) in frames.iter().zip(expected) {
         assert_eq!(encoded(frame)?, exact_bytes);

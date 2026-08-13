@@ -602,6 +602,13 @@ fn encode_server_push<S: Sink>(value: &ServerPush, sink: &mut S) -> Result<(), C
             sink.put_u64(*observer_progress)
         }
         ServerPush::ParticipantDelivery(value) => encode_participant_delivery(value, sink),
+        ServerPush::MarkerSettled {
+            conversation_id,
+            refused_epoch,
+        } => {
+            sink.put_u64(*conversation_id)?;
+            sink.put_u64(*refused_epoch)
+        }
     }
 }
 
@@ -693,6 +700,10 @@ fn decode_server_push(tag: PushDiscriminant, body: &[u8]) -> Result<ServerPush, 
                 record,
             })
         }
+        PushDiscriminant::MarkerSettled => ServerPush::MarkerSettled {
+            conversation_id: reader.take_u64()?,
+            refused_epoch: reader.take_u64()?,
+        },
     };
     reader.finish()?;
     Ok(value)

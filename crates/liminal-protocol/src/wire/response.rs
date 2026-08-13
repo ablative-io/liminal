@@ -10,8 +10,8 @@ use super::{
     InvalidObserverEpochReason, LeaveAttemptToken, LeaveEnvelope, MarkerAckEnvelope,
     MarkerClosureCapacityExceeded, MarkerMismatchReason, MarkerNotDeliveredReason, ObserverEpoch,
     ParticipantAckEnvelope, ParticipantId, ProtocolVersion, ReceiptCapacityScope,
-    ReceiptExpiryReason, RecordAdmissionEnvelope, ResponseEnvelope, SequenceBudget,
-    ServerDiscriminant,
+    ReceiptExpiryReason, RecordAdmissionAttemptToken, RecordAdmissionEnvelope, ResponseEnvelope,
+    SequenceBudget, ServerDiscriminant, SettlementEpoch,
 };
 
 pub use super::tags::{DetachAuthorityStateTag, LeaveAuthorityStateTag, ResourceDimensionTag};
@@ -54,7 +54,10 @@ pub enum TransportRejectionReason {
     ParticipantCapabilityRequired,
 }
 
-/// Credential-attach or Leave token was reused with a different canonical body.
+/// An attempt token was reused with a different canonical body.
+///
+/// Admits credential attach, Leave, and — under §0.15 amendment A4 — ordinary
+/// record admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttemptTokenBodyConflict {
     /// Credential attach conflict; operation tag is fixed to attach.
@@ -79,6 +82,25 @@ pub enum AttemptTokenBodyConflict {
         /// Conversation from the conflicting request.
         conversation_id: ConversationId,
         /// Presented participant.
+        presented_participant_id: ParticipantId,
+        /// Presented generation.
+        presented_generation: Generation,
+    },
+    /// Ordinary record-admission conflict (§0.15 amendment A4).
+    ///
+    /// Carries no [`AttemptConflict`] selector, in the same way the Leave
+    /// variant carries no `presented_marker_delivery_seq`: the committed-identity
+    /// key is the (token, canonical-payload fingerprint, verified participant)
+    /// triple, so neither `Generation` nor `MarkerDeliverySequence` is
+    /// constructible on this arm. The one conflicting axis is the canonical body
+    /// this row is named for. Only the SAME-participant arm reaches the wire;
+    /// the cross-participant arm is silent forever (register law, A4).
+    RecordAdmission {
+        /// Presented record-admission token.
+        token: RecordAdmissionAttemptToken,
+        /// Conversation from the conflicting request.
+        conversation_id: ConversationId,
+        /// Presented participant, which is the committed identity's own.
         presented_participant_id: ParticipantId,
         /// Presented generation.
         presented_generation: Generation,
@@ -900,6 +922,53 @@ pub enum ObserverBackpressure {
         /// Refusal state.
         state: ObserverBackpressureState,
     },
+}
+
+/// Marker candidate awaiting its drain, refusing a membership-validated request.
+///
+/// The attach and detach wrappers of `apply_live_transition` validate
+/// conversation membership before the seam, so this row may carry the settlement
+/// epoch and is paired with the `0x0202 MarkerSettled` wake. Answering this
+/// condition with [`ObserverBackpressure`] is OUTLAWED — it would promise an
+/// `ObserverProgressed` that nothing sends (participant contract §0.16
+/// condition 2, attach and detach wrappers).
+///
+/// Retry discipline mirrors the stage-11 row: persist the waiting state, retry
+/// once after a matching `MarkerSettled` or reconnect status. `refused_epoch` is
+/// load-bearing rather than decorative — the retry matches it against the wake's
+/// own epoch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerSettlementBackpressure {
+    /// Credential attach.
+    CredentialAttach {
+        /// Conversation from the refused request.
+        conversation_id: ConversationId,
+        /// Settlement epoch this refusal waits on.
+        refused_epoch: SettlementEpoch,
+    },
+    /// Explicit detach.
+    Detach {
+        /// Conversation from the refused request.
+        conversation_id: ConversationId,
+        /// Settlement epoch this refusal waits on.
+        refused_epoch: SettlementEpoch,
+    },
+}
+
+/// Marker candidate awaiting its drain, refusing a subsequent enrollment.
+///
+/// NO epoch label and NO pushed event of any kind, by ratified law rather than
+/// by omission: the enrollment wrapper has no membership predicate — an
+/// `EnrollmentRequest` carries only `{ conversation_id, enrollment_token }` and
+/// that token is a replay-dedup key, not a capability — so the wrapper cannot
+/// distinguish an invited enrollee from a stranger, and a wake or an epoch label
+/// on this arm would be granted to both by construction. The enroller retries at
+/// its own cadence (participant contract §0.16 condition 2, enrollment wrapper;
+/// the no-polling law is answered there, not evaded here).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnrollmentSettlementBackpressure {
+    /// Conversation from the refused request.
+    pub conversation_id: ConversationId,
 }
 
 /// Request alternatives that can exhaust optional sequence admission.
@@ -1798,6 +1867,10 @@ pub enum ServerValue {
     InvalidObserverEpoch(InvalidObserverEpoch),
     /// `0x0123`.
     InvalidObserverEpochList(InvalidObserverEpochList),
+    /// `0x0125`.
+    MarkerSettlementBackpressure(MarkerSettlementBackpressure),
+    /// `0x0126`.
+    EnrollmentSettlementBackpressure(EnrollmentSettlementBackpressure),
 }
 
 impl ServerValue {
@@ -1856,6 +1929,12 @@ impl ServerValue {
             Self::ObserverRecoveryAccepted(_) => ServerDiscriminant::ObserverRecoveryAccepted,
             Self::InvalidObserverEpoch(_) => ServerDiscriminant::InvalidObserverEpoch,
             Self::InvalidObserverEpochList(_) => ServerDiscriminant::InvalidObserverEpochList,
+            Self::MarkerSettlementBackpressure(_) => {
+                ServerDiscriminant::MarkerSettlementBackpressure
+            }
+            Self::EnrollmentSettlementBackpressure(_) => {
+                ServerDiscriminant::EnrollmentSettlementBackpressure
+            }
         }
     }
 
@@ -1873,6 +1952,9 @@ impl ServerValue {
                     ClientDiscriminant::CredentialAttachRequest
                 }
                 AttemptTokenBodyConflict::Leave { .. } => ClientDiscriminant::LeaveRequest,
+                AttemptTokenBodyConflict::RecordAdmission { .. } => {
+                    ClientDiscriminant::RecordAdmission
+                }
             }),
             Self::ConnectionConversationCapacityExceeded(value) => match value {
                 ConnectionConversationCapacityExceeded::SemanticRequest { request, .. } => {
@@ -1910,7 +1992,10 @@ impl ServerValue {
                 ClosureCheckedEnvelope::Leave(_) => ClientDiscriminant::LeaveRequest,
                 ClosureCheckedEnvelope::RecordAdmission(_) => ClientDiscriminant::RecordAdmission,
             }),
-            Self::EnrollBound(_) | Self::EnrollmentKnown(_) | Self::IdentityCapacityExceeded(_) => {
+            Self::EnrollBound(_)
+            | Self::EnrollmentKnown(_)
+            | Self::IdentityCapacityExceeded(_)
+            | Self::EnrollmentSettlementBackpressure(_) => {
                 Some(ClientDiscriminant::EnrollmentRequest)
             }
             Self::ReceiptExpired(value) => Some(match value {
@@ -1967,6 +2052,12 @@ impl ServerValue {
             Self::RecordCommitted(_) | Self::RecordTooLarge(_) => {
                 Some(ClientDiscriminant::RecordAdmission)
             }
+            Self::MarkerSettlementBackpressure(value) => Some(match value {
+                MarkerSettlementBackpressure::CredentialAttach { .. } => {
+                    ClientDiscriminant::CredentialAttachRequest
+                }
+                MarkerSettlementBackpressure::Detach { .. } => ClientDiscriminant::DetachRequest,
+            }),
         }
     }
 }
@@ -2029,6 +2120,9 @@ pub const fn attempt_operation(value: &AttemptTokenBodyConflict) -> super::Attem
             super::AttemptOperation::CredentialAttachRequest
         }
         AttemptTokenBodyConflict::Leave { .. } => super::AttemptOperation::LeaveRequest,
+        AttemptTokenBodyConflict::RecordAdmission { .. } => {
+            super::AttemptOperation::RecordAdmission
+        }
     }
 }
 

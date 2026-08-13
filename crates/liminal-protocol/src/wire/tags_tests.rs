@@ -41,19 +41,28 @@ fn client_registry_is_exactly_eight_contiguous_values() {
 }
 
 #[test]
-fn server_registry_is_exactly_thirty_seven_contiguous_values() {
-    for value in 0x0100..=0x0124 {
+fn server_registry_is_exactly_thirty_nine_contiguous_values() {
+    for value in 0x0100..=0x0126 {
         let tag = ServerDiscriminant::try_from(value).unwrap();
         assert_eq!(tag.wire_value(), value);
     }
     assert!(ServerDiscriminant::try_from(0x00FF).is_err());
-    assert!(ServerDiscriminant::try_from(0x0125).is_err());
+    assert!(ServerDiscriminant::try_from(0x0127).is_err());
+}
+
+#[test]
+fn settlement_backpressure_rows_sit_above_the_observer_recovery_block() {
+    assert_tag(ServerDiscriminant::MarkerSettlementBackpressure, 0x0125);
+    assert_tag(ServerDiscriminant::EnrollmentSettlementBackpressure, 0x0126);
 }
 
 #[test]
 fn pushed_and_record_registries_preserve_their_explicit_bases() {
     assert_tag(PushDiscriminant::ObserverProgressed, 0x0200);
     assert_tag(PushDiscriminant::ParticipantDelivery, 0x0201);
+    assert_tag(PushDiscriminant::MarkerSettled, 0x0202);
+    assert!(PushDiscriminant::try_from(0x0203).is_err());
+    assert!(PushDiscriminant::try_from(0xFFFF).is_err());
     assert_tag(RecordKind::OrdinaryRecord, 0x0000);
     assert_tag(RecordKind::Attached, 0x0001);
     assert_tag(RecordKind::Detached, 0x0002);
@@ -103,8 +112,14 @@ fn transport_and_decode_registries_are_exact() {
 fn attempt_and_authority_registries_are_origin_specific() {
     assert_tag(AttemptOperation::CredentialAttachRequest, 1);
     assert_tag(AttemptOperation::LeaveRequest, 2);
+    assert_tag(AttemptOperation::RecordAdmission, 3);
+    assert!(AttemptOperation::try_from(4).is_err());
     assert_tag(AttemptConflict::Generation, 1);
     assert_tag(AttemptConflict::MarkerDeliverySequence, 2);
+    // A4 admits record admission WITHOUT widening the conflict class: the
+    // committed-identity key is (token, payload fingerprint, participant), so
+    // that arm can select neither of these two.
+    assert!(AttemptConflict::try_from(3).is_err());
 
     assert_tag(DetachAuthorityStateTag::Live, 1);
     assert_tag(DetachAuthorityStateTag::TerminalizedDetachCell, 2);

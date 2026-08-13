@@ -339,13 +339,22 @@ fn sample_server_values() -> Result<Vec<r::ServerValue>, CodecError> {
                 limit: 5,
             },
         ),
+        r::ServerValue::MarkerSettlementBackpressure(
+            r::MarkerSettlementBackpressure::CredentialAttach {
+                conversation_id: 10,
+                refused_epoch: 111,
+            },
+        ),
+        r::ServerValue::EnrollmentSettlementBackpressure(r::EnrollmentSettlementBackpressure {
+            conversation_id: 10,
+        }),
     ])
 }
 
 #[test]
-fn all_37_server_values_round_trip_with_contiguous_tags() -> Result<(), CodecError> {
+fn all_39_server_values_round_trip_with_contiguous_tags() -> Result<(), CodecError> {
     let values = sample_server_values()?;
-    assert_eq!(values.len(), 37);
+    assert_eq!(values.len(), 39);
 
     for (offset, value) in values.into_iter().enumerate() {
         let (discriminant, body) =
@@ -363,7 +372,7 @@ fn all_37_server_values_round_trip_with_contiguous_tags() -> Result<(), CodecErr
 }
 
 #[test]
-fn all_37_server_values_round_trip_as_complete_frames() -> Result<(), CodecError> {
+fn all_39_server_values_round_trip_as_complete_frames() -> Result<(), CodecError> {
     for value in sample_server_values()? {
         let frame = ParticipantFrame::ServerValue(value);
         let mut encoded = vec![0; super::encoded_len(&frame)?];
@@ -720,6 +729,135 @@ fn every_originating_request_pair_has_exact_routing() -> Result<(), CodecError> 
 }
 
 #[test]
+fn settlement_backpressure_rows_route_only_their_admitted_origins() -> Result<(), CodecError> {
+    for discriminant in [
+        t::ServerDiscriminant::MarkerSettlementBackpressure,
+        t::ServerDiscriminant::EnrollmentSettlementBackpressure,
+    ] {
+        for origin_value in 0x0001..=0x0008 {
+            let origin = t::ClientDiscriminant::try_from(origin_value)
+                .map_err(|_| CodecError::InvalidValue)?;
+            let mut body = origin_value.to_be_bytes().to_vec();
+            body.push(0xAA);
+            let expected = if expected_origin(discriminant, origin) {
+                t::DecodeClass::MissingRequiredField
+            } else {
+                t::DecodeClass::InvalidField
+            };
+            assert_decode_class(discriminant, &body, expected);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn settlement_backpressure_bodies_are_exact_and_the_enrollment_row_carries_no_epoch()
+-> Result<(), CodecError> {
+    let attach_refusal =
+        r::ServerValue::MarkerSettlementBackpressure(r::MarkerSettlementBackpressure::Detach {
+            conversation_id: 10,
+            refused_epoch: 111,
+        });
+    let mut expected = Vec::new();
+    put_u16(
+        &mut expected,
+        t::ClientDiscriminant::DetachRequest.wire_value(),
+    );
+    put_u64(&mut expected, 10);
+    put_u64(&mut expected, 111);
+    let (discriminant, body) =
+        server_codec::encode_server_value_body(&attach_refusal, ProtocolVersion::V1)?;
+    assert_eq!(
+        discriminant,
+        t::ServerDiscriminant::MarkerSettlementBackpressure
+    );
+    assert_eq!(body, expected);
+    assert_eq!(
+        server_codec::decode_server_value_body(discriminant, ProtocolVersion::V1, &body)?,
+        (attach_refusal, ProtocolVersion::V1)
+    );
+
+    let enrollment_refusal =
+        r::ServerValue::EnrollmentSettlementBackpressure(r::EnrollmentSettlementBackpressure {
+            conversation_id: 10,
+        });
+    let mut expected = Vec::new();
+    put_u16(
+        &mut expected,
+        t::ClientDiscriminant::EnrollmentRequest.wire_value(),
+    );
+    put_u64(&mut expected, 10);
+    let (discriminant, body) =
+        server_codec::encode_server_value_body(&enrollment_refusal, ProtocolVersion::V1)?;
+    assert_eq!(
+        discriminant,
+        t::ServerDiscriminant::EnrollmentSettlementBackpressure
+    );
+    assert_eq!(body, expected);
+    // Ten bytes is the whole assertion: origin selector plus conversation, and
+    // no room for the epoch the attach/detach row carries. The asymmetry is
+    // ratified law (participant contract §0.16 condition 2, enrollment
+    // wrapper), so a later "consistency" fix would be a contract change.
+    assert_eq!(body.len(), 10);
+    assert_eq!(
+        server_codec::decode_server_value_body(discriminant, ProtocolVersion::V1, &body)?,
+        (enrollment_refusal, ProtocolVersion::V1)
+    );
+    Ok(())
+}
+
+#[test]
+fn record_admission_body_conflict_round_trips_and_refuses_a_foreign_operation()
+-> Result<(), CodecError> {
+    let value =
+        r::ServerValue::AttemptTokenBodyConflict(r::AttemptTokenBodyConflict::RecordAdmission {
+            token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
+            conversation_id: 10,
+            presented_participant_id: 20,
+            presented_generation: generation(7)?,
+        });
+    let mut expected = Vec::new();
+    put_u16(
+        &mut expected,
+        t::ClientDiscriminant::RecordAdmission.wire_value(),
+    );
+    expected.extend_from_slice(&[0xA7; 16]);
+    put_u16(
+        &mut expected,
+        t::AttemptOperation::RecordAdmission.wire_value(),
+    );
+    put_u64(&mut expected, 10);
+    put_u64(&mut expected, 20);
+    put_u64(&mut expected, 7);
+
+    let (discriminant, body) = server_codec::encode_server_value_body(&value, ProtocolVersion::V1)?;
+    assert_eq!(
+        discriminant,
+        t::ServerDiscriminant::AttemptTokenBodyConflict
+    );
+    assert_eq!(body, expected);
+    assert_eq!(
+        server_codec::decode_server_value_body(discriminant, ProtocolVersion::V1, &body)?,
+        (value, ProtocolVersion::V1)
+    );
+
+    // The operation selector may not disagree with the origin selector, in
+    // either direction, and an unassigned operation stays refused.
+    let mut mismatched = expected.clone();
+    mismatched[18..20].copy_from_slice(
+        &t::AttemptOperation::CredentialAttachRequest
+            .wire_value()
+            .to_be_bytes(),
+    );
+    assert_decode_class(discriminant, &mismatched, t::DecodeClass::InvalidField);
+
+    let mut unassigned = expected;
+    unassigned[18..20].copy_from_slice(&4_u16.to_be_bytes());
+    assert_decode_class(discriminant, &unassigned, t::DecodeClass::InvalidField);
+    Ok(())
+}
+
+#[test]
 fn recovery_count_routes_before_unread_suffix() {
     let impossible_origin = [0x00, 0x02, 0xAA];
     assert_eq!(
@@ -849,9 +987,10 @@ const fn expected_origin(
     use t::ServerDiscriminant as D;
 
     match discriminant {
-        D::AttemptTokenBodyConflict => {
-            matches!(origin, O::CredentialAttachRequest | O::LeaveRequest)
-        }
+        D::AttemptTokenBodyConflict => matches!(
+            origin,
+            O::CredentialAttachRequest | O::LeaveRequest | O::RecordAdmission
+        ),
         D::ConnectionConversationCapacityExceeded => {
             !matches!(origin, O::ObserverRecoveryHandshake)
         }
@@ -908,6 +1047,10 @@ const fn expected_origin(
         D::LeaveCommitted => matches!(origin, O::LeaveRequest),
         D::MarkerAckCommitted => matches!(origin, O::MarkerAck),
         D::RecordCommitted | D::RecordTooLarge => matches!(origin, O::RecordAdmission),
+        D::MarkerSettlementBackpressure => {
+            matches!(origin, O::CredentialAttachRequest | O::DetachRequest)
+        }
+        D::EnrollmentSettlementBackpressure => matches!(origin, O::EnrollmentRequest),
         D::ParticipantTransportRejected
         | D::ObserverRecoveryAccepted
         | D::InvalidObserverEpoch
