@@ -21,8 +21,8 @@
 35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/observer.s2c.bin                       1fd749611262d3ce77e546cb521b352faa0d5e27283ba8ff826c9a3710c71a35
 35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/frames.jsonl                           13a45c366e14411c395292f11b30639dd2eace54a351d1b84ca1165e60302ac9
 35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/session.hex                            7928a4983d52bd32fec557126178ff348547f411a20277238415a1b332da9a84
-35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/decompose.py                           312e2c03db68a49bc26f574ae7517e32572a6898b74c1ed08f2f235b734323cd
-35223dfd6ee6bab5ecba7e70661cff915dbf1666  docs/wire/golden-trace/WALKTHROUGH.md                         59949faf4b31b41df083c28c784cc295dbce6bd619521d986e1f5d6cc7f774e1
+27ce34d1fbfaa439b5c1b975fbb2f995d6f9ff0b  docs/wire/golden-trace/decompose.py                           d3fe6f268293fd94fdbd50f735310180e878ee182c2818dbc17d622ab8bda1b7
+27ce34d1fbfaa439b5c1b975fbb2f995d6f9ff0b  docs/wire/golden-trace/WALKTHROUGH.md                         c60bbbd5d937ecc6a1b6698fd80bfb72c8f64533d9626a168d3c89e60c27a3c4
 9f9725c2ced0c3bafc2f2817896ce18556820509  docs/wire/golden-trace/README.md                              38e98dade221a38d307f515df0f2477e6e144755a421b6efdc3ab9b758fd33b8
 d87eb5434a5fa3ba23dd7c6b543263d7157aba64  crates/liminal-server/tests/participant_record_rtt_probe.rs   884b53c73233b1070d8457765b4f9a0bdf65c10e8adde75138c1b9a33363483d
 d87eb5434a5fa3ba23dd7c6b543263d7157aba64  docs/perf/participant-record-rtt.md                           751c7b2851484e91501e19658ead73d6ca24e53faaa1a85b60d4c6ec83262f9d
