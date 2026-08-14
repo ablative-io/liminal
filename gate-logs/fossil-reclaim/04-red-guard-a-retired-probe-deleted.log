@@ -1,0 +1,74 @@
+=== RED PROOF: 04-red-guard-a-retired-probe-deleted ===
+=== base tree: 75e85b910232be8d1d7352d52a4bc011d90e1194 ===
+=== the mechanism this pin measures, DISABLED: ===
+diff --git a/crates/liminal-server/src/server/participant/production/ops_reissue.rs b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+index c726e1a..1dfc938 100644
+--- a/crates/liminal-server/src/server/participant/production/ops_reissue.rs
++++ b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+@@ -109,13 +109,7 @@ impl ConversationAuthority {
+         // must not be swallowed by the unknown-participant arm. A retired
+         // identity is removed from `slots` and lives in `retired`
+         // (`ops_leave.rs`), which is exactly the pair probed here.
+-        if let Some(retired) = self.retired.get(&participant_id) {
+-            return Ok(refused(OperatorCredentialReissueRefusal::Retired {
+-                conversation_id,
+-                participant_id,
+-                retired_generation: retired_generation(retired),
+-            }));
+-        }
++        // RED PROOF 04: guard (a), the tombstone probe, DELETED.
+         let Some(slot) = self.slots.get(&participant_id) else {
+             return Ok(refused(
+                 OperatorCredentialReissueRefusal::ParticipantUnknown {
+=== end of disabling diff ===
+
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+warning: function `retired_generation` is never used
+   --> crates/liminal-server/src/server/participant/production/ops_reissue.rs:338:10
+    |
+338 | const fn retired_generation(retired: &RetiredIdentity<Digest, Digest, Digest>) -> u64 {
+    |          ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+warning: `liminal-server` (lib) generated 1 warning
+warning: `liminal-server` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.79s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 15 tests
+test server::participant::production::tests_a7_operator_reissue::a_live_binding_refuses_with_no_state_delta ... ok
+test server::participant::production::tests_a7_operator_reissue::a_retired_identity_refuses_retired_with_no_state_delta ... FAILED
+test server::participant::production::tests_a7_operator_reissue::the_reissue_operation_introduces_no_timer_sweep_or_retry_loop ... ok
+test server::participant::production::tests_a7_operator_reissue::the_reissue_operation_still_declares_its_no_polling_property ... ok
+test server::participant::production::tests_a7_operator_reissue::a_live_enrollment_receipt_refuses_with_no_state_delta ... ok
+test server::participant::production::tests_a7_operator_reissue::an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential ... ok
+test server::participant::production::tests_a7_operator_reissue::an_unknown_conversation_refuses_typed_and_leaves_no_residue ... ok
+test server::participant::production::tests_a7_operator_reissue::a_live_attach_receipt_refuses_with_no_state_delta ... ok
+test server::participant::production::tests_a7_operator_reissue::an_unknown_participant_refuses_typed_with_no_state_delta ... ok
+test server::participant::production::tests_a7_operator_reissue::a_generation_mismatch_refuses_carrying_the_repair_loops_read_path ... ok
+test server::participant::production::tests_a7_operator_reissue::a_repeated_reissue_serializes_on_the_compare_and_set ... ok
+test server::participant::production::tests_a7_operator_reissue::the_fossil_shape_is_reclaimed_by_one_operator_reissue ... ok
+test server::participant::production::tests_a7_operator_reissue::the_reissue_appends_exactly_one_row_and_no_lifecycle_record ... ok
+test server::participant::production::tests_a7_operator_reissue::without_a_reissue_the_fossil_stays_refused_forever ... ok
+test server::participant::production::tests_a7_operator_reissue::the_reissue_row_replays_identically_across_both_crash_boundaries ... ok
+
+failures:
+
+---- server::participant::production::tests_a7_operator_reissue::a_retired_identity_refuses_retired_with_no_state_delta stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::a_retired_identity_refuses_retired_with_no_state_delta' (8288342) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:724:5:
+assertion `left == right` failed
+  left: ParticipantUnknown { conversation_id: 7405, participant_id: 0 }
+ right: Retired { conversation_id: 7405, participant_id: 0, retired_generation: 1 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    server::participant::production::tests_a7_operator_reissue::a_retired_identity_refuses_retired_with_no_state_delta
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 738 filtered out; finished in 3.34s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

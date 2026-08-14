@@ -1,0 +1,44 @@
+=== RED PROOF: 10-red-no-polling-audit-sees-a-real-wait ===
+=== base tree: 75e85b910232be8d1d7352d52a4bc011d90e1194 ===
+=== the mechanism this pin measures, DISABLED: ===
+diff --git a/crates/liminal-server/src/server/participant/production/ops_reissue.rs b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+index c726e1a..7f5d7ab 100644
+--- a/crates/liminal-server/src/server/participant/production/ops_reissue.rs
++++ b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+@@ -223,6 +223,7 @@ impl ConversationAuthority {
+         // rebases. The exhaustion arm is unreachable by the contract's own
+         // sequence argument and is answered loudly rather than assumed away.
+         let issued_generation = next_generation(current_generation)?;
++        std::thread::sleep(std::time::Duration::from_millis(1));
+         let issued_secret = facts::mint_secret_bytes()?;
+         let row = StoredCredentialReissue {
+             participant_id: request.participant_id,
+=== end of disabling diff ===
+
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.44s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 2 tests
+test server::participant::production::tests_a7_operator_reissue::the_reissue_operation_still_declares_its_no_polling_property ... ok
+test server::participant::production::tests_a7_operator_reissue::the_reissue_operation_introduces_no_timer_sweep_or_retry_loop ... FAILED
+
+failures:
+
+---- server::participant::production::tests_a7_operator_reissue::the_reissue_operation_introduces_no_timer_sweep_or_retry_loop stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::the_reissue_operation_introduces_no_timer_sweep_or_retry_loop' (8307686) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:1287:5:
+assertion `left == right` failed: the A7 operation introduced an executing wait/schedule shape
+  left: ["sleep"]
+ right: []
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    server::participant::production::tests_a7_operator_reissue::the_reissue_operation_introduces_no_timer_sweep_or_retry_loop
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 751 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

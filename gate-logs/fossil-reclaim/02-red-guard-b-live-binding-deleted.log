@@ -1,0 +1,66 @@
+=== RED PROOF: 02-red-guard-b-live-binding-deleted ===
+=== base tree: 75e85b910232be8d1d7352d52a4bc011d90e1194 ===
+=== the mechanism this pin measures, DISABLED: ===
+diff --git a/crates/liminal-server/src/server/participant/production/ops_reissue.rs b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+index c726e1a..17ad71d 100644
+--- a/crates/liminal-server/src/server/participant/production/ops_reissue.rs
++++ b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+@@ -135,14 +135,8 @@ impl ConversationAuthority {
+             BindingState::Bound(_) => Some(BOUND),
+             BindingState::PendingFinalization(_) => Some(PENDING_FINALIZATION),
+         };
+-        if let Some(binding_state) = live_binding {
+-            return Ok(refused(OperatorCredentialReissueRefusal::LiveBinding {
+-                conversation_id,
+-                participant_id,
+-                current_generation: current_generation.get(),
+-                binding_state,
+-            }));
+-        }
++        // RED PROOF 02: guard (b) DELETED.
++        let _ = live_binding;
+         // Guard (c): a live attach or enrollment receipt means the R-C0
+         // recovery window is still open and the ordinary recovery path must be
+         // exhausted first.
+=== end of disabling diff ===
+
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.11s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 15 tests
+test server::participant::production::tests_a7_operator_reissue::a_live_binding_refuses_with_no_state_delta ... FAILED
+test server::participant::production::tests_a7_operator_reissue::a_retired_identity_refuses_retired_with_no_state_delta ... ok
+test server::participant::production::tests_a7_operator_reissue::the_reissue_operation_introduces_no_timer_sweep_or_retry_loop ... ok
+test server::participant::production::tests_a7_operator_reissue::the_reissue_operation_still_declares_its_no_polling_property ... ok
+test server::participant::production::tests_a7_operator_reissue::a_live_enrollment_receipt_refuses_with_no_state_delta ... ok
+test server::participant::production::tests_a7_operator_reissue::an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential ... ok
+test server::participant::production::tests_a7_operator_reissue::a_live_attach_receipt_refuses_with_no_state_delta ... ok
+test server::participant::production::tests_a7_operator_reissue::an_unknown_conversation_refuses_typed_and_leaves_no_residue ... ok
+test server::participant::production::tests_a7_operator_reissue::an_unknown_participant_refuses_typed_with_no_state_delta ... ok
+test server::participant::production::tests_a7_operator_reissue::a_generation_mismatch_refuses_carrying_the_repair_loops_read_path ... ok
+test server::participant::production::tests_a7_operator_reissue::a_repeated_reissue_serializes_on_the_compare_and_set ... ok
+test server::participant::production::tests_a7_operator_reissue::the_fossil_shape_is_reclaimed_by_one_operator_reissue ... ok
+test server::participant::production::tests_a7_operator_reissue::the_reissue_appends_exactly_one_row_and_no_lifecycle_record ... ok
+test server::participant::production::tests_a7_operator_reissue::without_a_reissue_the_fossil_stays_refused_forever ... ok
+test server::participant::production::tests_a7_operator_reissue::the_reissue_row_replays_identically_across_both_crash_boundaries ... ok
+
+failures:
+
+---- server::participant::production::tests_a7_operator_reissue::a_live_binding_refuses_with_no_state_delta stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::a_live_binding_refuses_with_no_state_delta' (8275402) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:759:5:
+assertion `left == right` failed
+  left: LiveReceipt { conversation_id: 7406, participant_id: 0, current_generation: 1, receipt: "enrollment" }
+ right: LiveBinding { conversation_id: 7406, participant_id: 0, current_generation: 1, binding_state: "bound" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    server::participant::production::tests_a7_operator_reissue::a_live_binding_refuses_with_no_state_delta
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 738 filtered out; finished in 3.23s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

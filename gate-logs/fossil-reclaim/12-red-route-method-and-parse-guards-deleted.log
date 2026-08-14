@@ -1,0 +1,92 @@
+=== RED PROOF: 12-red-route-method-and-parse-guards-deleted ===
+=== base tree: 75e85b910232be8d1d7352d52a4bc011d90e1194 ===
+=== the operator route's method check DELETED and a malformed call
+=== silently DEFAULTED to zeros instead of refused: ===
+diff --git a/crates/liminal-server/src/health/endpoint.rs b/crates/liminal-server/src/health/endpoint.rs
+index 86a788c..f636d44 100644
+--- a/crates/liminal-server/src/health/endpoint.rs
++++ b/crates/liminal-server/src/health/endpoint.rs
+@@ -440,13 +440,15 @@ fn credential_reissue_response(
+     path: &str,
+     served: &ServedState,
+ ) -> Result<Vec<u8>, ServerError> {
+-    if method != "POST" {
+-        return Ok(empty_response(StatusCode::MethodNotAllowed));
+-    }
++    // RED PROOF 12: the method check DELETED and a malformed call DEFAULTED
++    // to zeros rather than refused.
++    let _ = method;
+     let query = path.split_once('?').map_or("", |(_, query)| query);
+-    let Some(request) = parse_reissue_query(query) else {
+-        return Ok(empty_response(StatusCode::BadRequest));
+-    };
++    let request = parse_reissue_query(query).unwrap_or(OperatorCredentialReissueRequest {
++        conversation_id: 0,
++        participant_id: 0,
++        expected_current_generation: 0,
++    });
+     match served.reissue.reissue(request) {
+         // No participant is configured on this node. Distinct from every
+         // identity answer, and reported as such rather than as a lookup miss.
+=== end of disabling diff ===
+
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.64s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 21 tests
+test health::endpoint::tests::health_accept_source_has_no_wouldblock_sleep_poll ... ok
+test health::endpoint::tests::cluster_readiness_is_listed_when_configured_but_not_joined ... ok
+test health::endpoint::tests::ready_endpoint_updates_from_shared_readiness_state ... ok
+test health::endpoint::tests::health_endpoint_returns_json_200_regardless_of_readiness ... ok
+test health::endpoint::tests::ready_endpoint_returns_503_before_main_listener_binds ... ok
+test health::endpoint::tests::ready_endpoint_returns_200_after_all_startup_gates ... ok
+test health::endpoint::tests::clustered_ready_transitions_503_to_200_when_membership_established ... ok
+test health::endpoint::tests::the_reissue_route_answers_a_lookup_miss_with_not_found ... ok
+test health::endpoint::tests::a_malformed_reissue_call_is_refused_and_never_reaches_the_authority ... FAILED
+test health::endpoint::tests::the_reissue_route_did_not_move_any_existing_routes_answer ... ok
+test health::endpoint::tests::the_reissue_route_refuses_every_other_method ... FAILED
+test health::endpoint::tests::the_reissue_route_reports_an_uninstalled_participant ... ok
+test health::endpoint::tests::the_reissue_route_carries_the_three_inputs_and_returns_the_secret_once ... ok
+test health::endpoint::tests::the_reissue_route_serves_the_normative_generation_pair ... ok
+test health::endpoint::tests::unsupported_methods_on_health_paths_are_rejected ... ok
+test health::endpoint::tests::unsupported_paths_are_not_served ... ok
+test health::endpoint::tests::unloadable_conversations_route_answers_the_operator_a_json_shape ... ok
+test health::endpoint::tests::health_idle_grows_unrelated_counters_while_accept_stays_flat ... ok
+test health::endpoint::tests::shutdown_interrupts_in_flight_silent_request_read ... ok
+test health::endpoint::tests::health_shutdown_interrupts_accept_wait ... ok
+test health::endpoint::tests::silent_health_listener_has_zero_application_wakes ... ok
+
+failures:
+
+---- health::endpoint::tests::a_malformed_reissue_call_is_refused_and_never_reaches_the_authority stdout ----
+
+thread 'health::endpoint::tests::a_malformed_reissue_call_is_refused_and_never_reaches_the_authority' (8323270) panicked at crates/liminal-server/src/health/endpoint.rs:640:9:
+response status did not start with HTTP/1.1 400 : HTTP/1.1 404 Not Found
+Content-Length: 54
+Connection: close
+Content-Type: application/json
+
+{"refusal":"conversation_unknown","conversation_id":7}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- health::endpoint::tests::the_reissue_route_refuses_every_other_method stdout ----
+
+thread 'health::endpoint::tests::the_reissue_route_refuses_every_other_method' (8323296) panicked at crates/liminal-server/src/health/endpoint.rs:640:9:
+response status did not start with HTTP/1.1 405 : HTTP/1.1 404 Not Found
+Content-Length: 54
+Connection: close
+Content-Type: application/json
+
+{"refusal":"conversation_unknown","conversation_id":7}
+
+
+failures:
+    health::endpoint::tests::a_malformed_reissue_call_is_refused_and_never_reaches_the_authority
+    health::endpoint::tests::the_reissue_route_refuses_every_other_method
+
+test result: FAILED. 19 passed; 2 failed; 0 ignored; 0 measured; 732 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

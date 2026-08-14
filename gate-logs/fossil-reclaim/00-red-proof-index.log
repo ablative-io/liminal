@@ -1,0 +1,73 @@
+=== A7 / fossil-reclaim leg 1 -- red-proof index ===
+
+Base tree for every red proof below: 75e85b9 (the pins + fixes commit).
+
+WHY MECHANISM-DISABLED REDS. A7 adds a NEW operation, so there is no tree in
+which the pins compile and fail for want of the fix -- the red-first shape for
+new work is therefore to disable exactly the mechanism a pin measures and watch
+that pin, and only that pin, die. Each log embeds the disabling diff, the full
+teed run, and TRUE EXIT.
+
+Every log below ends with TRUE EXIT: 101.
+
+01-red-preA7-operation-absent
+    Disabled: the whole operation (the pre-A7 world -- every call answers as a
+    node with no such route would).
+    RED (11): a_live_binding / a_retired_identity / an_open_detach_replay_cell /
+    a_live_enrollment_receipt / the_fossil_shape / a_generation_mismatch /
+    a_repeated_reissue / an_unknown_participant / a_live_attach_receipt /
+    the_reissue_appends_exactly_one_row / the_reissue_row_replays.
+    STAYED GREEN, correctly: without_a_reissue_the_fossil_stays_refused_forever
+    (it is the CONTROL -- it pins the pre-A7 truth and must survive this), both
+    source audits, and an_unknown_conversation (the disabled operation happens
+    to answer that same row, which is exactly why 06 exists).
+
+02-red-guard-b-live-binding-deleted        RED: a_live_binding
+03-red-guard-c-live-receipt-deleted        RED: a_live_enrollment_receipt, a_live_attach_receipt
+04-red-guard-a-retired-probe-deleted       RED: a_retired_identity
+05-red-guard-d-compare-and-set-deleted     RED: a_generation_mismatch, a_repeated_reissue
+06-red-preguard-unknown-conversation-deleted   RED: an_unknown_conversation
+07-red-preguard-unknown-participant-misnamed   RED: an_unknown_participant
+    (answers the unknown-CONVERSATION row for a participant miss, proving the
+    pin discriminates the two lookup misses instead of accepting any refusal)
+
+08-red-detach-replay-cell-trap
+    Disabled: the DetachReplayOpen arm. The pin fails at its refusal assertion.
+08b-red-detach-replay-cell-trap-revealed
+    The same arm deleted AND the pin's refusal assertion replaced by the commit
+    the missing guard permits, so the TRAP is what fails. The re-entry attach
+    dies at:
+      "protocol attach transition failed: DetachCellAuthority"
+    carried as ParticipantDispatch::Fatal -- the client receives NO FRAME AT
+    ALL. This is the evidence behind the contract flag.
+
+09-red-replay-missing-log-head-advance
+    Disabled: advance_log_head in the replay arm.
+    RED: the_reissue_row_replays_identically_across_both_crash_boundaries, at
+      "sequence conflict: expected 6, actual 7"
+    -- note the credential assertions PASS in this run. A replay pin that stops
+    at the poststate cannot see this defect; the pin attaches afterwards.
+
+10-red-no-polling-audit-sees-a-real-wait
+    A real std::thread::sleep introduced into the operation.
+    RED: the_reissue_operation_introduces_no_timer_sweep_or_retry_loop
+    (the audit's own inline positive control, against a file that provably
+    polls, runs FIRST inside the pin on every ordinary run)
+
+11-red-withheld-control-positive-control
+    The withheld control handed the credential the SERVER holds, which provably
+    binds.
+    RED: without_a_reissue_the_fossil_stays_refused_forever
+    This is what makes that pin a measurement rather than a vacuous predicate:
+    its instrument is proved able to detect a bindable credential.
+
+12-red-route-method-and-parse-guards-deleted
+    The operator route's method check deleted and a malformed call silently
+    DEFAULTED to zeros instead of refused.
+    RED: a_malformed_reissue_call_is_refused_and_never_reaches_the_authority,
+         the_reissue_route_refuses_every_other_method
+
+HONEST GAP. the_reissue_operation_still_declares_its_no_polling_property has no
+captured red of its own. It is a structural companion to 10 (it asserts the
+module still CLAIMS the property), and its red is the trivial one: delete the
+declaration line. Named rather than quietly omitted.
