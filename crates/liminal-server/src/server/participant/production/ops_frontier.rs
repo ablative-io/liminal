@@ -530,6 +530,9 @@ impl ConversationAuthority {
         occupied: u64,
         receiving_epoch: BindingEpoch,
     ) -> Result<Box<RecordAdmissionCommit>, StateError> {
+        #[cfg(test)]
+        self.replay_orphan_reconciles
+            .set(self.replay_orphan_reconciles.get().saturating_add(1));
         let (_, unchanged) = failure.into_parts();
         let (mut owner, request, encoded_record_charge) =
             LiveFrontierOwner::from_unchanged_record_admission(unchanged, retained_record_limit);
@@ -652,6 +655,7 @@ impl ConversationAuthority {
             self.observer_progress,
             ordinary_projection_limits(config),
         );
+        let mut reconciled = false;
         let commit = match select_record_admission(prestate, encoded_record_charge) {
             RecordAdmissionDecision::Commit(commit) => commit,
             RecordAdmissionDecision::Fault(failure)
@@ -662,6 +666,7 @@ impl ConversationAuthority {
                     ) if derived < stored
                 ) =>
             {
+                reconciled = true;
                 self.retry_replay_after_orphan_reconcile(
                     failure,
                     row,
@@ -683,7 +688,16 @@ impl ConversationAuthority {
             retained_record_limit,
             dedup_key,
             dedup_seq,
-        )
+        )?;
+        if reconciled {
+            // Board `#76`, the replay-retry half. The retry above retired an
+            // anchor mid-replay; its paired outbox obligation is retired here,
+            // against the frontier the publish has just installed. Deferred to
+            // after the publish because that is where the reconciled frontier
+            // becomes readable again — the retry itself holds it detached.
+            self.reconcile_orphaned_marker_obligations()?;
+        }
+        Ok(())
     }
 
     /// Verifies every persisted allocation/charge audit of a replayed

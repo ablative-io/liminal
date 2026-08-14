@@ -93,12 +93,7 @@ impl ConversationOutbox {
                 acknowledged_through: protocol_cursor,
             });
         }
-        let marker_cursor = self
-            .marker_ack_frontiers
-            .get(&participant_id)
-            .copied()
-            .unwrap_or(outbox_ack_through);
-        let marker_reconciled_cursor = outbox_ack_through.max(marker_cursor);
+        let marker_reconciled_cursor = self.marker_reconciled_cursor(participant_id);
         if marker_reconciled_cursor != protocol_cursor {
             return Err(ConversationOutboxError::ProtocolCursorProvenance {
                 participant_id,
@@ -120,6 +115,27 @@ impl ConversationOutbox {
             .get(&participant_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// The cursor one delivery selection starts PAST for this participant: the
+    /// durable ordinary-ack frontier reconciled with the marker-ack frontier.
+    ///
+    /// Extracted from [`Self::dispatch_after`]'s own derivation rather than
+    /// re-derived, so the obligation reconcile
+    /// ([`super::ConversationOutbox::retire_unbacked_marker_obligations`]) asks
+    /// the same question the selection answers: an obligation at or below this
+    /// is unreachable by any future offer.
+    pub(in crate::server::participant::production) fn marker_reconciled_cursor(
+        &self,
+        participant_id: ParticipantId,
+    ) -> u64 {
+        let outbox_ack_through = self.durable_ack_through(participant_id);
+        let marker_cursor = self
+            .marker_ack_frontiers
+            .get(&participant_id)
+            .copied()
+            .unwrap_or(outbox_ack_through);
+        outbox_ack_through.max(marker_cursor)
     }
 
     /// Whether this exact participant still owns the named marker obligation.

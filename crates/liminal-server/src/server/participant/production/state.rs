@@ -229,6 +229,16 @@ pub(super) struct ConversationAuthority {
     /// fixtures that must stage the next leg's observer fact explicitly.
     #[cfg(test)]
     pub(super) last_marker_projection: Option<ParticipantDelivery>,
+    /// How many times cold replay took the mid-replay orphan-reconcile retry
+    /// (`ops_frontier::retry_replay_after_orphan_reconcile`) for this
+    /// conversation. An INSTRUMENT, not state: board `#76`'s pins have to be
+    /// able to say which reconcile site a given store actually exercised
+    /// instead of inferring it, and "the retry fired zero times" is as
+    /// load-bearing a measurement as "exactly once" -- it is what stops a pin
+    /// on the load-end site from being reported as a pin on the replay-retry
+    /// one.
+    #[cfg(test)]
+    pub(super) replay_orphan_reconciles: Cell<u64>,
     /// Live participant slots keyed by permanent participant id.
     pub(super) slots: BTreeMap<ParticipantId, Slot>,
     /// Durable Died intents awaiting their exact Ordinary/Recovered consumer.
@@ -504,6 +514,8 @@ impl ConversationAuthority {
             offered_markers: BTreeMap::new(),
             #[cfg(test)]
             last_marker_projection: None,
+            #[cfg(test)]
+            replay_orphan_reconciles: Cell::new(0),
             slots: BTreeMap::new(),
             pending_specific_fates: BTreeMap::new(),
             prepared_ordinary_finalizers: BTreeMap::new(),

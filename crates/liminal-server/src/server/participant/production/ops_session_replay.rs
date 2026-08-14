@@ -158,7 +158,72 @@ impl ConversationAuthority {
                     "reconciled orphaned marker anchors at load"
                 );
             }
+            self.reconcile_orphaned_marker_obligations()?;
         }
+        Ok(())
+    }
+
+    /// The obligation half of the anchor reconcile (board `#76`): retires every
+    /// durable marker obligation the reconciled frontier can no longer answer,
+    /// and drops the volatile offer testimony that names it.
+    ///
+    /// An anchor and its obligation are ONE fact in two ledgers, so a
+    /// retirement that touches only one of them leaves the conversation able to
+    /// re-offer a marker whose delivery authority is gone — and the ack for
+    /// that offer dies at `marker_progress`'s invariant, fail-closed, with the
+    /// estate down. That invariant is CORRECT and is not touched: it is the
+    /// right answer to a genuine divergence. This is where the divergence stops
+    /// being manufactured.
+    ///
+    /// Run unconditionally alongside the anchor reconcile rather than only when
+    /// that reconcile retired something. The two ledgers can also be separated
+    /// by a retirement the anchor side accounted for correctly and the outbox
+    /// never heard about (a departing member's marker record leaves the
+    /// frontier with its owner while a co-recipient's push obligation stays
+    /// live), and a coherence pass that only ran after a failure of its sibling
+    /// would miss exactly those. On a store whose ledgers agree it retires
+    /// nothing: every obligation whose marker record is still on the frontier
+    /// is backed, and every obligation already behind its participant's
+    /// selection cursor is unreachable and left alone.
+    ///
+    /// ⚠ This is a LOAD-side repair, exactly like its anchor sibling. A
+    /// separation opened DURING a process's life is not healed until that
+    /// process's next boot — board `#45`'s live window, which is its own
+    /// measurement and is not closed here.
+    pub(super) fn reconcile_orphaned_marker_obligations(&mut self) -> Result<(), StateError> {
+        let Some(owner) = self.frontier() else {
+            return Ok(());
+        };
+        let anchored: std::collections::BTreeSet<u64> = owner
+            .frontiers()
+            .retained_marker_records()
+            .iter()
+            .map(|record| record.delivery_seq)
+            .collect();
+        let active: std::collections::BTreeSet<u64> = owner
+            .frontiers()
+            .active_identities()
+            .participants()
+            .iter()
+            .map(|participant| participant.participant_index())
+            .collect();
+        let Some(outbox) = self.outbox.as_mut() else {
+            return Ok(());
+        };
+        let retired = outbox.retire_unbacked_marker_obligations(&|participant_id, delivery_seq| {
+            anchored.contains(&delivery_seq) && active.contains(&participant_id)
+        })?;
+        if retired.is_empty() {
+            return Ok(());
+        }
+        for pair in &retired {
+            self.offered_markers.remove(pair);
+        }
+        tracing::warn!(
+            conversation_id = self.conversation_id,
+            retired = retired.len(),
+            "retired marker obligations whose delivery authority the frontier no longer holds"
+        );
         Ok(())
     }
 
