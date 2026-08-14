@@ -570,7 +570,20 @@ fn drive_marker_drain(
 }
 
 pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> {
-    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    prepare_marker_fixture_with_store(Arc::new(open_ephemeral(1)?))
+}
+
+/// [`prepare_marker_fixture`] with the durable store supplied by the caller.
+///
+/// Additive and behaviour-identical: `prepare_marker_fixture` is now exactly
+/// this function applied to the `open_ephemeral(1)` store it always built, so
+/// no existing caller changes what it drives. The parameter exists so the
+/// marker geometry can be minted over a REAL ON-DISK haematite store when the
+/// question being asked is about restart, where an ephemeral store would make
+/// the arm vacuous.
+pub(super) fn prepare_marker_fixture_with_store(
+    store: Arc<dyn DurableStore>,
+) -> Result<MarkerFixture, Box<dyn Error>> {
     let config = marker_fixture_config();
     let conversation_id = 0xA7;
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;

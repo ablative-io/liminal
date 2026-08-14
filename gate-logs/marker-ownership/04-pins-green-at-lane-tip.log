@@ -1,0 +1,17 @@
+   Compiling liminal-server v0.8.1 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.54s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-438e475c5a477c95)
+
+running 7 tests
+test server::participant::production::tests_p0_76_marker_ownership::a_legacy_non_owner_marker_ack_is_answered_benignly_over_a_real_socket ... ok
+test server::participant::production::tests_p0_76_marker_ownership::a_non_owner_history_compacted_delivery_mints_no_marker_offer ... ok
+test server::participant::production::tests_p0_76_marker_ownership::a_non_owner_history_compacted_offer_is_ordinary_not_an_internal_error ... ok
+test server::participant::production::tests_p0_76_marker_ownership::a_non_owner_marker_ack_never_reaches_the_delivery_authority_invariant ... ok
+test server::participant::production::tests_p0_76_marker_ownership::a_restarted_store_never_marker_flags_a_non_owner_on_the_replay_path ... ok
+test server::participant::production::tests_p0_76_marker_ownership::the_on_disk_restart_arm_never_marker_flags_a_non_owner_with_the_store_engaged ... ok
+test server::participant::production::tests_p0_76_marker_ownership::the_owner_still_holds_its_marker_offer_and_its_ack_still_commits ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 753 filtered out; finished in 8.97s
+
+TRUE EXIT: 0

@@ -1,0 +1,21 @@
+SURVIVOR-DELIVERY FAMILY at fix item 1 ALONE (no consumer's arm).
+The brief's key-holder amendment says record delivery to survivors breaks
+if the ownership condition lives only inside is_marker_obligation.
+This is that claim, executed.
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-438e475c5a477c95)
+
+running 1 test
+test server::participant::production::e2e_cold_all_shapes::cold_reopen_reconciles_and_replays_all_record_shapes ... Error: "connection closed before a complete frame arrived"
+FAILED
+
+failures:
+
+failures:
+    server::participant::production::e2e_cold_all_shapes::cold_reopen_reconciles_and_replays_all_record_shapes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 759 filtered out; finished in 4.24s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

@@ -1,0 +1,30 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-438e475c5a477c95)
+
+running 7 tests
+test server::participant::production::tests_p0_76_marker_ownership::a_legacy_non_owner_marker_ack_is_answered_benignly_over_a_real_socket ... Error: "#76 FIELD SHAPE AT THE TRANSPORT: participant 1's MarkerAck for the marker at 8 — a marker NAMING participant 0 — was never answered on the wire. A survivor's legacy ack must be a typed re-sync, not a silent fatal close: connection closed before a complete frame arrived"
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::a_non_owner_history_compacted_delivery_mints_no_marker_offer ... Error: "#76: the offer path minted a MARKER obligation for participant 1, which merely RECEIVES the compaction marker at 8 — the record NAMES participant 0. A survivor's history over that sequence is continuous, so it has no abandonment to span and the contract gives it no marker route; this delivery is an ordinary obligation covered by cumulative ParticipantAck."
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::a_non_owner_history_compacted_offer_is_ordinary_not_an_internal_error ... ok
+test server::participant::production::tests_p0_76_marker_ownership::a_non_owner_marker_ack_never_reaches_the_delivery_authority_invariant ... Error: "#76 FIELD SHAPE REPRODUCED: participant 1's MarkerAck for the marker at 8 — a marker NAMING participant 0 — died at the delivery-authority invariant `stored MarkerAck has no matching marker delivery authority`. This is boot-1's death: non-owner offered, non-owner acked, invariant fatal. Raw: dispatch did not respond: Fatal(Semantic(Internal { message: \"participant production operation failed: participant production invariant violated: stored MarkerAck has no matching marker delivery authority\" }))"
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::a_restarted_store_never_marker_flags_a_non_owner_on_the_replay_path ... Error: "#76 RESTART PARITY: the REPLAY path minted a marker obligation for survivor 1 at 8 — the ownership predicate must govern replay-derived offers identically to live ones, or a restart re-poisons what the live path refused to mint. The marker names participant 0."
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::the_on_disk_restart_arm_never_marker_flags_a_non_owner_with_the_store_engaged ... Error: "#76 RESTART PARITY: the REPLAY path minted a marker obligation for survivor 1 at 8 — the ownership predicate must govern replay-derived offers identically to live ones, or a restart re-poisons what the live path refused to mint. The marker names participant 0."
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::the_owner_still_holds_its_marker_offer_and_its_ack_still_commits ... ok
+
+failures:
+
+failures:
+    server::participant::production::tests_p0_76_marker_ownership::a_legacy_non_owner_marker_ack_is_answered_benignly_over_a_real_socket
+    server::participant::production::tests_p0_76_marker_ownership::a_non_owner_history_compacted_delivery_mints_no_marker_offer
+    server::participant::production::tests_p0_76_marker_ownership::a_non_owner_marker_ack_never_reaches_the_delivery_authority_invariant
+    server::participant::production::tests_p0_76_marker_ownership::a_restarted_store_never_marker_flags_a_non_owner_on_the_replay_path
+    server::participant::production::tests_p0_76_marker_ownership::the_on_disk_restart_arm_never_marker_flags_a_non_owner_with_the_store_engaged
+
+test result: FAILED. 2 passed; 5 failed; 0 ignored; 0 measured; 753 filtered out; finished in 12.35s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

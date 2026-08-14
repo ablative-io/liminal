@@ -1,0 +1,34 @@
+   Compiling liminal-server v0.8.1 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.68s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-438e475c5a477c95)
+
+running 7 tests
+test server::participant::production::tests_p0_76_marker_ownership::a_legacy_non_owner_marker_ack_is_answered_benignly_over_a_real_socket ... Error: "connection closed before a complete frame arrived"
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::a_non_owner_history_compacted_delivery_mints_no_marker_offer ... Error: Internal { message: "participant marker offer lost its exact current binding or durable obligation for conversation 167" }
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::a_non_owner_history_compacted_offer_is_ordinary_not_an_internal_error ... Error: "#76 CONSUMER'S ARM: the offer path REFUSED an ordinary delivery of the compaction marker at 8 to survivor 1 — a record every member is entitled to receive. `not a marker for this recipient` is not `lost authority`, and the Internal error is reserved for the latter: Internal { message: \"participant marker offer lost its exact current binding or durable obligation for conversation 167\" }"
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::a_non_owner_marker_ack_never_reaches_the_delivery_authority_invariant ... Error: Internal { message: "participant marker offer lost its exact current binding or durable obligation for conversation 167" }
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::a_restarted_store_never_marker_flags_a_non_owner_on_the_replay_path ... Error: "#76 RESTART PARITY, CONSUMER'S ARM: the reloaded offer path refused ordinary delivery of the marker at 8 to survivor 1: Internal { message: \"participant marker offer lost its exact current binding or durable obligation for conversation 167\" }"
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::the_on_disk_restart_arm_never_marker_flags_a_non_owner_with_the_store_engaged ... Error: "#76 RESTART PARITY, CONSUMER'S ARM: the reloaded offer path refused ordinary delivery of the marker at 8 to survivor 1: Internal { message: \"participant marker offer lost its exact current binding or durable obligation for conversation 167\" }"
+FAILED
+test server::participant::production::tests_p0_76_marker_ownership::the_owner_still_holds_its_marker_offer_and_its_ack_still_commits ... ok
+
+failures:
+
+failures:
+    server::participant::production::tests_p0_76_marker_ownership::a_legacy_non_owner_marker_ack_is_answered_benignly_over_a_real_socket
+    server::participant::production::tests_p0_76_marker_ownership::a_non_owner_history_compacted_delivery_mints_no_marker_offer
+    server::participant::production::tests_p0_76_marker_ownership::a_non_owner_history_compacted_offer_is_ordinary_not_an_internal_error
+    server::participant::production::tests_p0_76_marker_ownership::a_non_owner_marker_ack_never_reaches_the_delivery_authority_invariant
+    server::participant::production::tests_p0_76_marker_ownership::a_restarted_store_never_marker_flags_a_non_owner_on_the_replay_path
+    server::participant::production::tests_p0_76_marker_ownership::the_on_disk_restart_arm_never_marker_flags_a_non_owner_with_the_store_engaged
+
+test result: FAILED. 1 passed; 6 failed; 0 ignored; 0 measured; 753 filtered out; finished in 10.39s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101
