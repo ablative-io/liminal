@@ -1053,9 +1053,15 @@ wearing a schema; that is the failure this shape refuses.
 Every TTL, window size and reporting threshold remains a deployment decision,
 and the concrete deployed numbers ratify at Tom's desk before lock.
 
-### 0.18 R18 amendment A7 — authorized operator credential re-issue from `CredentialRecoveryLost` (2026-08-14) — PROPOSED r0
+### 0.18 R18 amendment A7 — authorized operator credential re-issue from `CredentialRecoveryLost` (2026-08-14) — PROPOSED r0.1
 
-**Status: PROPOSED, r0.** Key process not yet opened; this section is normative
+This is R18 **amendment** A7, distinct from the R17 adversarial-**class** A7
+in §0.10's table — the two numbering sequences coincide here for the first
+time.
+
+**Status: PROPOSED, r0.1** (r0 reviewed at the bytes by Waffles the Terrible,
+meridian `745e722c`, approved for dispatch with two text flags; r0.1 folds
+both flags and the numbering note in). Key process not yet opened; this section is normative
 only at ratification. Tom's word opened the build lane on 2026-08-14 (relayed
 verbatim at meridian `d3c7f892`: "I don't want to accept anything. That's not
 fine. We need to fix everything."); build may proceed against this r0 under the
@@ -1101,7 +1107,12 @@ authority. A7 adds nothing before this point.
    for operational truth.
 2. **Guards**, all evaluated at the one serialized participant-state point,
    every refusal typed and committing no receipt, order, cursor, binding,
-   lifecycle record, or retention mutation:
+   lifecycle record, or retention mutation. Before any guard runs, a
+   `conversation_id` or `participant_id` that resolves to nothing refuses
+   typed — the operator-surface rendering of the existing
+   `ParticipantUnknown` family and its unknown-conversation equivalent —
+   disclosing nothing beyond the presented identifiers; the lookup miss is a
+   named refusal, never whatever the code happens to do. Then:
    a. a tombstoned identity refuses `Retired`; re-issue never remints a
       retired identity;
    b. a live **binding** for the identity refuses: a bound member is
@@ -1127,7 +1138,11 @@ authority. A7 adds nothing before this point.
    response. A lost response is repaired by repeating the operation — each
    repetition rotates again under the same guards — and there is deliberately
    no receipt replay for operator issue: R-C0's receipt machinery is untouched
-   by A7.
+   by A7. Guard (d)'s refusal payload is **normative for this repair loop**,
+   not a courtesy: the presented/current generation pair in the CAS refusal
+   is the only way an operator who lost the response learns the
+   post-rotation generation, so a future edit that minimizes that refusal
+   silently breaks lost-response recovery.
 5. **Re-entry.** The member installs the issued credential durably, exits
    `CredentialRecoveryLost`, and performs an ordinary R-C1 credential attach
    presenting G+1 — which itself checked-increments to G+2, rotates, and
@@ -1161,9 +1176,10 @@ no participant-wire change of any kind; no new configuration.
    `EnrollmentKnown`, re-issue, then prove an ordinary attach with the issued
    secret succeeds — asserting G+1 issued, G+2 bound, and the dead secret
    answering `StaleAuthority`.
-2. Every guard red-proven both ways: live-binding refusal, live-receipt
-   refusal, `Retired`, generation-mismatch — each with a byte-identical
-   state census before and after the refusal.
+2. Every refusal red-proven both ways: the two pre-guard lookup misses
+   (unknown participant, unknown conversation), live-binding refusal,
+   live-receipt refusal, `Retired`, generation-mismatch — each with a
+   byte-identical state census before and after the refusal.
 3. Replay equivalence: crash immediately before and after the re-issue row;
    the replayed store reaches the identical generation and verifier.
 4. The control: with re-issue withheld, the fossil shape stays refused
