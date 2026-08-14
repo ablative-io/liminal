@@ -1053,17 +1053,20 @@ wearing a schema; that is the failure this shape refuses.
 Every TTL, window size and reporting threshold remains a deployment decision,
 and the concrete deployed numbers ratify at Tom's desk before lock.
 
-### 0.18 R18 amendment A7 — authorized operator credential re-issue from `CredentialRecoveryLost` (2026-08-14) — PROPOSED r0.1
+### 0.18 R18 amendment A7 — authorized operator credential re-issue from `CredentialRecoveryLost` (2026-08-14) — PROPOSED r0.3
 
 This is R18 **amendment** A7, distinct from the R17 adversarial-**class** A7
 in §0.10's table — the two numbering sequences coincide here for the first
 time.
 
-**Status: PROPOSED, r0.2** (r0 reviewed at the bytes by Waffles the Terrible,
+**Status: PROPOSED, r0.3** (r0 reviewed at the bytes by Waffles the Terrible,
 meridian `745e722c`, approved for dispatch with two text flags; r0.1 folds
 both flags and the numbering note in; r0.2 folds the build's contract flag —
 the fifth refusal and its named residual class — plus the verifier-bytes
-clarification, both seat-ruled on the Leg 1 report). Key process not yet opened; this section is normative
+clarification, both seat-ruled on the Leg 1 report; r0.2 approved by the
+same key at the bytes, meridian `e7fc5710`, and r0.3 folds its two nits —
+guard (e)'s positive half and the sitting-framing line on the verifier
+paragraph). Key process not yet opened; this section is normative
 only at ratification. Tom's word opened the build lane on 2026-08-14 (relayed
 verbatim at meridian `d3c7f892`: "I don't want to accept anything. That's not
 fine. We need to fix everything."); build may proceed against this r0 under the
@@ -1136,8 +1139,13 @@ authority. A7 adds nothing before this point.
       a silent trap. The refusal is placed after (a)-(d) so their order is
       untouched. This guard deliberately does NOT terminalize the cell —
       that would change what an exact detach-token replay is answered with,
-      which is existing semantics and not this amendment's to move. **Named
-      residual class**: because a committed cell terminalizes only at the
+      which is existing semantics and not this amendment's to move. The
+      positive half (r0.3, proven by the guard's own pin): an identity that
+      STILL HOLDS its secret attaches with the original secret at the
+      unmoved generation and binds — for that holder the refusal is a
+      repair-pointer, "refused because you do not need re-issue," not a
+      dead end; the ordinary path stays open at exactly the credential it
+      always was. **Named residual class**: because a committed cell terminalizes only at the
       next attach, an identity that detached CLEANLY and then lost its
       secret holds that cell forever and A7 cannot reclaim it — clean
       shutdown followed by client-store loss is exactly this shape. That
@@ -1155,7 +1163,11 @@ authority. A7 adds nothing before this point.
    (`StoredAttachAllocation`), and the re-issue row follows that same at-rest
    discipline — "never a secret body" is a claim about receipt objects served
    back to presenters, of which this operation mints none, not a claim that
-   the verifier bytes differ from the credential. Replay of that
+   the verifier bytes differ from the credential. Framing for the sitting
+   (r0.3): this paragraph discloses a STORE-WIDE at-rest posture — verifiers
+   are credential bytes under constant-time compare — so a future move to
+   derived verifiers is a store-wide lane, not an A7 objection; the sitting
+   ratifies knowing which of those two things it is ratifying. Replay of that
    row reconstructs the increment and verifier exactly. The transaction binds
    nothing, appends no `Attached`/`Detached` lifecycle record (no binding
    changed), and mints no R-C0 receipt row.
