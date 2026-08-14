@@ -455,10 +455,29 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         publication: &ParticipantPublication,
     ) -> Result<(), ParticipantSemanticError> {
         self.ensure_service_live()?;
-        if !matches!(
-            publication.delivery.record,
-            ParticipantRecord::HistoryCompacted { .. }
-        ) {
+        let ParticipantRecord::HistoryCompacted {
+            affected_participant_id,
+            ..
+        } = publication.delivery.record
+        else {
+            return Ok(());
+        };
+        // THE OWNERSHIP QUESTION, DECIDED BEFORE THE AUTHORITY GUARD BELOW
+        // (`#76`, the key-holder amendment). A compaction marker is delivered
+        // to EVERY member but NAMES exactly one. For every other recipient this
+        // is an ORDINARY delivery covered by cumulative `ParticipantAck`: there
+        // is no marker obligation to record, and there is nothing wrong.
+        //
+        // The distinction this early return exists to keep is between "not a
+        // marker for this recipient" and "lost authority". They are not the
+        // same thing and they must not answer the same way. The Internal error
+        // below stays reserved for the second: an OWNER-marker publication that
+        // genuinely lost its exact current binding or its durable obligation.
+        // Asking the guard the ownership question instead would make every
+        // lawful survivor delivery an internal error and break record delivery
+        // to survivors -- executed at the previous commit, and it takes the
+        // e2e survivor-delivery pin down at the transport.
+        if affected_participant_id != publication.participant_id {
             return Ok(());
         }
         let conversation_id = publication.conversation_id();
