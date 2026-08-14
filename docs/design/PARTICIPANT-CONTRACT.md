@@ -1059,9 +1059,11 @@ This is R18 **amendment** A7, distinct from the R17 adversarial-**class** A7
 in §0.10's table — the two numbering sequences coincide here for the first
 time.
 
-**Status: PROPOSED, r0.1** (r0 reviewed at the bytes by Waffles the Terrible,
+**Status: PROPOSED, r0.2** (r0 reviewed at the bytes by Waffles the Terrible,
 meridian `745e722c`, approved for dispatch with two text flags; r0.1 folds
-both flags and the numbering note in). Key process not yet opened; this section is normative
+both flags and the numbering note in; r0.2 folds the build's contract flag —
+the fifth refusal and its named residual class — plus the verifier-bytes
+clarification, both seat-ruled on the Leg 1 report). Key process not yet opened; this section is normative
 only at ratification. Tom's word opened the build lane on 2026-08-14 (relayed
 verbatim at meridian `d3c7f892`: "I don't want to accept anything. That's not
 fine. We need to fix everything."); build may proceed against this r0 under the
@@ -1126,11 +1128,34 @@ authority. A7 adds nothing before this point.
       with presented and current generations and nothing else — the
       compare-and-set that makes concurrent operator repetitions serialize
       instead of double-rotating.
+   e. **(added r0.2, found by the build's own pin)** a committed detach whose
+      exact-replay cell is still open refuses `DetachReplayOpen`: that cell
+      pins the slot to the generation its detach presented, so a re-issue
+      moving the generation would mint a credential the ordinary re-entry
+      attach then answers with a bare invariant — an unattachable credential,
+      a silent trap. The refusal is placed after (a)-(d) so their order is
+      untouched. This guard deliberately does NOT terminalize the cell —
+      that would change what an exact detach-token replay is answered with,
+      which is existing semantics and not this amendment's to move. **Named
+      residual class**: because a committed cell terminalizes only at the
+      next attach, an identity that detached CLEANLY and then lost its
+      secret holds that cell forever and A7 cannot reclaim it — clean
+      shutdown followed by client-store loss is exactly this shape. That
+      class stays in `CredentialRecoveryLost` under A7 and needs its own
+      clause (cell terminalization under operator authority) as a future
+      narrowing of the same socket; it is out of scope here and stated so
+      the sitting rules on it knowingly.
 3. **The transaction** is one atomic durable commit: checked-increment the
    generation G→G+1 under R-C1's joint-domain proof (no rekey, reset, or
    rebase; the finite-generation law is untouched); mint a fresh secret;
    invalidate G's verifier; append exactly one durable operation row recording
-   the re-issue, carrying the verifier and never a secret body. Replay of that
+   the re-issue, carrying the verifier and never a secret body. Clarified in
+   r0.2: in the current binding the slot's constant-time verifier IS the 32
+   credential bytes, exactly as the attach path already persists them
+   (`StoredAttachAllocation`), and the re-issue row follows that same at-rest
+   discipline — "never a secret body" is a claim about receipt objects served
+   back to presenters, of which this operation mints none, not a claim that
+   the verifier bytes differ from the credential. Replay of that
    row reconstructs the increment and verifier exactly. The transaction binds
    nothing, appends no `Attached`/`Detached` lifecycle record (no binding
    changed), and mints no R-C0 receipt row.
@@ -1178,8 +1203,10 @@ no participant-wire change of any kind; no new configuration.
    answering `StaleAuthority`.
 2. Every refusal red-proven both ways: the two pre-guard lookup misses
    (unknown participant, unknown conversation), live-binding refusal,
-   live-receipt refusal, `Retired`, generation-mismatch — each with a
-   byte-identical state census before and after the refusal.
+   live-receipt refusal, `Retired`, generation-mismatch, and the r0.2
+   `DetachReplayOpen` arm (whose red proof must show the trap it prevents:
+   with the arm removed, the re-entry attach dies on the minted credential)
+   — each with a byte-identical state census before and after the refusal.
 3. Replay equivalence: crash immediately before and after the re-issue row;
    the replayed store reaches the identical generation and verifier.
 4. The control: with re-issue withheld, the fossil shape stays refused
