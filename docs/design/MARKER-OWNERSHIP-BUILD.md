@@ -41,7 +41,10 @@ plus record-type only, never the marker's own affected `participant_id`. The
 comment already claims what the body must enforce. Sole consumer of the
 marker-flavored answer on the offer path:
 `record_publication_offer`, `handler_semantic.rs:453-498` (obligation guard
-:482-484, `offered_markers` insert :492).
+:482-484, `offered_markers` insert :492). Sole-consumer status verified by
+census at the second key's hands (Waffles, msg `0fa20050`): `git grep
+is_marker_obligation 60530fd -- crates/` returns exactly two lines — the
+definition and handler_semantic.rs:483.
 
 **Fix shape:**
 
@@ -50,14 +53,28 @@ marker-flavored answer on the offer path:
    participant. Record delivery UNTOUCHED — recipients unchanged, non-owners
    still receive the record; their delivery becomes an ordinary obligation
    covered by cumulative ack.
-2. Consequence to verify by pin, not assume: with the offer never
+2. ⛔ THE CONSUMER'S ARM (key-holder amendment, Waffles msg `0fa20050` — the
+   fold is mandatory, the placement is the implementer's call):
+   `record_publication_offer` runs for EVERY `HistoryCompacted` publication
+   and treats `!current || !obligation` as an INTERNAL ERROR (:485). If the
+   ownership condition lives ONLY inside `is_marker_obligation`, every lawful
+   non-owner delivery of the record hits obligation=false and ERRORS — record
+   delivery to survivors breaks, worse than the defect. The ownership question
+   decides marker-vs-ordinary BEFORE that guard: a `HistoryCompacted`
+   publication whose affected `participant_id` is not the recipient is an
+   ORDINARY delivery — return Ok with no `offered_markers` insert. The
+   Internal error stays reserved for OWNER-marker publications that genuinely
+   lost binding or obligation. Early-return in `record_publication_offer` or a
+   hoisted predicate — implementer's choice; the distinction "not a marker for
+   this recipient" ≠ "lost authority" is not negotiable.
+3. Consequence to verify by pin, not assume: with the offer never
    marker-flagged for non-owners, a legacy non-owner MarkerAck lands the
    offered=None arm and answers the existing benign `NoMarkerExpected`
    re-sync — never the invariant.
-3. The invariant `marker_progress.rs:76-78` is UNMODIFIED (standing law,
+4. The invariant `marker_progress.rs:76-78` is UNMODIFIED (standing law,
    carried from the fossil-reclaim brief). It is correct; the fix removes the
    unlawful offer that walked a non-owner into it.
-4. SDK measurement (report, possibly zero delta): does the published client
+5. SDK measurement (report, possibly zero delta): does the published client
    send MarkerAck for a marker naming ANOTHER participant? If yes, the client
    half is the same ownership condition (additive); flag any SDK delta to the
    seat BEFORE building it — release-shape question.
@@ -85,6 +102,10 @@ marker-flavored answer on the offer path:
    path either (the predicate must govern replay-derived offers identically).
    Measure whether pre-fix stores hold any durable poison needing a healing
    story — offers are believed volatile; MEASURE, then say so either way.
+   The 950M field fixture IS a pre-fix store carrying the poison shape, so
+   this measurement has a field arm waiting: if the answer is volatile-only,
+   the fixture's clean first boot (operator-side, post-consume) proves it in
+   production bytes.
 6. On-disk arm for pin 5 with the instrument control (the standing discipline:
    prove the disk store engaged).
 
