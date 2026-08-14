@@ -1,0 +1,44 @@
+=== A7 leg 1 -- lane assertion: the protocol crate is UNTOUCHED ===
+$ git rev-parse HEAD
+4c8c04f9aa704adf2794ecfea798fb7f6c171d73
+
+$ git diff --stat 19ea485..HEAD -- crates/liminal-protocol
+<<< the command above printed NOTHING: the diff is EMPTY >>>
+
+=== POSITIVE CONTROL: the same command over a path that DID change ===
+$ git diff --stat 19ea485..HEAD -- crates/liminal-server | tail -1
+ 15 files changed, 2571 insertions(+), 6 deletions(-)
+
+=== name-only census of every path this lane touched ===
+crates/liminal-server/src/health/endpoint.rs
+crates/liminal-server/src/health/mod.rs
+crates/liminal-server/src/health/reissue.rs
+crates/liminal-server/src/server/connection/services.rs
+crates/liminal-server/src/server/participant/production/e2e_cold_all_shapes_fixture.rs
+crates/liminal-server/src/server/participant/production/handler.rs
+crates/liminal-server/src/server/participant/production/log_v3.rs
+crates/liminal-server/src/server/participant/production/mod.rs
+crates/liminal-server/src/server/participant/production/ops_reissue.rs
+crates/liminal-server/src/server/participant/production/ops_session_replay.rs
+crates/liminal-server/src/server/participant/production/outbox_projection.rs
+crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs
+crates/liminal-server/src/server/participant/production/tests_p0_64_live_extension.rs
+crates/liminal-server/src/server/participant/production/tests_w1b_census.rs
+crates/liminal-server/src/server/runtime.rs
+docs/design/FOSSIL-RECLAIM-BUILD.md
+docs/design/PARTICIPANT-CONTRACT.md
+gate-logs/fossil-reclaim/00-red-proof-index.log
+gate-logs/fossil-reclaim/01-red-preA7-operation-absent.log
+gate-logs/fossil-reclaim/02-red-guard-b-live-binding-deleted.log
+gate-logs/fossil-reclaim/03-red-guard-c-live-receipt-deleted.log
+gate-logs/fossil-reclaim/04-red-guard-a-retired-probe-deleted.log
+gate-logs/fossil-reclaim/05-red-guard-d-compare-and-set-deleted.log
+gate-logs/fossil-reclaim/06-red-preguard-unknown-conversation-deleted.log
+gate-logs/fossil-reclaim/07-red-preguard-unknown-participant-misnamed.log
+gate-logs/fossil-reclaim/08-red-detach-replay-cell-trap.log
+gate-logs/fossil-reclaim/08b-red-detach-replay-cell-trap-revealed.log
+gate-logs/fossil-reclaim/09-red-replay-missing-log-head-advance.log
+gate-logs/fossil-reclaim/10-red-no-polling-audit-sees-a-real-wait.log
+gate-logs/fossil-reclaim/11-red-withheld-control-positive-control.log
+gate-logs/fossil-reclaim/12-red-route-method-and-parse-guards-deleted.log
+TRUE EXIT: 0

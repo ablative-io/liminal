@@ -1,0 +1,4 @@
+    Checking liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Checking liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.69s
+TRUE EXIT: 0
