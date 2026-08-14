@@ -23,6 +23,10 @@ use liminal_protocol::lifecycle::{CapacityCounter, ObserverRecoveryAggregate};
 use liminal_protocol::wire::ConversationId;
 
 use crate::config::types::ParticipantConfig;
+use crate::health::reissue::{
+    OperatorCredentialReissueError, OperatorCredentialReissueOutcome,
+    OperatorCredentialReissueRequest, OperatorCredentialReissuer,
+};
 use crate::health::unloadable::{UnloadableConversation, UnloadableConversationRecord};
 use crate::server::participant::{
     ObserverPublicationTarget, ParticipantConnectionContext, ParticipantConnectionConversations,
@@ -843,6 +847,35 @@ impl ProductionParticipantHandler {
         Ok(())
     }
 
+    /// Runs one `OperatorCredentialReissue` at the serialized
+    /// participant-state point (R18 amendment A7, §0.18).
+    ///
+    /// It reaches the conversation through the SAME owner lock, cold-replay,
+    /// and post-commit reconciliation seam as enrollment and credential
+    /// attach — never a second path — so every guard reads the same exact
+    /// state those operations read, and an unknown conversation is evicted
+    /// with no residue exactly as a refused probe already is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParticipantSemanticError`] when the operation could not be
+    /// DECIDED (a latched service fatal, an unloadable conversation, a durable
+    /// failure). Every decided refusal is an `Ok`.
+    pub(crate) fn operator_credential_reissue(
+        &self,
+        request: OperatorCredentialReissueRequest,
+    ) -> Result<OperatorCredentialReissueOutcome, ParticipantSemanticError> {
+        self.ensure_service_live()?;
+        let now_ms = self
+            .now_ms()
+            .map_err(|error| ParticipantSemanticError::Internal {
+                message: format!("participant clock read failed: {error}"),
+            })?;
+        self.with_conversation_fate_source(request.conversation_id, None, |authority, appender, _| {
+            authority.apply_operator_credential_reissue(request, now_ms, appender)
+        })
+    }
+
     pub(super) fn operation_facts(
         &self,
         context: ParticipantConnectionContext,
@@ -876,6 +909,22 @@ impl ProductionParticipantHandler {
             connection_tracking: conversations.tracking(conversation_id),
             connection_capacity,
         })
+    }
+}
+
+/// The operator surface reaches the participant through the handler itself
+/// (R18 amendment A7, §0.18): possession of the operator surface is the
+/// authority, and this impl is the only bridge between it and the serialized
+/// participant-state point.
+impl OperatorCredentialReissuer for ProductionParticipantHandler {
+    fn reissue(
+        &self,
+        request: OperatorCredentialReissueRequest,
+    ) -> Result<OperatorCredentialReissueOutcome, OperatorCredentialReissueError> {
+        self.operator_credential_reissue(request)
+            .map_err(|error| OperatorCredentialReissueError {
+                message: error.to_string(),
+            })
     }
 }
 

@@ -283,6 +283,7 @@ pub(super) fn assert_decoded_source_census(
             StoredOperation::NonzeroDebtAck { .. } => "nonzero_debt_ack",
             StoredOperation::MarkerDrained { .. } => "marker_drained",
             StoredOperation::RecordAdmission { .. } => "record_admission",
+            StoredOperation::CredentialReissued { .. } => "credential_reissued",
             StoredOperation::Left { .. } => "left",
             StoredOperation::Died { .. }
             | StoredOperation::Ordinary { .. }

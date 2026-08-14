@@ -69,6 +69,13 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
             if let Some(record) = services.unloadable_conversation_record() {
                 health_server.install_unloadable_record(record);
             }
+            // R18 amendment A7 (§0.18): the operator credential-re-issue
+            // authority, published on the same line of reasoning and at the
+            // same moment. A profile with no participant installs nothing and
+            // the route says so.
+            if let Some(reissuer) = services.credential_reissuer() {
+                health_server.install_credential_reissuer(reissuer);
+            }
             let channel_cluster = services.channel_cluster().clone();
             let connection_supervisor = ConnectionSupervisor::with_fatal_shutdown(
                 services,

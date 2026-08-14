@@ -27,6 +27,7 @@ use super::services_schema::{ChannelSchema, resolve_channel_schema, resolve_sche
 use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
 use crate::config::types::{ClusterConfig, ServerConfig, ServiceProfile};
+use crate::health::reissue::OperatorCredentialReissuer;
 use crate::health::unloadable::UnloadableConversationRecord;
 use crate::server::participant::{InstalledParticipantService, ProductionParticipantHandler};
 
@@ -354,6 +355,13 @@ pub struct LiminalConnectionServices {
     /// participant is configured", which the operator surface reports as such
     /// rather than as an empty refusal set.
     unloadable_conversations: Option<UnloadableConversationRecord>,
+    /// The production handler as the A7 operator credential-re-issue authority
+    /// (§0.18), captured at construction for exactly the reason above: the
+    /// concrete handler is unreachable once erased behind
+    /// `dyn ParticipantSemanticHandler`, so the operator surface's handle on it
+    /// has to be taken in the one place it still exists. `None` is "no
+    /// participant is configured", which the route reports as such.
+    credential_reissuer: Option<Arc<dyn OperatorCredentialReissuer>>,
     /// In-memory (haematite-backed) dedup cache for dedup-on-delivery. Keyed by
     /// the per-message idempotency key carried on the publish frame; a duplicate
     /// key is suppressed before fan-out so a subscriber receives it at most once.
@@ -474,8 +482,14 @@ impl LiminalConnectionServices {
                 // every conversation it refused by the time `new` returns, so
                 // the record captured here is complete from the first scrape.
                 let unloadable_conversations = handler.unloadable_record();
+                let handler = Arc::new(handler);
+                // A7 (§0.18): taken here for the same reason, and from the same
+                // one live handler, so the operator surface and the participant
+                // wire cannot end up talking to two different owners.
+                let credential_reissuer: Arc<dyn OperatorCredentialReissuer> =
+                    Arc::<ProductionParticipantHandler>::clone(&handler);
                 let service = InstalledParticipantService::new(
-                    Arc::new(handler),
+                    handler,
                     Arc::clone(&durable_store),
                     participant.wire_frame_limit,
                 )
@@ -486,10 +500,14 @@ impl LiminalConnectionServices {
                         participant.wire_frame_limit
                     ),
                 })?;
-                Ok::<_, ServerError>((service, unloadable_conversations))
+                Ok::<_, ServerError>((
+                    service,
+                    (unloadable_conversations, credential_reissuer),
+                ))
             })
             .transpose()?;
-        let (participant_service, unloadable_conversations) = installed_participant.unzip();
+        let (participant_service, operator_surfaces) = installed_participant.unzip();
+        let (unloadable_conversations, credential_reissuer) = operator_surfaces.unzip();
         Ok(Self {
             channels: RwLock::new(channels),
             max_channels: config.limits.max_channels,
@@ -497,6 +515,7 @@ impl LiminalConnectionServices {
             durable_store,
             participant_service,
             unloadable_conversations,
+            credential_reissuer,
             dedup,
             conversation_supervisor,
             responders: Mutex::new(HashMap::new()),
@@ -524,6 +543,7 @@ impl LiminalConnectionServices {
             durable_store,
             participant_service: None,
             unloadable_conversations: None,
+            credential_reissuer: None,
             dedup,
             conversation_supervisor,
             responders: Mutex::new(HashMap::new()),
@@ -557,6 +577,19 @@ impl LiminalConnectionServices {
     #[must_use]
     pub fn unloadable_conversation_record(&self) -> Option<UnloadableConversationRecord> {
         self.unloadable_conversations.clone()
+    }
+
+    /// The A7 operator credential-re-issue authority, when a participant is
+    /// configured (§0.18).
+    ///
+    /// The startup path publishes this onto the health endpoint so
+    /// `POST /operator/credential-reissue` reaches the SAME serialized
+    /// participant-state point every wire operation does. `None` means no
+    /// participant is configured, which the route reports as a distinct state
+    /// from an unknown identity.
+    #[must_use]
+    pub fn credential_reissuer(&self) -> Option<Arc<dyn OperatorCredentialReissuer>> {
+        self.credential_reissuer.clone()
     }
 
     /// Installs a complete participant bundle in full-service supervisor tests.

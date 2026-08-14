@@ -436,6 +436,12 @@ impl ConversationAuthority {
                 self.replay_record_admission(&row, config).map(|()| None)
             }
             StoredOperation::MarkerDrained { row } => self.replay_marker_drain(&row).map(Some),
+            // R18 amendment A7 (§0.18 acceptance 3): the row replays through
+            // the same installer the live commit ran, so the replayed store
+            // reaches the identical generation and verifier.
+            StoredOperation::CredentialReissued { row } => self
+                .replay_credential_reissue(&row, sequence)
+                .map(|()| None),
             StoredOperation::Left { row } => self.replay_leave(&row).map(|()| None),
         }
     }

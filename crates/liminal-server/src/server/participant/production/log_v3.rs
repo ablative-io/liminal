@@ -69,6 +69,15 @@ pub(super) enum StoredOperationV3 {
     MarkerDrained {
         row: StoredMarkerDrain,
     },
+    /// One authorized operator credential re-issue (R18 amendment A7, §0.18).
+    ///
+    /// It is a credential row, NOT a lifecycle row: it claims no transaction
+    /// order and no delivery sequence, mints no shell event, and therefore
+    /// carries none. Replay reconstructs the increment and the verifier from
+    /// the stored fields alone.
+    CredentialReissued {
+        row: StoredCredentialReissue,
+    },
     RecordAdmission {
         row: StoredRecordAdmission,
     },
@@ -135,6 +144,35 @@ impl StoredOperationV3 {
             Err(OperationLogError::FencedAttachProof { sequence, reason })
         })
     }
+}
+
+/// Complete exact v3 operator credential re-issue row (R18 amendment A7).
+///
+/// # What this row carries, and what it must never carry
+///
+/// §0.18 item 3: the row records the re-issue "carrying the verifier and never
+/// a secret body". In this binding the constant-time verifier for a slot's
+/// current credential IS the thirty-two secret bytes — `attach_token_phase`
+/// compares a presented secret against `slot.attach_secret` directly — exactly
+/// as [`StoredAttachAllocation::attach_secret`] already persists the verifier
+/// a committed attach minted. The distinction the contract draws is against a
+/// receipt's secret BODY: a receipt is a durable object that is SERVED BACK to
+/// a presenter, and this operation mints none. The secret transits exactly
+/// once, in the operator response, and no replay of this row ever re-serves it.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredCredentialReissue {
+    /// Identity whose credential was re-issued.
+    pub(super) participant_id: ParticipantId,
+    /// Generation the operator's compare-and-set matched (G).
+    pub(super) presented_generation: u64,
+    /// Generation this re-issue minted (G+1).
+    pub(super) issued_generation: u64,
+    /// Constant-time verifier of the credential this re-issue minted.
+    pub(super) attach_secret_verifier: [u8; 32],
+    /// Admitted clock reading of the operation, as operator audit provenance.
+    /// Nothing is derived from it: the row mints no deadline, so replay is
+    /// independent of it and reproduces the same poststate on any clock.
+    pub(super) admitted_now_ms: u64,
 }
 
 /// Common allocation shared by all schema-v3 Attached modes.
