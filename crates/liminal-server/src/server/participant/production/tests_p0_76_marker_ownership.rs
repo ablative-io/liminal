@@ -45,8 +45,8 @@ use liminal::durability::{DurableStore, open_ephemeral};
 
 use liminal_protocol::wire::{
     ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken, LeaveAttemptToken,
-    LeaveRequest, MarkerAck, ParticipantDelivery, ParticipantId, ParticipantRecord, RecordAdmission,
-    RecordAdmissionAttemptToken, ServerPush, ServerValue,
+    LeaveRequest, MarkerAck, MarkerMismatchBody, ParticipantDelivery, ParticipantId,
+    ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken, ServerPush, ServerValue,
 };
 
 use crate::server::participant::{
@@ -634,14 +634,28 @@ fn a_legacy_non_owner_marker_ack_is_answered_benignly_over_a_real_socket()
         )
         .into());
     }
-    if !matches!(
-        answered,
-        ServerValue::MarkerMismatch(_) | ServerValue::MarkerNotDelivered(_) | ServerValue::AckNoOp(_)
-    ) {
+    // THE EXACT BODY IS LOAD-BEARING, not merely the absence of a fatal.
+    // "Some typed refusal" is too weak a thing to pin here: the field client's
+    // carve-out downgrades `MarkerMismatch { NoMarkerExpected }` to a re-sync
+    // and BAILS on every other mismatch body, so an answer that is typed but
+    // differently bodied is still fatal one layer up. The brief's fix-shape
+    // item 3 names this answer and says to verify it by pin rather than assume
+    // it, so the pin names it too.
+    let ServerValue::MarkerMismatch(mismatch) = &answered else {
         return Err(format!(
-            "survivor {}'s legacy MarkerAck was answered {answered:?}, which is not one of the \
-             benign marker re-sync answers",
+            "survivor {}'s legacy MarkerAck was answered {answered:?}, not the MarkerMismatch \
+             re-sync the offered=None arm is supposed to produce",
             non_owner.participant_id
+        )
+        .into());
+    };
+    if !matches!(mismatch.mismatch, MarkerMismatchBody::NoMarkerExpected) {
+        return Err(format!(
+            "survivor {}'s legacy MarkerAck was answered MarkerMismatch {{ {:?} }}. Only \
+             NoMarkerExpected is benign at the client: its carve-out treats that body as a \
+             re-sync signal and bails on every other one, so this refusal is typed on the wire \
+             and fatal one layer up.",
+            non_owner.participant_id, mismatch.mismatch
         )
         .into());
     }
