@@ -34,7 +34,7 @@
 //! pair that repair needs.
 
 use liminal_protocol::lifecycle::{
-    BindingState, EnrollmentFingerprint, LiveMember, LiveMemberRestore, RetiredIdentity,
+    BindingState, DetachCell, EnrollmentFingerprint, LiveMember, LiveMemberRestore, RetiredIdentity,
 };
 use liminal_protocol::wire::{AttachSecret, Generation};
 
@@ -161,6 +161,34 @@ impl ConversationAuthority {
                 receipt,
             }));
         }
+        // ⚠ NOT a §0.18 guard, and placed AFTER all four named ones so their
+        // ratified order (a, b, c, d) is untouched by its presence.
+        //
+        // A committed detach whose exact-replay cell is still open pins the
+        // slot to the generation that detach presented:
+        // `transition_detach_cell`'s `DetachCell::Committed` arm refuses an
+        // attach whose member generation has moved past it, and a re-issue
+        // moves it. Without this arm the operation would mint a lawful-looking
+        // credential that §0.18 item 5's ORDINARY re-entry attach then answers
+        // with a bare `AttachCommitError::DetachCellAuthority` invariant — an
+        // unattachable credential. Measured, not assumed: the red proof for
+        // `an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential`
+        // deletes this arm and watches the re-entry attach die.
+        //
+        // Terminalizing the cell here instead would change what an exact
+        // detach-token replay is answered with. That is existing
+        // refusal/restoration semantics and is not this lane's to move, so the
+        // shape is refused rather than repaired, and the gap goes back to the
+        // seat as a contract flag.
+        if matches!(slot.cell, DetachCell::Committed(_)) {
+            return Ok(refused(
+                OperatorCredentialReissueRefusal::DetachReplayOpen {
+                    conversation_id,
+                    participant_id,
+                    current_generation: current_generation.get(),
+                },
+            ));
+        }
         // Guard (d): the compare-and-set. Its refusal payload is NORMATIVE —
         // see `health::reissue::OperatorCredentialReissueRefusal`.
         if request.expected_current_generation != current_generation.get() {
@@ -226,6 +254,17 @@ impl ConversationAuthority {
     /// reaches the identical generation and the identical verifier by
     /// construction rather than by a second implementation agreeing with the
     /// first.
+    ///
+    /// ⛔ The log-head advance is part of the replay, not decoration. Every
+    /// replay arm owns it (attach takes it inside `attach_commit`, genesis sets
+    /// it outright), and a row that installs its poststate without advancing
+    /// leaves the restored owner one sequence BEHIND its own durable log —
+    /// which then makes the very next live append collide with a row that is
+    /// already there. That defect was caught red by
+    /// `the_reissue_row_replays_identically_across_both_crash_boundaries`,
+    /// whose credential assertions passed while the following attach died on
+    /// "sequence conflict: expected 6, actual 7". A replay pin that stops at
+    /// the poststate cannot see it.
     pub(super) fn replay_credential_reissue(
         &mut self,
         row: &StoredCredentialReissue,
@@ -236,7 +275,8 @@ impl ConversationAuthority {
                 super::log::OperationLogError::CorruptRow { sequence },
             ));
         }
-        self.install_reissued_credential(row)
+        self.install_reissued_credential(row)?;
+        self.advance_log_head()
     }
 
     /// Installs one re-issued credential onto its slot.

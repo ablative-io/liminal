@@ -100,6 +100,31 @@ pub enum OperatorCredentialReissueRefusal {
         /// Which live binding state refused: `bound` or `pending_finalization`.
         binding_state: &'static str,
     },
+    /// ⚠ NOT one of §0.18's four guards — a defect this build MEASURED, named
+    /// rather than absorbed, and returned to the seat as a contract flag.
+    ///
+    /// The identity's last committed detach still holds its exact-replay cell
+    /// open. `commit_attach` requires that cell's request generation to equal
+    /// the member's current generation (`lifecycle::attach.rs`,
+    /// `transition_detach_cell`'s `DetachCell::Committed` arm), and a re-issue
+    /// moves the generation while the cell stays where it is. So a re-issue
+    /// against this shape would mint a lawful-looking credential that the
+    /// ORDINARY attach path of §0.18 item 5 then refuses with a bare
+    /// `AttachCommitError::DetachCellAuthority` invariant — an unattachable
+    /// credential, which is the silent trap this estate refuses to ship.
+    ///
+    /// Refusing is the only answer available inside this lane's authority:
+    /// terminalizing the cell here would change what an exact detach-token
+    /// replay is answered with, which is existing refusal/restoration
+    /// semantics and not this lane's to move.
+    DetachReplayOpen {
+        /// The presented conversation id.
+        conversation_id: ConversationId,
+        /// The identity holding the open replay cell.
+        participant_id: ParticipantId,
+        /// Current credential generation.
+        current_generation: u64,
+    },
     /// Guard (c): a live attach or enrollment receipt. A live receipt means the
     /// R-C0 recovery window is still open and the ordinary recovery path must
     /// be exhausted first.
