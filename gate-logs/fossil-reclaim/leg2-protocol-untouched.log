@@ -1,0 +1,10 @@
+=== LANE ASSERTION (post-revert): git diff --stat 19ea485..HEAD -- crates/liminal-protocol
+=== branch fossil-reclaim-a7 at 95c916597897fea2393fbf1555cad5474df57e7d
+=== date: 2026-08-14T08:25:56Z
+--- 19ea485..HEAD over crates/liminal-protocol:
+(end -- empty above means UNTOUCHED)
+--- POSITIVE CONTROL, same command over crates/liminal-server (must NOT be empty):
+ crates/liminal-server/src/server/runtime.rs        |    7 +
+ 15 files changed, 2571 insertions(+), 6 deletions(-)
+--- SECOND CONTROL, leg-2's own delta over crates/ vs the leg-1 tip b0251d5 (must be EMPTY after the withdrawal):
+(end -- empty above means the withdrawal is complete)

@@ -83,9 +83,14 @@ pub(super) fn capture_projection_prestate(
 /// only a mechanical comparison sees either.
 pub(super) const fn owes_extension_row(operation: &StoredOperation) -> bool {
     match operation {
+        // A7 (§0.18): a credential re-issue produces no participant record —
+        // it binds nothing and appends no lifecycle record — so it owes no
+        // Unit 2 extension row, exactly as `project_committed_source` answers
+        // `None` for it one arm below.
         StoredOperation::Genesis { .. }
         | StoredOperation::Ordinary { .. }
-        | StoredOperation::Recovered { .. } => false,
+        | StoredOperation::Recovered { .. }
+        | StoredOperation::CredentialReissued { .. } => false,
         StoredOperation::Enrolled { .. }
         | StoredOperation::Attached { .. }
         | StoredOperation::ZeroDebtAck { .. }
@@ -120,7 +125,8 @@ pub(super) fn project_committed_source(
     let projected = match operation {
         StoredOperation::Genesis { .. }
         | StoredOperation::Ordinary { .. }
-        | StoredOperation::Recovered { .. } => None,
+        | StoredOperation::Recovered { .. }
+        | StoredOperation::CredentialReissued { .. } => None,
         StoredOperation::Enrolled { allocation, .. } => Some(produced(
             authority,
             source_log_sequence,

@@ -103,8 +103,12 @@ impl SourceCensus {
                 self.acks += 1;
             }
             StoredOperation::Left { .. } => self.left += 1,
+            // A7 credential re-issue joins the rows that produce no participant
+            // record at all: it is already counted by `non_owing` above, which
+            // is what this census measures it for.
             StoredOperation::Ordinary { .. }
             | StoredOperation::Recovered { .. }
+            | StoredOperation::CredentialReissued { .. }
             | StoredOperation::Died { .. } => {}
         }
     }

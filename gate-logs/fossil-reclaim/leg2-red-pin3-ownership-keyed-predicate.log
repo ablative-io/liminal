@@ -1,0 +1,25 @@
+=== RED PROOF: a_backed_marker_obligation_survives_the_load_end_reconcile_and_its_ack_still_commits
+=== MUTATION: coherence predicate keyed on marker OWNERSHIP, not on the record's survival
+=== rev under test: b0251d5f3bdcfce6143f977e7cacedfc1e568d22 + working tree with the widened predicate
+=== date: 2026-08-14T07:45:23Z
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 04s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 1 test
+
+thread 'server::participant::production::tests_a7_reconcile_coherence::a_backed_marker_obligation_survives_the_load_end_reconcile_and_its_ack_still_commits' (8678198) panicked at crates/liminal-server/src/server/participant/production/tests_a7_reconcile_coherence.rs:477:9:
+the load-end reconcile retired the CO-RECIPIENT's live obligation -- a predicate keyed on marker ownership rather than on the record's survival
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test server::participant::production::tests_a7_reconcile_coherence::a_backed_marker_obligation_survives_the_load_end_reconcile_and_its_ack_still_commits ... FAILED
+
+failures:
+
+failures:
+    server::participant::production::tests_a7_reconcile_coherence::a_backed_marker_obligation_survives_the_load_end_reconcile_and_its_ack_still_commits
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 756 filtered out; finished in 7.50s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

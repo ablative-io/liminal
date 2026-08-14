@@ -1,0 +1,123 @@
+=== RED PROOF: 01-red-preA7-operation-absent ===
+=== base tree: 75e85b910232be8d1d7352d52a4bc011d90e1194 ===
+=== the mechanism this pin measures, DISABLED: ===
+diff --git a/crates/liminal-server/src/server/participant/production/ops_reissue.rs b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+index c726e1a..0925b73 100644
+--- a/crates/liminal-server/src/server/participant/production/ops_reissue.rs
++++ b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+@@ -94,6 +94,13 @@ impl ConversationAuthority {
+         let conversation_id = request.conversation_id;
+         let participant_id = request.participant_id;
+         let now = u128::from(now_ms);
++        // RED PROOF 01: the pre-A7 world -- no operator re-issue exists, so
++        // every call answers as a node with no such operation would.
++        if now_ms > 0 {
++            return Ok(refused(
++                OperatorCredentialReissueRefusal::ConversationUnknown { conversation_id },
++            ));
++        }
+         // Pre-guard lookup 1: a conversation with no durable log resolves to
+         // nothing. `next_log_sequence == 0` is the handler's own definition of
+         // a durably empty conversation (it is what `evict_uncommitted` keys
+=== end of disabling diff ===
+
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.15s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 15 tests
+test server::participant::production::tests_a7_operator_reissue::a_live_binding_refuses_with_no_state_delta ... FAILED
+test server::participant::production::tests_a7_operator_reissue::a_retired_identity_refuses_retired_with_no_state_delta ... FAILED
+test server::participant::production::tests_a7_operator_reissue::the_reissue_operation_introduces_no_timer_sweep_or_retry_loop ... ok
+test server::participant::production::tests_a7_operator_reissue::the_reissue_operation_still_declares_its_no_polling_property ... ok
+test server::participant::production::tests_a7_operator_reissue::an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential ... FAILED
+test server::participant::production::tests_a7_operator_reissue::a_live_enrollment_receipt_refuses_with_no_state_delta ... FAILED
+test server::participant::production::tests_a7_operator_reissue::an_unknown_conversation_refuses_typed_and_leaves_no_residue ... ok
+test server::participant::production::tests_a7_operator_reissue::the_fossil_shape_is_reclaimed_by_one_operator_reissue ... FAILED
+test server::participant::production::tests_a7_operator_reissue::a_generation_mismatch_refuses_carrying_the_repair_loops_read_path ... FAILED
+test server::participant::production::tests_a7_operator_reissue::a_repeated_reissue_serializes_on_the_compare_and_set ... FAILED
+test server::participant::production::tests_a7_operator_reissue::an_unknown_participant_refuses_typed_with_no_state_delta ... FAILED
+test server::participant::production::tests_a7_operator_reissue::a_live_attach_receipt_refuses_with_no_state_delta ... FAILED
+test server::participant::production::tests_a7_operator_reissue::the_reissue_appends_exactly_one_row_and_no_lifecycle_record ... FAILED
+test server::participant::production::tests_a7_operator_reissue::the_reissue_row_replays_identically_across_both_crash_boundaries ... FAILED
+test server::participant::production::tests_a7_operator_reissue::without_a_reissue_the_fossil_stays_refused_forever ... ok
+
+failures:
+
+---- server::participant::production::tests_a7_operator_reissue::a_live_binding_refuses_with_no_state_delta stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::a_live_binding_refuses_with_no_state_delta' (8271566) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:759:5:
+assertion `left == right` failed
+  left: ConversationUnknown { conversation_id: 7406 }
+ right: LiveBinding { conversation_id: 7406, participant_id: 0, current_generation: 1, binding_state: "bound" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- server::participant::production::tests_a7_operator_reissue::a_retired_identity_refuses_retired_with_no_state_delta stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::a_retired_identity_refuses_retired_with_no_state_delta' (8271569) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:724:5:
+assertion `left == right` failed
+  left: ConversationUnknown { conversation_id: 7405 }
+ right: Retired { conversation_id: 7405, participant_id: 0, retired_generation: 1 }
+
+---- server::participant::production::tests_a7_operator_reissue::an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential' (8271570) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:1026:5:
+assertion `left == right` failed
+  left: ConversationUnknown { conversation_id: 7411 }
+ right: DetachReplayOpen { conversation_id: 7411, participant_id: 0, current_generation: 1 }
+
+---- server::participant::production::tests_a7_operator_reissue::a_live_enrollment_receipt_refuses_with_no_state_delta stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::a_live_enrollment_receipt_refuses_with_no_state_delta' (8271567) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:798:5:
+assertion `left == right` failed
+  left: ConversationUnknown { conversation_id: 7407 }
+ right: LiveReceipt { conversation_id: 7407, participant_id: 0, current_generation: 1, receipt: "enrollment" }
+
+---- server::participant::production::tests_a7_operator_reissue::the_fossil_shape_is_reclaimed_by_one_operator_reissue stdout ----
+Error: "re-issue was refused: ConversationUnknown { conversation_id: 7401 }"
+
+---- server::participant::production::tests_a7_operator_reissue::a_generation_mismatch_refuses_carrying_the_repair_loops_read_path stdout ----
+Error: "the compare-and-set must refuse by name, got: ConversationUnknown { conversation_id: 7409 }"
+
+---- server::participant::production::tests_a7_operator_reissue::a_repeated_reissue_serializes_on_the_compare_and_set stdout ----
+Error: "re-issue was refused: ConversationUnknown { conversation_id: 7410 }"
+
+---- server::participant::production::tests_a7_operator_reissue::an_unknown_participant_refuses_typed_with_no_state_delta stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::an_unknown_participant_refuses_typed_with_no_state_delta' (8271572) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:676:5:
+assertion `left == right` failed
+  left: ConversationUnknown { conversation_id: 7404 }
+ right: ParticipantUnknown { conversation_id: 7404, participant_id: 4242 }
+
+---- server::participant::production::tests_a7_operator_reissue::a_live_attach_receipt_refuses_with_no_state_delta stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::a_live_attach_receipt_refuses_with_no_state_delta' (8271565) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:854:5:
+assertion `left == right` failed
+  left: ConversationUnknown { conversation_id: 7408 }
+ right: LiveReceipt { conversation_id: 7408, participant_id: 0, current_generation: 2, receipt: "attach" }
+
+---- server::participant::production::tests_a7_operator_reissue::the_reissue_appends_exactly_one_row_and_no_lifecycle_record stdout ----
+Error: "re-issue was refused: ConversationUnknown { conversation_id: 7413 }"
+
+---- server::participant::production::tests_a7_operator_reissue::the_reissue_row_replays_identically_across_both_crash_boundaries stdout ----
+Error: "re-issue was refused: ConversationUnknown { conversation_id: 7412 }"
+
+
+failures:
+    server::participant::production::tests_a7_operator_reissue::a_generation_mismatch_refuses_carrying_the_repair_loops_read_path
+    server::participant::production::tests_a7_operator_reissue::a_live_attach_receipt_refuses_with_no_state_delta
+    server::participant::production::tests_a7_operator_reissue::a_live_binding_refuses_with_no_state_delta
+    server::participant::production::tests_a7_operator_reissue::a_live_enrollment_receipt_refuses_with_no_state_delta
+    server::participant::production::tests_a7_operator_reissue::a_repeated_reissue_serializes_on_the_compare_and_set
+    server::participant::production::tests_a7_operator_reissue::a_retired_identity_refuses_retired_with_no_state_delta
+    server::participant::production::tests_a7_operator_reissue::an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential
+    server::participant::production::tests_a7_operator_reissue::an_unknown_participant_refuses_typed_with_no_state_delta
+    server::participant::production::tests_a7_operator_reissue::the_fossil_shape_is_reclaimed_by_one_operator_reissue
+    server::participant::production::tests_a7_operator_reissue::the_reissue_appends_exactly_one_row_and_no_lifecycle_record
+    server::participant::production::tests_a7_operator_reissue::the_reissue_row_replays_identically_across_both_crash_boundaries
+
+test result: FAILED. 4 passed; 11 failed; 0 ignored; 0 measured; 738 filtered out; finished in 3.17s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

@@ -56,6 +56,7 @@ mod ops_enroll_capacity;
 mod ops_frontier;
 mod ops_leave;
 mod ops_nonzero_ack;
+mod ops_reissue;
 mod ops_session;
 mod ops_session_replay;
 mod ops_terminal_drain;
@@ -105,6 +106,9 @@ mod tests_37_observed_provenance;
 mod tests_a4_body_conflict;
 #[cfg(test)]
 mod tests_a5_settlement;
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests_a7_operator_reissue;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_binding;

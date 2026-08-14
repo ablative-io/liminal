@@ -1,0 +1,25 @@
+=== RED PROOF: a_stranded_marker_obligation_is_retired_at_load_and_its_ack_answers_a_typed_refusal
+=== TREE: load-end reconcile_orphaned_marker_obligations() call REMOVED
+=== rev under test: b0251d5f3bdcfce6143f977e7cacedfc1e568d22 + working tree with the call removed
+=== date: 2026-08-14T07:43:33Z
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 46.67s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 1 test
+
+thread 'server::participant::production::tests_a7_reconcile_coherence::a_stranded_marker_obligation_is_retired_at_load_and_its_ack_answers_a_typed_refusal' (8662824) panicked at crates/liminal-server/src/server/participant/production/tests_a7_reconcile_coherence.rs:321:13:
+stranded obligation, first boot: the marker ack died at the coherence invariant -- dispatch did not respond: Fatal(Semantic(Internal { message: "participant production operation failed: participant production invariant violated: stored MarkerAck has no matching marker delivery authority" }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test server::participant::production::tests_a7_reconcile_coherence::a_stranded_marker_obligation_is_retired_at_load_and_its_ack_answers_a_typed_refusal ... FAILED
+
+failures:
+
+failures:
+    server::participant::production::tests_a7_reconcile_coherence::a_stranded_marker_obligation_is_retired_at_load_and_its_ack_answers_a_typed_refusal
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 756 filtered out; finished in 5.92s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

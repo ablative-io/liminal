@@ -9,6 +9,10 @@ use crate::ServerError;
 use crate::server::listener::{loopback_interrupt_target, shed_on_fd_exhaustion};
 
 use super::checks::{SharedReadinessState, health_check, readiness_check};
+use super::reissue::{
+    OperatorCredentialReissueOutcome, OperatorCredentialReissueRefusal,
+    OperatorCredentialReissueRequest, OperatorCredentialReissuer, SharedOperatorCredentialReissue,
+};
 use super::unloadable::{SharedUnloadableConversations, UnloadableConversationRecord};
 
 use super::metrics_route;
@@ -17,6 +21,8 @@ const HEALTH_PATH: &str = "/health";
 const READY_PATH: &str = "/ready";
 const METRICS_PATH: &str = "/metrics";
 const UNLOADABLE_PATH: &str = "/unloadable-conversations";
+/// R18 amendment A7 (§0.18): the operator credential re-issue operation.
+const REISSUE_PATH: &str = "/operator/credential-reissue";
 const APPLICATION_JSON: &str = "application/json";
 const READ_BUFFER_BYTES: usize = 2048;
 
@@ -50,6 +56,11 @@ pub struct HealthServerHandle {
     /// into it by [`Self::install_unloadable_record`] once built. Pull-only:
     /// nothing reads it until a request arrives, so it cannot wake the worker.
     unloadable: SharedUnloadableConversations,
+    /// The operator WRITE surface for A7 credential re-issue, shared with the
+    /// worker. Empty until the participant is built, exactly like `unloadable`
+    /// above and for the same reason. Call-driven only: nothing reads it until
+    /// a request arrives, so it cannot wake the worker.
+    reissue: SharedOperatorCredentialReissue,
     worker: Option<JoinHandle<Result<(), ServerError>>>,
     /// Count of `accept` calls issued by the worker (test observability for the
     /// zero-idle-wakes oracle: on a silent listener this stays at the single
@@ -90,6 +101,19 @@ impl HealthServerHandle {
     /// thread, timer, or notification is created here.
     pub fn install_unloadable_record(&self, record: UnloadableConversationRecord) {
         self.unloadable.install(record);
+    }
+
+    /// Publishes the participant authority onto
+    /// `POST /operator/credential-reissue` (R18 amendment A7, §0.18).
+    ///
+    /// Same timing constraint as [`Self::install_unloadable_record`]: the
+    /// health endpoint binds before the participant exists, so the authority
+    /// arrives here once built. Until it does the route answers 503 and says
+    /// no participant is installed, which is a different answer from an
+    /// unknown identity and is reported as such. No thread, timer, or
+    /// notification is created here.
+    pub fn install_credential_reissuer(&self, reissuer: Arc<dyn OperatorCredentialReissuer>) {
+        self.reissue.install(reissuer);
     }
 
     /// Stops the health endpoint server and waits for its worker thread to exit.
@@ -197,6 +221,7 @@ pub fn start_health_server(
     let shutdown = Arc::new(AtomicBool::new(false));
     let active_stream = Arc::new(Mutex::new(None));
     let unloadable = SharedUnloadableConversations::default();
+    let reissue = SharedOperatorCredentialReissue::default();
     let accept_attempts = Arc::new(AtomicU64::new(0));
     let shed_count = Arc::new(AtomicU64::new(0));
     let requests_entered = Arc::new(AtomicU64::new(0));
@@ -208,6 +233,7 @@ pub fn start_health_server(
     let served = ServedState {
         readiness,
         unloadable: unloadable.clone(),
+        reissue: reissue.clone(),
     };
     let worker = thread::spawn(move || {
         serve(
@@ -227,6 +253,7 @@ pub fn start_health_server(
         shutdown,
         active_stream,
         unloadable,
+        reissue,
         worker: Some(worker),
         #[cfg(test)]
         accept_attempts,
@@ -243,6 +270,7 @@ pub fn start_health_server(
 struct ServedState {
     readiness: SharedReadinessState,
     unloadable: SharedUnloadableConversations,
+    reissue: SharedOperatorCredentialReissue,
 }
 
 fn serve(
@@ -383,8 +411,110 @@ fn response_for_request(request: &[u8], served: &ServedState) -> Result<Vec<u8>,
         (_, HEALTH_PATH | READY_PATH | METRICS_PATH | UNLOADABLE_PATH) => {
             Ok(empty_response(StatusCode::MethodNotAllowed))
         }
+        // R18 amendment A7. Matched on the path with its query string SPLIT
+        // OFF, and only here: the four routes above keep matching the whole
+        // request target exactly as they always have, so a query string on
+        // `/health` is still a 404 and no existing route's answer moves.
+        _ if path.split('?').next() == Some(REISSUE_PATH) => {
+            credential_reissue_response(method, path, served)
+        }
         _ => Ok(empty_response(StatusCode::NotFound)),
     }
+}
+
+/// Answers one `OperatorCredentialReissue` call (R18 amendment A7, §0.18).
+///
+/// # Why the inputs ride the query string
+///
+/// The three inputs are fixed by §0.18 (`conversation_id`, `participant_id`,
+/// `expected_current_generation`) and none of them is a secret — the SECRET
+/// travels only in the response. The request shape is a build decision, and a
+/// query string is chosen because this endpoint reads each request with ONE
+/// bounded read and no message framing: a body would be present only when the
+/// client happened to put it in the same segment, so parsing one would make
+/// the route's answer depend on TCP segmentation. Teaching the shared request
+/// reader to frame bodies would change the serving discipline of every route
+/// here, which is not this lane's to do.
+fn credential_reissue_response(
+    method: &str,
+    path: &str,
+    served: &ServedState,
+) -> Result<Vec<u8>, ServerError> {
+    if method != "POST" {
+        return Ok(empty_response(StatusCode::MethodNotAllowed));
+    }
+    let query = path.split_once('?').map_or("", |(_, query)| query);
+    let Some(request) = parse_reissue_query(query) else {
+        return Ok(empty_response(StatusCode::BadRequest));
+    };
+    match served.reissue.reissue(request) {
+        // No participant is configured on this node. Distinct from every
+        // identity answer, and reported as such rather than as a lookup miss.
+        Ok(None) => Ok(empty_response(StatusCode::ServiceUnavailable)),
+        Ok(Some(OperatorCredentialReissueOutcome::Issued(issued))) => {
+            json_response(StatusCode::Ok, &issued)
+        }
+        Ok(Some(OperatorCredentialReissueOutcome::Refused(refusal))) => {
+            json_response(reissue_refusal_status(&refusal), &refusal)
+        }
+        Err(error) => {
+            // The operation could not be DECIDED. The operator is told, and
+            // the text is the refusal's own — never a bare close.
+            tracing::error!(%error, "operator credential re-issue could not be decided");
+            json_response(
+                StatusCode::ServiceUnavailable,
+                &serde_json::json!({ "error": error.message }),
+            )
+        }
+    }
+}
+
+/// The status each typed refusal is served with.
+///
+/// A lookup miss is a 404 and every guard refusal is a 409: the identity
+/// resolved, and the operation was refused by a live fact about it. The
+/// discriminator an operator branches on is the body's `refusal` field, never
+/// the status — the status is the HTTP-shaped summary of it.
+const fn reissue_refusal_status(refusal: &OperatorCredentialReissueRefusal) -> StatusCode {
+    match refusal {
+        OperatorCredentialReissueRefusal::ConversationUnknown { .. }
+        | OperatorCredentialReissueRefusal::ParticipantUnknown { .. } => StatusCode::NotFound,
+        OperatorCredentialReissueRefusal::Retired { .. }
+        | OperatorCredentialReissueRefusal::LiveBinding { .. }
+        | OperatorCredentialReissueRefusal::DetachReplayOpen { .. }
+        | OperatorCredentialReissueRefusal::LiveReceipt { .. }
+        | OperatorCredentialReissueRefusal::GenerationMismatch { .. } => StatusCode::Conflict,
+    }
+}
+
+/// Parses the three §0.18 inputs, or answers `None` for anything else.
+///
+/// Every field is mandatory and every value is a plain decimal `u64`. An
+/// unknown parameter, a repeat, or a missing one is refused rather than
+/// defaulted: an operator who mistypes `expected_current_generation` must not
+/// have a zero silently substituted for it.
+fn parse_reissue_query(query: &str) -> Option<OperatorCredentialReissueRequest> {
+    let mut conversation_id = None;
+    let mut participant_id = None;
+    let mut expected_current_generation = None;
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=')?;
+        let value = value.parse::<u64>().ok()?;
+        let slot = match name {
+            "conversation_id" => &mut conversation_id,
+            "participant_id" => &mut participant_id,
+            "expected_current_generation" => &mut expected_current_generation,
+            _ => return None,
+        };
+        if slot.replace(value).is_some() {
+            return None;
+        }
+    }
+    Some(OperatorCredentialReissueRequest {
+        conversation_id: conversation_id?,
+        participant_id: participant_id?,
+        expected_current_generation: expected_current_generation?,
+    })
 }
 
 fn parse_request_line(request: &str) -> Option<(&str, &str)> {
@@ -431,6 +561,7 @@ enum StatusCode {
     BadRequest,
     NotFound,
     MethodNotAllowed,
+    Conflict,
     ServiceUnavailable,
 }
 
@@ -441,6 +572,7 @@ impl StatusCode {
             Self::BadRequest => 400,
             Self::NotFound => 404,
             Self::MethodNotAllowed => 405,
+            Self::Conflict => 409,
             Self::ServiceUnavailable => 503,
         }
     }
@@ -451,6 +583,7 @@ impl StatusCode {
             Self::BadRequest => "Bad Request",
             Self::NotFound => "Not Found",
             Self::MethodNotAllowed => "Method Not Allowed",
+            Self::Conflict => "Conflict",
             Self::ServiceUnavailable => "Service Unavailable",
         }
     }
@@ -460,12 +593,16 @@ impl StatusCode {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use serde_json::Value;
 
-    use super::{ServedState, response_for_request, start_health_server};
+    use super::{
+        OperatorCredentialReissueRefusal, OperatorCredentialReissueRequest,
+        OperatorCredentialReissuer, ServedState, response_for_request, start_health_server,
+    };
     use crate::health::checks::{
         ClusterReadiness, ReadinessCondition, ReadinessState, SharedReadinessState,
     };
@@ -481,6 +618,7 @@ mod tests {
         ServedState {
             readiness,
             unloadable: crate::health::unloadable::SharedUnloadableConversations::default(),
+            reissue: crate::health::reissue::SharedOperatorCredentialReissue::default(),
         }
     }
 
@@ -732,6 +870,257 @@ mod tests {
 
         assert_status(&response, 405);
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // R18 amendment A7 (§0.18) — the operator credential re-issue route
+    // -----------------------------------------------------------------------
+
+    /// A reissuer that answers whatever it was built with, and records the
+    /// request it was handed so the route's parsing can be measured rather than
+    /// assumed.
+    #[derive(Debug)]
+    struct RecordingReissuer {
+        outcome: crate::health::reissue::OperatorCredentialReissueOutcome,
+        seen: Mutex<Vec<OperatorCredentialReissueRequest>>,
+    }
+
+    impl OperatorCredentialReissuer for RecordingReissuer {
+        fn reissue(
+            &self,
+            request: OperatorCredentialReissueRequest,
+        ) -> Result<
+            crate::health::reissue::OperatorCredentialReissueOutcome,
+            crate::health::reissue::OperatorCredentialReissueError,
+        > {
+            self.seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(request);
+            Ok(self.outcome.clone())
+        }
+    }
+
+    fn served_with_reissuer(
+        outcome: crate::health::reissue::OperatorCredentialReissueOutcome,
+    ) -> (ServedState, Arc<RecordingReissuer>) {
+        let reissuer = Arc::new(RecordingReissuer {
+            outcome,
+            seen: Mutex::new(Vec::new()),
+        });
+        let state = served(SharedReadinessState::default());
+        state
+            .reissue
+            .install(Arc::clone(&reissuer) as Arc<dyn OperatorCredentialReissuer>);
+        (state, reissuer)
+    }
+
+    const REISSUE_TARGET: &str =
+        "/operator/credential-reissue?conversation_id=7&participant_id=3&\
+         expected_current_generation=14";
+
+    /// A node with no participant configured says so, rather than answering
+    /// like a node whose identity is unknown.
+    #[test]
+    fn the_reissue_route_reports_an_uninstalled_participant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = format!("POST {REISSUE_TARGET} HTTP/1.1\r\n\r\n");
+        let response =
+            response_for_request(request.as_bytes(), &served(SharedReadinessState::default()))?;
+        let response = String::from_utf8(response)?;
+
+        assert_status(&response, 503);
+        Ok(())
+    }
+
+    /// A committed re-issue serves the secret ONCE, and the three §0.18 inputs
+    /// arrive at the authority exactly as the operator wrote them.
+    #[test]
+    fn the_reissue_route_carries_the_three_inputs_and_returns_the_secret_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let issued = crate::health::reissue::OperatorCredentialReissued {
+            conversation_id: 7,
+            participant_id: 3,
+            presented_generation: 14,
+            issued_generation: 15,
+            attach_secret: crate::health::reissue::encode_hex(&[0x5A; 32]),
+        };
+        let (state, reissuer) = served_with_reissuer(
+            crate::health::reissue::OperatorCredentialReissueOutcome::Issued(issued),
+        );
+        let request = format!("POST {REISSUE_TARGET} HTTP/1.1\r\n\r\n");
+
+        let response = String::from_utf8(response_for_request(request.as_bytes(), &state)?)?;
+
+        assert_status(&response, 200);
+        let body = json_body(&response)?;
+        assert_eq!(body["issued_generation"], 15);
+        assert_eq!(body["presented_generation"], 14);
+        assert_eq!(body["attach_secret"], "5a".repeat(32));
+        let seen = reissuer
+            .seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            seen.as_slice(),
+            [OperatorCredentialReissueRequest {
+                conversation_id: 7,
+                participant_id: 3,
+                expected_current_generation: 14,
+            }]
+        );
+        Ok(())
+    }
+
+    /// The NORMATIVE compare-and-set payload survives the route (§0.18 item 4),
+    /// and a guard refusal is a 409 whose discriminator is a field.
+    #[test]
+    fn the_reissue_route_serves_the_normative_generation_pair()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, _) = served_with_reissuer(
+            crate::health::reissue::OperatorCredentialReissueOutcome::Refused(
+                OperatorCredentialReissueRefusal::GenerationMismatch {
+                    conversation_id: 7,
+                    participant_id: 3,
+                    presented_generation: 14,
+                    current_generation: 15,
+                },
+            ),
+        );
+        let request = format!("POST {REISSUE_TARGET} HTTP/1.1\r\n\r\n");
+
+        let response = String::from_utf8(response_for_request(request.as_bytes(), &state)?)?;
+
+        assert_status(&response, 409);
+        let body = json_body(&response)?;
+        assert_eq!(body["refusal"], "generation_mismatch");
+        assert_eq!(body["presented_generation"], 14);
+        assert_eq!(body["current_generation"], 15);
+        Ok(())
+    }
+
+    /// A pre-guard lookup miss is a 404, and discloses nothing beyond the
+    /// identifiers the operator presented.
+    #[test]
+    fn the_reissue_route_answers_a_lookup_miss_with_not_found()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, _) = served_with_reissuer(
+            crate::health::reissue::OperatorCredentialReissueOutcome::Refused(
+                OperatorCredentialReissueRefusal::ConversationUnknown { conversation_id: 7 },
+            ),
+        );
+        let request = format!("POST {REISSUE_TARGET} HTTP/1.1\r\n\r\n");
+
+        let response = String::from_utf8(response_for_request(request.as_bytes(), &state)?)?;
+
+        assert_status(&response, 404);
+        let body = json_body(&response)?;
+        assert_eq!(body["refusal"], "conversation_unknown");
+        assert_eq!(body["conversation_id"], 7);
+        assert!(
+            body.get("participant_id").is_none(),
+            "an unknown-conversation refusal must disclose nothing beyond the presented \
+             conversation id: {body}"
+        );
+        Ok(())
+    }
+
+    /// A malformed call is REFUSED, never defaulted. An operator who mistypes a
+    /// generation must not have a zero silently substituted for it and a
+    /// credential rotated on the strength of it.
+    #[test]
+    fn a_malformed_reissue_call_is_refused_and_never_reaches_the_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, reissuer) = served_with_reissuer(
+            crate::health::reissue::OperatorCredentialReissueOutcome::Refused(
+                OperatorCredentialReissueRefusal::ConversationUnknown { conversation_id: 7 },
+            ),
+        );
+        let malformed = [
+            // A missing input.
+            "/operator/credential-reissue?conversation_id=7&participant_id=3",
+            // No inputs at all.
+            "/operator/credential-reissue",
+            // A non-numeric generation.
+            "/operator/credential-reissue?conversation_id=7&participant_id=3&\
+             expected_current_generation=fourteen",
+            // An unknown parameter riding along.
+            "/operator/credential-reissue?conversation_id=7&participant_id=3&\
+             expected_current_generation=14&force=1",
+            // A repeated parameter, where the last one silently winning would be
+            // an operator's typo deciding which identity rotates.
+            "/operator/credential-reissue?conversation_id=7&conversation_id=8&\
+             participant_id=3&expected_current_generation=14",
+        ];
+
+        for target in malformed {
+            let request = format!("POST {target} HTTP/1.1\r\n\r\n");
+            let response = String::from_utf8(response_for_request(request.as_bytes(), &state)?)?;
+            assert_status(&response, 400);
+        }
+
+        assert!(
+            reissuer
+                .seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty(),
+            "a malformed call must never reach the serialized participant-state point"
+        );
+        Ok(())
+    }
+
+    /// The operation is a POST. A GET of the same target is refused rather than
+    /// rotating a credential from a link someone clicked.
+    #[test]
+    fn the_reissue_route_refuses_every_other_method() -> Result<(), Box<dyn std::error::Error>> {
+        let (state, reissuer) = served_with_reissuer(
+            crate::health::reissue::OperatorCredentialReissueOutcome::Refused(
+                OperatorCredentialReissueRefusal::ConversationUnknown { conversation_id: 7 },
+            ),
+        );
+
+        for method in ["GET", "PUT", "DELETE"] {
+            let request = format!("{method} {REISSUE_TARGET} HTTP/1.1\r\n\r\n");
+            let response = String::from_utf8(response_for_request(request.as_bytes(), &state)?)?;
+            assert_status(&response, 405);
+        }
+
+        assert!(
+            reissuer
+                .seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    /// ⛔ The query-string split must not have moved any EXISTING route's
+    /// answer. `GET /health?x=1` was a 404 before A7 and stays one: the four
+    /// original routes still match the whole request target exactly.
+    #[test]
+    fn the_reissue_route_did_not_move_any_existing_routes_answer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = served(SharedReadinessState::default());
+        for target in [
+            "/health?x=1",
+            "/ready?x=1",
+            "/metrics?x=1",
+            "/unloadable-conversations?x=1",
+        ] {
+            let request = format!("GET {target} HTTP/1.1\r\n\r\n");
+            let response = String::from_utf8(response_for_request(request.as_bytes(), &state)?)?;
+            assert_status(&response, 404);
+        }
+        // POSITIVE CONTROL: the same routes without a query string still serve,
+        // so the assertions above measure the query handling and not a broken
+        // request line.
+        let response =
+            String::from_utf8(response_for_request(b"GET /health HTTP/1.1\r\n\r\n", &state)?)?;
+        assert_status(&response, 200);
         Ok(())
     }
 

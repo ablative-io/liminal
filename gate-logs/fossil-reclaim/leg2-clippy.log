@@ -1,0 +1,7 @@
+=== LEG 2 CLIPPY (post-revert): cargo clippy --all-targets
+=== branch fossil-reclaim-a7 at 95c916597897fea2393fbf1555cad5474df57e7d
+=== date: 2026-08-14T08:24:59Z
+    Checking liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Checking liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.46s
+TRUE EXIT: 0

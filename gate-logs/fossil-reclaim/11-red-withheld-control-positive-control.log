@@ -1,0 +1,48 @@
+=== RED PROOF: 11-red-withheld-control-positive-control ===
+=== base tree: 75e85b910232be8d1d7352d52a4bc011d90e1194 ===
+=== the withheld control is handed a credential that DOES bind, so its
+=== instrument is proved able to detect one: ===
+diff --git a/crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs b/crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs
+index 93e3291..f890932 100644
+--- a/crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs
++++ b/crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs
+@@ -583,10 +583,10 @@ fn assert_refused_forever(
+     label: &str,
+ ) -> Result<(), Box<dyn Error>> {
+     let attempts: [(Generation, AttachSecret); 3] = [
+-        // The generation-1 secret the enrollment receipt minted: the ONLY
+-        // credential this client ever received, and one the committed
+-        // generation-2 attach already invalidated.
+-        (GEN_ONE, enrollment_secret),
++        // RED PROOF 11: the instrument's positive control -- the credential
++        // the SERVER holds, which provably binds. If this does not report, the
++        // whole withheld control is vacuous.
++        (generation(2)?, fossil.lost_secret),
+         // The same dead secret presented at the generation the client can
+         // deduce it must be at by now.
+         (generation(2)?, enrollment_secret),
+=== end of disabling diff ===
+
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.83s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 1 test
+test server::participant::production::tests_a7_operator_reissue::without_a_reissue_the_fossil_stays_refused_forever ... FAILED
+
+failures:
+
+---- server::participant::production::tests_a7_operator_reissue::without_a_reissue_the_fossil_stays_refused_forever stdout ----
+
+thread 'server::participant::production::tests_a7_operator_reissue::without_a_reissue_the_fossil_stays_refused_forever' (8320878) panicked at crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs:610:9:
+live handler: attempt 0 must not bind the withheld fossil, got: AttachBound(AttachBound { conversation_id: 7402, token: AttachAttemptToken([180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 0]), participant_id: 0, request_generation: Generation(2), attach_secret: AttachSecret([44, 0, 160, 5, 174, 79, 238, 135, 203, 129, 16, 113, 174, 20, 209, 155, 238, 133, 201, 180, 163, 249, 183, 138, 43, 91, 104, 124, 28, 114, 233, 182]), origin_binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 742, connection_ordinal: 1 }, capability_generation: Generation(3) }, persisted_cursor: 0, accepted_marker_delivery_seq: None, receipt_expires_at: 1770000660001, provenance_expires_at: 1770001200001 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    server::participant::production::tests_a7_operator_reissue::without_a_reissue_the_fossil_stays_refused_forever
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 752 filtered out; finished in 0.46s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

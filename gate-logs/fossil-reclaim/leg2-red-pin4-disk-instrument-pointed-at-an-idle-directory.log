@@ -1,0 +1,25 @@
+=== RED PROOF: the_quiet_estate_answer_holds_over_a_disk_store_that_provably_engaged (INSTRUMENT ONLY)
+=== MUTATION: the absent-before/grown-after instrument aimed at an idle sibling directory
+=== rev under test: b0251d5f3bdcfce6143f977e7cacedfc1e568d22 + working tree with the instrument redirected
+=== date: 2026-08-14T07:47:04Z
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 08s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 1 test
+
+thread 'server::participant::production::tests_a7_reconcile_coherence::the_quiet_estate_answer_holds_over_a_disk_store_that_provably_engaged' (8688137) panicked at crates/liminal-server/src/server/participant/production/tests_a7_reconcile_coherence.rs:601:5:
+INSTRUMENT CONTROL: driving the fixture wrote nothing to the disk store at /var/folders/87/tdf6vfls1fj_4ydz_y6sk3580000gn/T/.tmp5qGOA3/durability (0 bytes before, 0 after), so this arm never engaged it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test server::participant::production::tests_a7_reconcile_coherence::the_quiet_estate_answer_holds_over_a_disk_store_that_provably_engaged ... FAILED
+
+failures:
+
+failures:
+    server::participant::production::tests_a7_reconcile_coherence::the_quiet_estate_answer_holds_over_a_disk_store_that_provably_engaged
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 756 filtered out; finished in 6.35s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

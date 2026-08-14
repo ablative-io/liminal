@@ -1,0 +1,103 @@
+=== RED PROOF: 08b-red-detach-replay-cell-trap-revealed ===
+=== base tree: 75e85b910232be8d1d7352d52a4bc011d90e1194 ===
+=== the guard DELETED and the pin's refusal assertion replaced by the
+=== commit the missing guard permits, so the TRAP is what fails: ===
+diff --git a/crates/liminal-server/src/server/participant/production/ops_reissue.rs b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+index c726e1a..2446a3e 100644
+--- a/crates/liminal-server/src/server/participant/production/ops_reissue.rs
++++ b/crates/liminal-server/src/server/participant/production/ops_reissue.rs
+@@ -34,7 +34,7 @@
+ //! pair that repair needs.
+ 
+ use liminal_protocol::lifecycle::{
+-    BindingState, DetachCell, EnrollmentFingerprint, LiveMember, LiveMemberRestore, RetiredIdentity,
++    BindingState, EnrollmentFingerprint, LiveMember, LiveMemberRestore, RetiredIdentity,
+ };
+ use liminal_protocol::wire::{AttachSecret, Generation};
+ 
+@@ -180,15 +180,7 @@ impl ConversationAuthority {
+         // refusal/restoration semantics and is not this lane's to move, so the
+         // shape is refused rather than repaired, and the gap goes back to the
+         // seat as a contract flag.
+-        if matches!(slot.cell, DetachCell::Committed(_)) {
+-            return Ok(refused(
+-                OperatorCredentialReissueRefusal::DetachReplayOpen {
+-                    conversation_id,
+-                    participant_id,
+-                    current_generation: current_generation.get(),
+-                },
+-            ));
+-        }
++        // RED PROOF 08b: the detach-replay-cell arm DELETED.
+         // Guard (d): the compare-and-set. Its refusal payload is NORMATIVE —
+         // see `health::reissue::OperatorCredentialReissueRefusal`.
+         if request.expected_current_generation != current_generation.get() {
+diff --git a/crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs b/crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs
+index 93e3291..82db433 100644
+--- a/crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs
++++ b/crates/liminal-server/src/server/participant/production/tests_a7_operator_reissue.rs
+@@ -1021,34 +1021,22 @@ fn an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential()
+         "the trapped shape must be REACHABLE, or this guard answers nothing"
+     );
+ 
+-    let refusal = expect_refused(&handler, reissue_request(conversation_id, participant_id, 1))?;
+-
+-    assert_eq!(
+-        refusal,
+-        OperatorCredentialReissueRefusal::DetachReplayOpen {
+-            conversation_id,
+-            participant_id,
+-            current_generation: 1
+-        }
+-    );
+-    let after = census(&handler, &store, conversation_id, participant_id)?;
+-    assert_unchanged(&before, &after, "open detach replay cell");
+-
+-    // The ordinary re-entry path is still open at the UNMOVED generation, which
+-    // is what makes the refusal a repair rather than a dead end: the identity is
+-    // reachable by exactly the credential it always was.
++    // RED PROOF 08b: the pin's own refusal assertion is replaced with the
++    // COMMIT the missing guard permits, so the trap itself is what fails.
++    let issued = expect_issued(&handler, reissue_request(conversation_id, participant_id, 1))?;
++    let _ = before;
+     let bound = attach(
+         &handler,
+         incarnation,
+         attach_request(
+             conversation_id,
+             participant_id,
+-            GEN_ONE,
+-            enrolled.attach_secret(),
++            generation(2)?,
++            decode_hex(&issued.attach_secret)?,
+             [0xD6; 16],
+         ),
+     )?;
+-    assert_eq!(bound.capability_generation(), generation(2)?);
++    assert_eq!(bound.capability_generation(), generation(3)?);
+     Ok(())
+ }
+ 
+=== end of disabling diff ===
+
+   Compiling liminal-server v0.8.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.71s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 1 test
+test server::participant::production::tests_a7_operator_reissue::an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential ... FAILED
+
+failures:
+
+---- server::participant::production::tests_a7_operator_reissue::an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential stdout ----
+Error: "dispatch did not respond: Fatal(Semantic(Internal { message: \"participant production operation failed: participant production invariant violated: protocol attach transition failed: DetachCellAuthority\" }))"
+
+
+failures:
+    server::participant::production::tests_a7_operator_reissue::an_open_detach_replay_cell_refuses_rather_than_minting_a_trapped_credential
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 752 filtered out; finished in 0.38s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101
