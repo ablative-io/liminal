@@ -1,0 +1,23 @@
+=== RED PROOF: the_quiet_estate_answers_the_first_marker_ack_of_every_boot_with_no_commit_in_between
+=== TREE: load-end reconcile_orphaned_marker_obligations() call REMOVED
+=== rev under test: b0251d5f3bdcfce6143f977e7cacedfc1e568d22 + working tree with the call removed
+=== date: 2026-08-14T07:44:27Z
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.49s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 1 test
+
+thread 'server::participant::production::tests_a7_reconcile_coherence::the_quiet_estate_answers_the_first_marker_ack_of_every_boot_with_no_commit_in_between' (8664000) panicked at crates/liminal-server/src/server/participant/production/tests_a7_reconcile_coherence.rs:321:13:
+quiet estate, boot 1: the marker ack died at the coherence invariant -- dispatch did not respond: Fatal(Semantic(Internal { message: "participant production operation failed: participant production invariant violated: stored MarkerAck has no matching marker delivery authority" }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test server::participant::production::tests_a7_reconcile_coherence::the_quiet_estate_answers_the_first_marker_ack_of_every_boot_with_no_commit_in_between ... FAILED
+
+failures:
+
+failures:
+    server::participant::production::tests_a7_reconcile_coherence::the_quiet_estate_answers_the_first_marker_ack_of_every_boot_with_no_commit_in_between
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 756 filtered out; finished in 3.74s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

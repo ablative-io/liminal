@@ -1,0 +1,13 @@
+=== RED PROOF: a_backed_marker_obligation_survives_the_load_end_reconcile_and_its_ack_still_commits
+=== TREE: load-end reconcile_orphaned_marker_obligations() call REMOVED
+=== rev under test: b0251d5f3bdcfce6143f977e7cacedfc1e568d22 + working tree with the call removed
+=== date: 2026-08-14T07:44:32Z
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-06fb6a0541f6e2ae)
+
+running 1 test
+test server::participant::production::tests_a7_reconcile_coherence::a_backed_marker_obligation_survives_the_load_end_reconcile_and_its_ack_still_commits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 756 filtered out; finished in 4.39s
+
+TRUE EXIT: 0
