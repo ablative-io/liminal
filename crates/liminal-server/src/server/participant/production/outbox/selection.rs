@@ -123,6 +123,23 @@ impl ConversationOutbox {
     }
 
     /// Whether this exact participant still owns the named marker obligation.
+    ///
+    /// OWNERSHIP, not mere receipt (`#76`). A `HistoryCompacted` record is
+    /// delivered to EVERY member of the conversation -- R-C3's entitled
+    /// subsequence is the full per-conversation sequence -- but it NAMES
+    /// exactly one, the participant whose retained history was abandoned. Only
+    /// that participant holds a marker obligation for it: the `MarkerAck`
+    /// route is authorized by delivery of a `HistoryCompacted` naming the
+    /// acker's OWN broken history, and it atomically advances THAT
+    /// participant's cursor to the marker sequence. A survivor has no
+    /// abandonment to span -- its history over that sequence is continuous --
+    /// so its delivery is an ordinary obligation covered by cumulative
+    /// `ParticipantAck`, and answering `true` for it hands it an obligation the
+    /// contract never gave it.
+    ///
+    /// Recipiency stays in the condition rather than being replaced by it: a
+    /// marker's owner that is not among the record's recipients was never
+    /// delivered the thing it would be acking.
     pub(in crate::server::participant::production) fn is_marker_obligation(
         &self,
         participant_id: ParticipantId,
@@ -132,7 +149,10 @@ impl ConversationOutbox {
             record.recipients.contains(&participant_id)
                 && matches!(
                     record.delivery.record,
-                    ParticipantRecord::HistoryCompacted { .. }
+                    ParticipantRecord::HistoryCompacted {
+                        affected_participant_id,
+                        ..
+                    } if affected_participant_id == participant_id
                 )
         })
     }
