@@ -21,7 +21,7 @@
 //! `record_publication_offer` (`handler_semantic.rs:453-498`), therefore minted
 //! an `offered_markers` entry for every survivor, and a survivor that then sent
 //! a `MarkerAck` walked into `marker_progress.rs:76-78` —
-//! "stored MarkerAck has no matching marker delivery authority" — the fatal
+//! "stored `MarkerAck` has no matching marker delivery authority" — the fatal
 //! invariant that took the kernel down in the field boot-1 log
 //! (`.manifold/kernel-boot-20260814-1547.log`, delivery 829, marker naming
 //! participant 5, ack held by the registry at participant 0).
@@ -665,10 +665,10 @@ fn a_legacy_non_owner_marker_ack_is_answered_benignly_over_a_real_socket()
 /// same store, and asks the reloaded authority the ownership question on the
 /// REPLAY-DERIVED offer path.
 fn assert_restart_never_marker_flags_a_non_owner(
-    store: Arc<dyn DurableStore>,
+    store: &Arc<dyn DurableStore>,
 ) -> Result<OwnershipRoles, Box<dyn Error>> {
     let roles = {
-        let fixture = prepare_marker_fixture_with_store(Arc::clone(&store))?;
+        let fixture = prepare_marker_fixture_with_store(Arc::clone(store))?;
         let roles = ownership_roles(&fixture)?;
         assert_non_owner_is_a_recipient(&fixture.handler, &roles)?;
         roles
@@ -676,7 +676,7 @@ fn assert_restart_never_marker_flags_a_non_owner(
 
     // FIRST BOOT over a store whose history holds a marker for the owner while
     // the non-owner is live. It must load at all — the field's boot-1 did not.
-    let reloaded = ProductionParticipantHandler::new(Arc::clone(&store), marker_fixture_config())
+    let reloaded = ProductionParticipantHandler::new(Arc::clone(store), marker_fixture_config())
         .map_err(|error| {
             format!(
                 "#76 RESTART PARITY: a store holding a compaction marker for participant {} with \
@@ -740,7 +740,8 @@ fn assert_restart_never_marker_flags_a_non_owner(
 #[test]
 fn a_restarted_store_never_marker_flags_a_non_owner_on_the_replay_path()
 -> Result<(), Box<dyn Error>> {
-    assert_restart_never_marker_flags_a_non_owner(Arc::new(open_ephemeral(1)?))?;
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    assert_restart_never_marker_flags_a_non_owner(&store)?;
     Ok(())
 }
 
@@ -784,7 +785,7 @@ fn the_on_disk_restart_arm_never_marker_flags_a_non_owner_with_the_store_engaged
 -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
-    let roles = assert_restart_never_marker_flags_a_non_owner(open_disk_store_for_tests(&data_dir)?)?;
+    let roles = assert_restart_never_marker_flags_a_non_owner(&open_disk_store_for_tests(&data_dir)?)?;
 
     if !data_dir.join("config.json").exists() {
         return Err(format!(
