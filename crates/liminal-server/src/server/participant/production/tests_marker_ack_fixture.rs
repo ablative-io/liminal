@@ -46,6 +46,12 @@ pub(super) struct MarkerFixture {
     pub(super) catchup_participant: ParticipantId,
     pub(super) catchup_through_seq: u64,
     pub(super) marker_delivery: ParticipantDelivery,
+    /// The two enrolment receipts, carried so a caller can present the exact
+    /// attach secret of either member. Board #76 needs one member to LEAVE
+    /// after the drain (that is what strands the marker anchor), and a leave
+    /// is authorized by the secret this receipt holds -- the fixture already
+    /// owned the value and simply discarded it.
+    pub(super) enrolled: [EnrollBound; 2],
 }
 
 /// The capability generation each member is currently addressable at.
@@ -570,7 +576,18 @@ fn drive_marker_drain(
 }
 
 pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> {
-    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    prepare_marker_fixture_in(Arc::new(open_ephemeral(1)?))
+}
+
+/// [`prepare_marker_fixture`] with the durable store INJECTED.
+///
+/// Board `#76` pin 4 needs the same scenario driven against a store the test
+/// owns on disk, so that "the disk store actually engaged" is an assertion
+/// about artifacts rather than a claim. Splitting the store out is the whole
+/// difference: the drive below is the one both entry points run.
+pub(super) fn prepare_marker_fixture_in(
+    store: Arc<dyn DurableStore>,
+) -> Result<MarkerFixture, Box<dyn Error>> {
     let config = marker_fixture_config();
     let conversation_id = 0xA7;
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
@@ -604,6 +621,7 @@ pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> 
         catchup_participant: members.second.participant_id(),
         catchup_through_seq,
         marker_delivery,
+        enrolled: [members.first.clone(), members.second],
     })
 }
 
@@ -743,6 +761,7 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
                 catchup_participant: members.second.participant_id(),
                 catchup_through_seq,
                 marker_delivery,
+                enrolled: [members.first.clone(), members.second.clone()],
             })
         }
         Err(error) => Err(error.to_string()),
