@@ -1,0 +1,46 @@
+=== BOARD #76 LEG 2 -- STOP. The three measurements the stop rests on.
+=== branch fossil-reclaim-a7, taken against b0251d5 (leg-1 tip) plus the
+=== now-reverted leg-2 mechanism where stated. date: 2026-08-14T08:15:29Z
+
+--- MEASUREMENT 1. The brief's orphan trigger is not reachable from client
+--- traffic at this tree. Every leg-2 pin measured replay_orphan_reconciles
+--- and every one read 0; commit_leave retires the stored anchor TOGETHER
+--- with the marker record (marker_anchors 1 -> 0 across a leave, measured),
+--- and search_capacity_floor refuses any retention advance that would
+--- strand one (MarkerAnchorCapacity, ordinary_record_projection.rs:1105).
+
+--- MEASUREMENT 2. The obligation reconcile as built RETIRES A PINNED
+--- DELIVERY. Instrumented run of the pre-existing e2e over conversation
+--- 9217: participant 1 left, so the frontier no longer carries its marker
+--- record at 12, and the census retired the SURVIVORS' obligations for it.
+--- The e2e says that record must still be delivered.
+PROBE conv=9217 anchored={} active={0, 1, 2} retired=[]
+PROBE conv=9217 anchored={11, 13} active={0, 2} retired=[(0, 12), (2, 12)]
+PROBE conv=9217 anchored={11, 13} active={0, 2} retired=[(2, 12)]
+assertion `left == right` failed
+  left: ParticipantDelivery(ParticipantDelivery { conversation_id: 9217, delivery_seq: 13, record: HistoryCompacted { affected_participant_id: 2, abandoned_after: 0, abandoned_through: 10, physical_floor_at_decision: 9 } })
+
+[exited with code 0]
+
+--- Four pre-existing tests fail under the leg-2 mechanism, all at the same
+--- assertion (e2e_cold_all_shapes.rs:403), all reading marker 13 where
+--- marker 12 was expected:
+      e2e_cold_all_shapes::cold_reopen_reconciles_and_replays_all_record_shapes
+      tests_w1b_umbrella::fate_live_and_cold_replay_produce_identical_witnesses_and_state
+      tests_w2_leg1_census::coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route
+      tests_w2_leg1_census::marker_drain_retry_accumulates_all_prefix_effects
+
+--- MEASUREMENT 3. THE INCIDENT IS NOT A RECONCILE DEFECT. On a HEALTHY
+--- store -- nobody leaves, the marker record present, the anchor stored,
+--- no reconcile of any kind involved -- a CO-RECIPIENT that is offered the
+--- marker (the dispatcher offers it: is_marker_obligation, selection.rs:126,
+--- accepts ANY recipient of a HistoryCompacted record) and marker-acks it
+--- produces the EXACT field invariant string:
+PROBE offer recorded for co-recipient: Ok(())
+PROBE marker reached by co-recipient: true
+PROBE co-recipient marker ack on a HEALTHY store: Err("dispatch did not respond: Fatal(Semantic(Internal { message: \"participant production operation failed: participant production invariant violated: stored MarkerAck has no matching marker delivery authority\" }))")
+
+=== The leg-2 mechanism and its pins are REVERTED. crates/ is byte-identical
+=== to b0251d5. What remains for the seat is a contract question, recorded
+=== in the land message: does a recipient that does not OWN a compaction
+=== marker hold a marker obligation at all?

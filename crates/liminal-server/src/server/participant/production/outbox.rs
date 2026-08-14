@@ -7,7 +7,7 @@ mod validation;
 use std::collections::{BTreeMap, BTreeSet};
 
 use liminal_protocol::lifecycle::RecipientAckObligationsError;
-use liminal_protocol::wire::{ParticipantDelivery, ParticipantId, ParticipantRecord};
+use liminal_protocol::wire::{ParticipantDelivery, ParticipantId};
 
 use super::outbox_log::{
     OutboxLogError, OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord, encode_row,
@@ -435,72 +435,6 @@ impl ConversationOutbox {
         self.reclaim_empty_records()?;
         self.recompute_next_live();
         Ok(())
-    }
-
-    /// Retires every live marker obligation the coupled frontier can no longer
-    /// answer, returning the exact `(participant, delivery_seq)` pairs retired.
-    ///
-    /// Board `#76`. A marker obligation and its marker-delivery anchor are one
-    /// fact kept in two ledgers: the outbox owns the obligation to PUSH the
-    /// `HistoryCompacted` record, the frontier owns the authority to ACCEPT the
-    /// acknowledgement of it. Retiring the anchor without retiring the
-    /// obligation leaves the push side alive and the accept side gone — the
-    /// selection re-offers the marker, `record_publication_offer` finds the
-    /// obligation and records the offer, and the ack for that offer walks the
-    /// offered arm of `apply_marker_ack_with_impact` into
-    /// `marker_delivery_progress`, which correctly refuses -- "stored
-    /// `MarkerAck` has no matching marker delivery authority" -- and takes the
-    /// conversation down. The refusal is right; the ledgers were wrong. This restores them.
-    ///
-    /// `backed` answers, for one pair, whether the frontier still holds the
-    /// marker record that pair's acknowledgement would be projected from. It is
-    /// asked about the RECORD, not about ownership: a co-recipient of a live
-    /// marker keeps its obligation, because the marker's authority is still
-    /// there and the push is still owed.
-    ///
-    /// The cursor guard is the second half of the predicate and is why this is
-    /// a no-op on a healthy store. An obligation at or below the participant's
-    /// reconciled selection cursor can never be re-offered
-    /// (`Self::dispatch_after` starts past it), so it forces nothing and is
-    /// left exactly where it is — that is the ordinary post-marker-ack state,
-    /// discharged by the next crossing ordinary ack.
-    pub(in crate::server::participant::production) fn retire_unbacked_marker_obligations(
-        &mut self,
-        backed: &dyn Fn(ParticipantId, u64) -> bool,
-    ) -> Result<Vec<(ParticipantId, u64)>, ConversationOutboxError> {
-        let mut unbacked = Vec::new();
-        for (delivery_seq, record) in &self.records {
-            if !matches!(
-                record.delivery.record,
-                ParticipantRecord::HistoryCompacted { .. }
-            ) {
-                continue;
-            }
-            for participant_id in &record.recipients {
-                if backed(*participant_id, *delivery_seq)
-                    || *delivery_seq <= self.marker_reconciled_cursor(*participant_id)
-                {
-                    continue;
-                }
-                unbacked.push((*participant_id, *delivery_seq));
-            }
-        }
-        let mut discharged = 0_u64;
-        for (participant_id, delivery_seq) in &unbacked {
-            if self
-                .records
-                .get_mut(delivery_seq)
-                .is_some_and(|record| record.recipients.remove(participant_id))
-            {
-                discharged = discharged
-                    .checked_add(1)
-                    .ok_or(ConversationOutboxError::ChargeOverflow)?;
-            }
-        }
-        self.subtract_live_obligations(discharged)?;
-        self.reclaim_empty_records()?;
-        self.recompute_next_live();
-        Ok(unbacked)
     }
 
     fn subtract_live_obligations(
