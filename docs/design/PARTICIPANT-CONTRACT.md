@@ -1053,6 +1053,131 @@ wearing a schema; that is the failure this shape refuses.
 Every TTL, window size and reporting threshold remains a deployment decision,
 and the concrete deployed numbers ratify at Tom's desk before lock.
 
+### 0.18 R18 amendment A7 — authorized operator credential re-issue from `CredentialRecoveryLost` (2026-08-14) — PROPOSED r0
+
+**Status: PROPOSED, r0.** Key process not yet opened; this section is normative
+only at ratification. Tom's word opened the build lane on 2026-08-14 (relayed
+verbatim at meridian `d3c7f892`: "I don't want to accept anything. That's not
+fine. We need to fix everything."); build may proceed against this r0 under the
+A6 precedent (mechanism lands gated, text ratifies at the two-key sitting), and
+the ratification edit is confined to this section's status line plus the
+`«ATTACH-SECRET-LIFECYCLE»` register row as specified at the end of this
+section.
+
+**Evidence.** Live specimen 2026-08-14 (meridian `819dfdff`, board #74): the
+`@compose` member's identity on `#registry.ops` holds participant 3 at
+generation 14; the receipt carrying generation 14's attach secret expired
+before any hand received it (the client store holds no credential at all), so
+the identity is unanswerable and every browser-guest seating on the live
+estate refuses — honestly, by name, with zero residue. The refusal chain is
+correct; what is missing is the repair path this contract already names:
+§4's recovery-outage law routes credential repair from `CredentialRecoveryLost`
+"only to `«ATTACH-SECRET-LIFECYCLE»` operator re-issue", and that socket row
+has held operator re-issue open since R18. A7 closes exactly that clause.
+
+**What A7 narrows.** The `«ATTACH-SECRET-LIFECYCLE»` socket's operator
+re-issue question becomes decided-by-amendment. Revocation as policy,
+post-receipt capability expiry, and the ground-pack consequence of undelivered
+dead-epoch `DetachedMarkerRelease` remain genuinely open and are explicit
+non-goals here.
+
+**Entry route (existing law, unchanged).** The member reaches
+`CredentialRecoveryLost` exactly as §4 already provides: enrollment-mapping
+replay of the committed token resolves the live identity and returns the
+complete `EnrollmentKnown` schema; an SDK holding no valid current-or-newer
+credential then durably enters terminal `CredentialRecoveryLost` with the
+returned identity, preserving identity and disabling attach/replay/ack
+authority. A7 adds nothing before this point.
+
+**The operation.**
+
+1. **Surface.** `OperatorCredentialReissue` is an operation of the operator
+   surface (the same trust plane that serves `GET /unloadable-conversations`),
+   never of the participant wire. The participant protocol is byte-identical
+   under A7; this amendment adds no wire frame, no response variant, and no
+   protocol-crate delta. Input: `conversation_id`, `participant_id`,
+   `expected_current_generation`. Possession of the operator surface is the
+   authority; guarding that surface is a deployment concern, as it already is
+   for operational truth.
+2. **Guards**, all evaluated at the one serialized participant-state point,
+   every refusal typed and committing no receipt, order, cursor, binding,
+   lifecycle record, or retention mutation:
+   a. a tombstoned identity refuses `Retired`; re-issue never remints a
+      retired identity;
+   b. a live **binding** for the identity refuses: a bound member is
+      demonstrably operating under working authority, and re-issue against it
+      would be seat revocation — v1 has no operator Leave and A7 does not
+      create one;
+   c. a live attach/enrollment **receipt** for the identity refuses: a live
+      receipt means the R-C0 recovery window is still open and the ordinary
+      recovery path must be exhausted first;
+   d. `expected_current_generation` unequal to the current generation refuses
+      with presented and current generations and nothing else — the
+      compare-and-set that makes concurrent operator repetitions serialize
+      instead of double-rotating.
+3. **The transaction** is one atomic durable commit: checked-increment the
+   generation G→G+1 under R-C1's joint-domain proof (no rekey, reset, or
+   rebase; the finite-generation law is untouched); mint a fresh secret;
+   invalidate G's verifier; append exactly one durable operation row recording
+   the re-issue, carrying the verifier and never a secret body. Replay of that
+   row reconstructs the increment and verifier exactly. The transaction binds
+   nothing, appends no `Attached`/`Detached` lifecycle record (no binding
+   changed), and mints no R-C0 receipt row.
+4. **Delivery.** The new secret is returned exactly once, in the operator
+   response. A lost response is repaired by repeating the operation — each
+   repetition rotates again under the same guards — and there is deliberately
+   no receipt replay for operator issue: R-C0's receipt machinery is untouched
+   by A7.
+5. **Re-entry.** The member installs the issued credential durably, exits
+   `CredentialRecoveryLost`, and performs an ordinary R-C1 credential attach
+   presenting G+1 — which itself checked-increments to G+2, rotates, and
+   binds. A7 creates no new attach path and no new binding semantics.
+
+**Threat model** (required by the socket's closure column).
+
+- The operator surface already serves operational truth and its holder already
+  owns the store bytes; re-issue grants no capability physical ownership does
+  not, it replaces unlawful surgery with a lawful, audited, atomic operation.
+- Re-issue is **revocation-capable** against a detached member holding a
+  still-valid secret beyond its receipt's lifetime: after provenance expiry no
+  durable fact distinguishes "secret died with the expired receipt" from
+  "secret held safely offline", so the guards cannot separate them. This is
+  stated, not hidden. The negotiated receipt TTL is already normatively the
+  deployment's maximum supported recovery outage, so the displaced holder was
+  outside the supported window by existing law; the misuse remedy is another
+  re-issue delivered to the rightful owner. This power is exactly why the
+  operation exists only on the operator surface.
+- The secret transits once in the operator response; nothing new rests
+  anywhere. Records carry verifiers only, per standing law.
+
+**Non-goals.** No revocation-policy surface; no post-receipt capability
+expiry; no operator Leave or eviction; no `DetachedMarkerRelease` consequence;
+no participant-wire change of any kind; no new configuration.
+
+**Acceptance frame.**
+
+1. End-to-end fossil shape: enroll, attach to generation G, lose the response
+   and expire the receipt, prove the client-side terminal entry via
+   `EnrollmentKnown`, re-issue, then prove an ordinary attach with the issued
+   secret succeeds — asserting G+1 issued, G+2 bound, and the dead secret
+   answering `StaleAuthority`.
+2. Every guard red-proven both ways: live-binding refusal, live-receipt
+   refusal, `Retired`, generation-mismatch — each with a byte-identical
+   state census before and after the refusal.
+3. Replay equivalence: crash immediately before and after the re-issue row;
+   the replayed store reaches the identical generation and verifier.
+4. The control: with re-issue withheld, the fossil shape stays refused
+   forever — the pre-A7 truth, pinned so the amendment's necessity is itself
+   a measurement.
+5. No-polling audit: the operation introduces no timer, sweep, scan, or
+   retry loop; repetition is operator-driven only.
+
+**Register edit at ratification.** `«ATTACH-SECRET-LIFECYCLE»` stays
+genuinely-open (narrowed further): operator re-issue from
+`CredentialRecoveryLost` becomes decided-by-amendment (A7) with this section
+as its answer; revocation policy, post-receipt capability expiry, and the
+`DetachedMarkerRelease` ground-pack consequence remain open.
+
 
 ## 1. The verified gap
 
