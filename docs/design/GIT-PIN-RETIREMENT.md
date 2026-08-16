@@ -62,6 +62,23 @@ advisories and closes on receipts):
   (this document), lane record on the `ablative/stack/liminal` topic,
   closure verification on receipts.
 
+**2026-08-16 addendum — Leg 1's FRAME HALF IS DONE, executed by Tom
+himself 08-15 evening** (Athena's owner report, msg `d6ddf26e`, 7 commits
+`37ac84f..db6bc7c` inclusive; every byte claim below re-measured at this
+seat on frame `origin/main = 251b74f`): frame's lock carries the current
+family (liminal-protocol 0.7.0 / liminal-rs 0.5.5 / liminal-sdk 0.7.0 /
+liminal-server 0.8.2), zero `git+…ablative-io/liminal` refs, exactly one
+`liminal-server` entry, beamr SINGLE at 0.16.3 through the bump.
+frame-host is now **0.5.0** (manifest at `251b74f`; registry index per
+Athena's cache-mtime receipt) — so **manifold's frame-pin advance targets
+0.5.0, not the 0.4.1 named above**. The census row "frame main @ 17130cc"
+was true at its moment and is superseded at `251b74f` (sha-pinned both
+ways). Remaining to close leg 1: the manifold half only — frame-pin
+advance + the manifold receipts below (Waffles's desk). Athena also
+owner-confirmed the frame census row (zero git refs) — the walked-from-
+outside row is now confirmed at the owning seat. Frame-side record:
+frame `docs/notes/beamr-017-wave-frame-is-last.md` §2026-08-16.
+
 **Receipts that close the lane** (byte-level, not attestations of intent):
 manifold lock shows exactly one `liminal-server` (`grep -c 'name =
 "liminal-server"' Cargo.lock` = 1); the estate-walk grep for
