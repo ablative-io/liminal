@@ -28,8 +28,9 @@ pub use remote::{
     WebSocketRemoteTransport, WebSocketSubscriptionStream,
 };
 pub use remote::{
-    PARTICIPANT_PUMP_WINDOW, ParticipantResponseProvenance, ParticipantResumeStore,
-    RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, RemoteDetachReplayOutcome,
+    CredentialAttachReissueReason, LostCredentialAttachRefusalReason, PARTICIPANT_PUMP_WINDOW,
+    ParticipantResponseProvenance, ParticipantResumeStore, RemoteChannelHandle, RemoteConfig,
+    RemoteConversationHandle, RemoteCredentialAttachRecovery, RemoteDetachReplayOutcome,
     RemoteExpectedOperationRecovery, RemoteLostOperationResolution, RemoteLostReconnectResolution,
     RemoteOperationRecordOutcome, RemoteOperationTransportFate, RemoteParticipantError,
     RemoteParticipantHandle, RemoteParticipantInbound, RemoteParticipantOperation,

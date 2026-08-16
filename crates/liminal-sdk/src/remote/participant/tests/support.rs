@@ -27,8 +27,57 @@ pub(super) struct Loopback {
     task: JoinHandle<io::Result<()>>,
 }
 
+/// Arrival record for every participant request the loopback reads.
+///
+/// The two facts it keeps are the two a "no timer in front of the probe" pin
+/// needs: HOW MANY requests a call produced, and WHEN the first one landed. A
+/// retry loop shows up in the count; a backoff shows up in the instant.
+#[derive(Clone, Debug, Default)]
+pub(super) struct LoopbackObserver {
+    arrivals: Arc<Mutex<Vec<std::time::Instant>>>,
+}
+
+impl LoopbackObserver {
+    fn record(&self) {
+        if let Ok(mut arrivals) = self.arrivals.lock() {
+            arrivals.push(std::time::Instant::now());
+        }
+    }
+
+    /// Number of participant requests read so far.
+    pub(super) fn request_count(&self) -> io::Result<usize> {
+        self.arrivals
+            .lock()
+            .map(|arrivals| arrivals.len())
+            .map_err(|_| io::Error::other("loopback observer lock poisoned"))
+    }
+
+    /// Instant at which the `index`-th request was read.
+    pub(super) fn arrival(&self, index: usize) -> io::Result<std::time::Instant> {
+        self.arrivals
+            .lock()
+            .map_err(|_| io::Error::other("loopback observer lock poisoned"))?
+            .get(index)
+            .copied()
+            .ok_or_else(|| io::Error::other("loopback observed no such request"))
+    }
+}
+
 impl Loopback {
     pub(super) fn spawn(sessions: Vec<Vec<Action>>) -> io::Result<Self> {
+        Self::spawn_inner(sessions, LoopbackObserver::default())
+    }
+
+    /// Spawns a loopback that also records when each request arrived.
+    pub(super) fn spawn_observed(
+        sessions: Vec<Vec<Action>>,
+    ) -> io::Result<(Self, LoopbackObserver)> {
+        let observer = LoopbackObserver::default();
+        let loopback = Self::spawn_inner(sessions, observer.clone())?;
+        Ok((loopback, observer))
+    }
+
+    fn spawn_inner(sessions: Vec<Vec<Action>>, observer: LoopbackObserver) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?.to_string();
         let task = thread::spawn(move || {
@@ -37,6 +86,7 @@ impl Loopback {
                 handshake(&mut stream)?;
                 for action in actions {
                     let request = read_generic(&mut stream)?;
+                    observer.record();
                     ensure_participant_request(request)?;
                     match action {
                         Action::Respond(values) => {

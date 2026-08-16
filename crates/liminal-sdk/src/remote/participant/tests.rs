@@ -9,9 +9,10 @@ use liminal_protocol::client::{
 };
 use liminal_protocol::wire::{
     AckCommitted, AckGap, AckNoOp, AckRegression, AttachAttemptToken, AttachBound, AttachSecret,
-    BindingEpoch, ClientRequest, ConnectionIncarnation, DetachAttemptToken, DetachCommitted,
-    DetachRequest, EnrollBound, EnrollmentRequest, EnrollmentToken, Generation, ParticipantAck,
-    ParticipantAckEnvelope, RecordAdmission, RecordAdmissionEnvelope, RecordCommitted, ServerValue,
+    BindingEpoch, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, DetachAttemptToken,
+    DetachCommitted, DetachRequest, EnrollBound, EnrollmentRequest, EnrollmentToken, Generation,
+    ParticipantAck, ParticipantAckEnvelope, ReceiptReplay, RecordAdmission, RecordAdmissionEnvelope,
+    RecordCommitted, ServerValue,
 };
 
 use super::*;
@@ -598,6 +599,178 @@ fn committed_delivery_seq_reaches_the_record_admission_return_path() -> TestResu
     );
     assert_eq!(wire_delivery_seq, SURFACED_SEQ);
 
+    loopback.finish()?;
+    Ok(())
+}
+
+/// #195 support: builds the exact killed-mid-attach checkpoint over a loopback.
+///
+/// The client enrolls, attaches once so a rotation has really happened, then
+/// issues a second attach the server never answers. The returned bytes are what
+/// the process left behind: an ISSUED credential attach whose response never
+/// arrived.
+fn killed_mid_attach_checkpoint() -> TestResult<(Vec<u8>, ClientRequest)> {
+    let loopback = Loopback::spawn(vec![vec![
+        Action::Respond(vec![enroll_bound(CONVERSATION, [1; 16])?]),
+        Action::Respond(vec![ServerValue::AttachBound(
+            AttachBound::ordinary(
+                CONVERSATION,
+                AttachAttemptToken::new([0xA1; 16]),
+                PARTICIPANT,
+                generation(1)?,
+                AttachSecret::new([0x22; 32]),
+                epoch(2)?,
+                0,
+                0,
+                0,
+            )
+            .ok_or_else(|| io::Error::other("attach receipt fixture must be a successor"))?,
+        )]),
+        Action::DropAfterRequest,
+    ]])?;
+    let config = loopback.connected_config()?;
+    let store = MemoryStore::default();
+    let observed = store.clone();
+    let handle = RemoteParticipantHandle::new(&config, store)?;
+    enroll(&handle)?;
+    handle.receive()?;
+
+    // First attach: consumed, so the client really is holding a rotated
+    // credential (generation 2, secret 0x22) when the kill lands.
+    let first = recorded(handle.record_operation(ClientRequest::CredentialAttach(
+        CredentialAttachRequest {
+            conversation_id: CONVERSATION,
+            participant_id: PARTICIPANT,
+            capability_generation: generation(1)?,
+            attach_secret: AttachSecret::new([2; 32]),
+            attach_attempt_token: AttachAttemptToken::new([0xA1; 16]),
+            accept_marker_delivery_seq: None,
+        },
+    ))?)?;
+    sent(&handle.send_operation(first)?)?;
+    handle.receive()?;
+
+    // Second attach: issued and never answered. This is the retained envelope
+    // the driver must re-present, byte for byte.
+    let retained = ClientRequest::CredentialAttach(CredentialAttachRequest {
+        conversation_id: CONVERSATION,
+        participant_id: PARTICIPANT,
+        capability_generation: generation(2)?,
+        attach_secret: AttachSecret::new([0x22; 32]),
+        attach_attempt_token: AttachAttemptToken::new([0xB2; 16]),
+        accept_marker_delivery_seq: None,
+    });
+    let second = recorded(handle.record_operation(retained.clone())?)?;
+    sent(&handle.send_operation(second)?)?;
+    let checkpoint = observed.bytes()?;
+    drop(handle);
+    loopback.finish().ok();
+    Ok((checkpoint, retained))
+}
+
+/// The receipt replay a server sends to heal a same-token re-presentation.
+fn healing_receipt_replay() -> TestResult<ServerValue> {
+    Ok(ServerValue::Bound(ReceiptReplay::CredentialAttach(
+        AttachBound::ordinary(
+            CONVERSATION,
+            AttachAttemptToken::new([0xB2; 16]),
+            PARTICIPANT,
+            generation(2)?,
+            AttachSecret::new([0x33; 32]),
+            epoch(3)?,
+            0,
+            0,
+            0,
+        )
+        .ok_or_else(|| io::Error::other("replayed receipt fixture must be a successor"))?,
+    )))
+}
+
+/// #195 PIN (f) — THE A5 NO-EXTENSION PIN.
+///
+/// The probe is a FIRST ACT. The receipt window is the healing window, it is
+/// fixed at the server's commit and never re-opens, so any delay this driver
+/// introduced before its first probe would be spent out of the very window the
+/// driver exists to spend. A retry discipline must not extend the orphan
+/// (participant contract §0.16 condition 2, A5).
+///
+/// Both halves of "no timer" are measured rather than read off the code: the
+/// loopback counts ONE request for the call, so there is no retry loop, and it
+/// records WHEN that request landed, so there is no backoff in front of it. A
+/// driver that slept before probing, or that probed more than once, fails here
+/// and cannot be made to pass by adjusting a constant.
+#[test]
+fn the_recovery_probe_is_a_first_act_with_no_timer_in_front_of_it() -> TestResult {
+    let (checkpoint, _retained) = killed_mid_attach_checkpoint()?;
+
+    let (loopback, observer) =
+        Loopback::spawn_observed(vec![vec![Action::Respond(vec![healing_receipt_replay()?])]])?;
+    let config = loopback.connected_config()?;
+    let restored = RemoteParticipantHandle::restore(&config, MemoryStore::default(), &checkpoint)?;
+    assert_eq!(
+        observer.request_count()?,
+        0,
+        "restoring must not probe on its own"
+    );
+
+    let started = std::time::Instant::now();
+    let recovery = restored.recover_lost_credential_attach()?;
+    let probed_at = observer.arrival(0)?;
+
+    assert_eq!(
+        observer.request_count()?,
+        1,
+        "the driver must probe exactly once; a retry loop in front of the window is the defect"
+    );
+    assert!(
+        probed_at.duration_since(started) < core::time::Duration::from_millis(250),
+        "the probe must be the call's first act, not something behind a timer: it landed after {:?}",
+        probed_at.duration_since(started)
+    );
+    assert!(
+        matches!(
+            recovery,
+            RemoteCredentialAttachRecovery::HealedFromReceipt { .. }
+        ),
+        "the probe must heal from the replayed receipt, got {recovery:?}"
+    );
+
+    loopback.finish()?;
+    Ok(())
+}
+
+/// The driver re-presents the retained envelope EXACTLY.
+///
+/// The whole cure rests on byte-identity: the server matches the re-presentation
+/// to its stored receipt by attempt token and verifies it against the receipt's
+/// own committed presented secret — the OLD, invalidated one. A driver that
+/// minted a fresh token, advanced the generation, or reached for the current
+/// credential would form a request the server can match to nothing, which is
+/// precisely the orphaned path the base test already shows being refused.
+#[test]
+fn the_driver_re_presents_the_exact_retained_envelope() -> TestResult {
+    let (checkpoint, retained) = killed_mid_attach_checkpoint()?;
+
+    let (loopback, _observer) =
+        Loopback::spawn_observed(vec![vec![Action::Respond(vec![healing_receipt_replay()?])]])?;
+    let config = loopback.connected_config()?;
+    let restored = RemoteParticipantHandle::restore(&config, MemoryStore::default(), &checkpoint)?;
+
+    // The retained envelope, read back through the crate's driver-support seam
+    // before anything consumes it.
+    let ClientRequest::CredentialAttach(expected) = &retained else {
+        return Err(io::Error::other("fixture must retain a credential attach").into());
+    };
+    assert_eq!(
+        restored.peek_lost_credential_attach()?.as_ref(),
+        Some(expected),
+        "the retained envelope must survive the restore unchanged"
+    );
+
+    assert!(matches!(
+        restored.recover_lost_credential_attach()?,
+        RemoteCredentialAttachRecovery::HealedFromReceipt { .. }
+    ));
     loopback.finish()?;
     Ok(())
 }

@@ -1,0 +1,41 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-17af7e5dd70ff256)
+
+running 7 tests
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::the_driver_leaves_a_detachs_testimony_untouched ... ok
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_never_committed_credential_attach_commits_fresh_on_re_presentation ... FAILED
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_healed_client_round_trips_through_one_more_restart ... FAILED
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_stale_or_unknown_receipt_surfaces_the_same_terminal_without_a_commit_claim ... FAILED
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_lost_credential_attach_heals_from_the_servers_receipt_replay ... FAILED
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::an_expired_receipt_surfaces_the_typed_reissue_terminal ... FAILED
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_client_killed_mid_attach_cannot_re_attach_from_its_retained_credential ... ok
+
+failures:
+
+---- server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_never_committed_credential_attach_commits_fresh_on_re_presentation stdout ----
+Error: "a never-committed attach must commit on re-presentation, got NotPending { reason: NoPendingTestimony }"
+
+---- server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_healed_client_round_trips_through_one_more_restart stdout ----
+Error: "the receipt window must heal the orphan, got NotPending { reason: NoPendingTestimony }"
+
+---- server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_stale_or_unknown_receipt_surfaces_the_same_terminal_without_a_commit_claim stdout ----
+Error: "a stale receipt must terminate in re-issue, got NotPending { reason: NoPendingTestimony }"
+
+---- server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_lost_credential_attach_heals_from_the_servers_receipt_replay stdout ----
+Error: "the receipt window must heal the orphan, got NotPending { reason: NoPendingTestimony }"
+
+---- server::participant::production::e2e_tests::e2e_p195_orphan_recovery::an_expired_receipt_surfaces_the_typed_reissue_terminal stdout ----
+Error: "an expired receipt must terminate in re-issue, got NotPending { reason: NoPendingTestimony }"
+
+
+failures:
+    server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_healed_client_round_trips_through_one_more_restart
+    server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_lost_credential_attach_heals_from_the_servers_receipt_replay
+    server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_never_committed_credential_attach_commits_fresh_on_re_presentation
+    server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_stale_or_unknown_receipt_surfaces_the_same_terminal_without_a_commit_claim
+    server::participant::production::e2e_tests::e2e_p195_orphan_recovery::an_expired_receipt_surfaces_the_typed_reissue_terminal
+
+test result: FAILED. 2 passed; 5 failed; 0 ignored; 0 measured; 760 filtered out; finished in 9.08s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

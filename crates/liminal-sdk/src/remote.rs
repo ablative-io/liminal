@@ -31,7 +31,8 @@ pub use handles::{
     SdkConversationHandle,
 };
 pub use participant::{
-    PARTICIPANT_PUMP_WINDOW, ParticipantResponseProvenance, ParticipantResumeStore,
+    CredentialAttachReissueReason, LostCredentialAttachRefusalReason, PARTICIPANT_PUMP_WINDOW,
+    ParticipantResponseProvenance, ParticipantResumeStore, RemoteCredentialAttachRecovery,
     RemoteDetachReplayOutcome, RemoteExpectedOperationRecovery, RemoteLostOperationResolution,
     RemoteLostReconnectResolution, RemoteOperationRecordOutcome, RemoteOperationTransportFate,
     RemoteParticipantError, RemoteParticipantInbound, RemoteParticipantOperation,

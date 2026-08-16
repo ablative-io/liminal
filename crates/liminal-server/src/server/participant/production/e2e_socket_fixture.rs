@@ -860,16 +860,48 @@ impl SdkSocketFixture {
     pub(in crate::server::participant::production) fn start(
         data_dir: &Path,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_inner(data_dir, false)
+        Self::start_inner(data_dir, false, test_participant_config())
     }
 
     pub(in crate::server::participant::production) fn start_gated(
         data_dir: &Path,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_inner(data_dir, true)
+        Self::start_inner(data_dir, true, test_participant_config())
     }
 
-    fn start_inner(data_dir: &Path, gated: bool) -> Result<Self, Box<dyn Error>> {
+    /// Starts an SDK-facing socket server over an explicit participant config.
+    ///
+    /// The receipt and provenance TTLs are the two knobs a deadline test needs,
+    /// and they are config-owned (#39), so the only way an SDK-over-socket test
+    /// can reach a receipt window shorter than the deployment-shaped 60 s is to
+    /// name its own config here. The `SocketFixture` twin has had this door
+    /// since the terminal-drain lane (`start_with_config`); this is the same
+    /// door on the SDK fixture.
+    pub(in crate::server::participant::production) fn start_with_config(
+        data_dir: &Path,
+        config: ParticipantConfig,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_inner(data_dir, false, config)
+    }
+
+    /// Pins the server's participant clock to a fixed Unix-millisecond reading,
+    /// or releases it back to the wall clock when passed `0`.
+    ///
+    /// This is the pass-through to [`ProductionParticipantHandler::pin_clock_ms`]
+    /// that lets an SDK-over-socket deadline test STEP the receipt and
+    /// provenance windows instead of sleeping through them. Racing the wall
+    /// clock is what a short-TTL-plus-`sleep` test does, and the two receipt
+    /// phases this lane pins are adjacent in time — a sleep long enough to be
+    /// reliable for one is long enough to overshoot into the other.
+    pub(in crate::server::participant::production) fn pin_clock_ms(&self, now_ms: u64) {
+        self.handler.pin_clock_ms(now_ms);
+    }
+
+    fn start_inner(
+        data_dir: &Path,
+        gated: bool,
+        participant_config: ParticipantConfig,
+    ) -> Result<Self, Box<dyn Error>> {
         let inner = open_disk_store_for_tests(data_dir)?;
         let (store, barriers): (Arc<dyn DurableStore>, Option<Arc<OutboxBarrierStore>>) = if gated {
             let barriers = Arc::new(OutboxBarrierStore::new(inner));
@@ -877,7 +909,6 @@ impl SdkSocketFixture {
         } else {
             (inner, None)
         };
-        let participant_config = test_participant_config();
         let handler = Arc::new(ProductionParticipantHandler::new(
             Arc::clone(&store),
             participant_config,
