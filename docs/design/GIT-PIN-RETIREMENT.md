@@ -85,3 +85,12 @@ manifold lock shows exactly one `liminal-server` (`grep -c 'name =
 `git+…ablative-io/liminal` returns zero across walked repos incl. worktrees;
 `strings` on the rebuilt manifold binary finds zero pre-#56 refusal strings
 (#9's receipt). Frame's lock carries the current family.
+
+**2026-08-16 closure ruling (Tom's word, relayed Waffles msg `4b2f8320`):
+annabel-box is not connected and the estate is this computer for now.** The
+lane therefore **closes on the K9 receipts alone** (the manifold half
+above; frame's receipts already hold at `251b74f`). The annabel-box census
+is carried as a **NAMED BLOCKED RESIDUE** — it fires the day a second box
+answers ssh (Athena holds the spec: both patterns, positive control through
+the same predicate, search space named in the output) — and does NOT gate
+the close.
