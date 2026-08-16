@@ -67,6 +67,15 @@
 //!     [`ClientOperationRecordRefusalReason::DetachReplayIncompatible`]
 //!     (r2, 2026-07-18), closing the round-4 door that revived expected-detach
 //!     authority over an inactive replay.
+//! 21. [`ClientParticipantAggregate::lost_credential_attach`] is a pure READ of
+//!     pending testimony, added because [`resolve_lost_operation_authority`] is
+//!     destructive by design (#195, 2026-08-16). A recovery driver that owns one
+//!     operation class had no way to ask whether the pending testimony was its
+//!     class without already having spent the take-once atom on a path that
+//!     still needed it — detach replay, or a tokenless abandonment. It mints
+//!     nothing, consumes nothing, and moves no state, so it adds no row to the
+//!     audit below and cannot widen any existing one; it only lets a caller
+//!     decline a case without destroying it.
 //!
 //! # Exhaustive constructible-state audit
 //!
@@ -486,6 +495,40 @@ impl ClientParticipantAggregate {
     #[must_use]
     pub const fn lost_reconnect_testimony(&self) -> Option<&LostAuthorityTestimony> {
         self.reconnect.lost.as_ref()
+    }
+
+    /// Borrows the exact retained credential-attach envelope whose issued send
+    /// authority a restore testified destroyed.
+    ///
+    /// This is a DRIVER-SUPPORT READ and mints nothing: it releases no
+    /// authority, consumes no testimony, and moves no state. It exists because
+    /// [`resolve_lost_operation_authority`] is destructive — it consumes the
+    /// take-once testimony to hand back the request — so a recovery driver that
+    /// owns only ONE operation class has no way to discover whether the pending
+    /// testimony is its class without already having spent it on an operation
+    /// belonging to a different path. Detach's replay machinery and the
+    /// tokenless abandonment atom are exactly such paths, and a driver that
+    /// consumed their testimony to find out it should not have would destroy
+    /// the resolution they depend on (#195, 2026-08-16).
+    ///
+    /// `Some` requires all three facts together: the retained operation is a
+    /// [`ClientRequest::CredentialAttach`], it was ISSUED, and a lost-authority
+    /// testimony is pending against it. That triple is precisely the
+    /// killed-mid-attach orphan — the client's attach reached the server, the
+    /// answer that carries the rotated credential did not reach the client, and
+    /// the process died holding the retained envelope that can still be
+    /// re-presented inside the server's receipt window.
+    #[must_use]
+    pub const fn lost_credential_attach(&self) -> Option<&crate::wire::CredentialAttachRequest> {
+        match &self.expected {
+            Some(ExpectedOperationState {
+                request: ClientRequest::CredentialAttach(request),
+                issued: true,
+                lost: Some(_),
+                ..
+            }) => Some(request),
+            _ => None,
+        }
     }
 
     pub(super) const fn operation_loss_pending(&self) -> bool {

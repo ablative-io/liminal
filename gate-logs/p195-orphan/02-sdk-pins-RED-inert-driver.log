@@ -1,0 +1,108 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.16s
+     Running unittests src/lib.rs (target/debug/deps/liminal_sdk-a6cfb888cd2a30dd)
+
+running 82 tests
+test connection::pool::tests::invalid_pool_size_is_rejected ... ok
+test connection::lifecycle::tests::disconnected_to_connected_is_rejected ... ok
+test connection::lifecycle::tests::disconnect_from_disconnected_is_rejected_without_mutation ... ok
+test connection::lifecycle::tests::externally_authorized_reconnect_has_no_delay_or_retry_counter ... ok
+test connection::pool::tests::non_reconnect_transition_does_not_resume ... ok
+test connection::pool::tests::multiple_subscriptions_share_configured_connections ... ok
+test connection::lifecycle::tests::disconnect_from_reconnecting_is_observable ... ok
+test connection::lifecycle::tests::disconnect_from_connecting_is_observable ... ok
+test connection::lifecycle::tests::observers_receive_successful_transitions ... ok
+test connection::pool::tests::pooled_recovery_builds_resume_requests_on_reconnect ... ok
+test connection::pool::tests::subscriptions_are_distributed_across_connections ... ok
+test connection::pool::tests::unsubscribe_removes_assignment ... ok
+test connection::recovery::tests::acknowledged_subscriptions_resume_after_last_sequence ... ok
+test connection::recovery::tests::maximum_sequence_does_not_wrap_to_zero ... ok
+test connection::recovery::tests::non_recovery_transition_builds_no_resume_requests ... ok
+test connection::recovery::tests::reconnect_to_connected_transition_builds_resume_requests ... ok
+test connection::recovery::tests::subscriptions_without_acknowledgement_resume_from_zero ... ok
+test connection::recovery::tests::unsubscribe_clears_recovery_state ... ok
+test embedded::tests::embedded_config_does_not_require_server_address ... ok
+test embedded::tests::embedded_publish_uses_direct_message_reference ... ok
+test embedded::tests::embedded_subscribe_is_local_and_empty ... ok
+test remote::framing::tests::a_zero_budget_polls_without_arming_a_read ... ok
+test remote::framing::tests::the_pump_window_is_shorter_than_the_reply_owed_deadline ... ok
+test remote::framing::tests::the_response_deadline_outlives_a_single_receive_window ... ok
+test remote::participant::tests::committed_delivery_seq_reaches_the_record_admission_return_path ... ok
+test remote::participant::tests::contract_c34_ack_values_cross_the_real_receive_path ... ok
+test remote::participant::tests::lpcr_round_trip_recovers_unissued_and_resolves_issued_testimony ... ok
+test remote::participant::tests::nonmatching_attach_preserves_inflight_then_matching_attach_supersedes ... ok
+test remote::participant::tests::replay::a_bricked_handle_carries_its_typed_cause_on_the_state_unavailable_error ... ok
+test remote::participant::tests::replay::a_state_unavailable_reports_a_source_exactly_when_a_store_cause_was_retained ... ok
+test remote::participant::tests::replay::a_refused_detach_authority_checkpoints_and_restores_steerable ... ok
+test remote::framing::tests::a_closed_receive_window_is_a_wait_not_a_lost_connection ... ok
+test remote::participant::tests::replay::a_storage_error_exposes_its_store_failure_as_a_typed_source ... ok
+test remote::participant::tests::replay::a_store_originated_unavailability_names_its_typed_cause ... ok
+test remote::participant::tests::replay::durable_leave_from_real_receive_supersedes_inflight_detach ... ok
+test remote::participant::tests::replay::all_detach_terminal_arms_apply_and_survive_lpcr_restore ... ok
+test remote::participant::tests::replay::failed_checkpoint_withholds_successor_authority ... ok
+test remote::participant::tests::replay::in_progress_real_reconnect_restores_take_once_testimony ... ok
+test remote::framing::tests::a_quiet_pump_read_reports_silence_within_the_callers_budget ... ok
+test remote::participant::tests::replay::issued_tokenless_restore_reports_durable_abandonment ... ok
+test remote::participant::tests::replay::refused_detach_authority_never_destroys_live_participant_state ... ok
+test remote::framing::tests::an_expired_response_deadline_names_the_timeout_and_never_the_errno ... ok
+test remote::participant::tests::restored_issued_reconnect_permit_resolves_take_once_testimony ... ok
+test remote::participant::tests::response_loss_reconnects_once_and_replays_exact_detach_token ... ok
+test remote::participant::tests::sent_is_not_receipt_real_receive_releases_exact_d1_slot ... ok
+test remote::participant::tests::the_recovery_probe_is_a_first_act_with_no_timer_in_front_of_it ... FAILED
+test remote::participant::tests::the_driver_re_presents_the_exact_retained_envelope ... FAILED
+test remote::participant::tests::tokenless_restore_surfaces_durable_abandonment_for_rerecord ... ok
+test remote::protocol::tests::publish_frame_uses_protocol_header ... ok
+test remote::protocol::tests::subscribe_and_resume_use_distinct_frame_types ... ok
+test remote::protocol::tests::subscription_connection_slot_zero_maps_to_application_stream_one ... ok
+test remote::tcp::flush::tests::rejections_surface_in_wire_order_verbatim ... ok
+test remote::tcp::flush::tests::second_drain_covers_only_its_own_boundary ... ok
+test remote::tcp::flush::tests::concurrent_drains_serialize_without_misattribution ... ok
+test remote::tcp::flush::tests::surplus_verdict_is_a_typed_mechanism_error ... ok
+test remote::tcp::push_client::tests::publish_frame_round_trips_through_codec ... ok
+test remote::tcp::push_client::tests::pushed_frame_exposes_correlation_and_payload ... ok
+test remote::tcp::push_client::tests::reply_frame_round_trips_through_codec ... ok
+test remote::tcp::subscription::tests::deliver_frame_round_trips_through_codec ... ok
+test remote::tcp::subscription::tests::delivered_message_exposes_seq_and_payload ... ok
+test remote::tcp::push_client::tests::a_supplied_setup_deadline_is_disarmed_before_the_reader_starts ... ok
+test remote::tcp::push_client::tests::the_push_reader_carries_no_read_window_in_steady_state ... ok
+test remote::tcp::push_client::tests::push_client_source_has_no_retired_reader_poll_family ... ok
+test remote::tcp::subscription::tests::the_subscription_reader_carries_no_read_window_in_steady_state ... ok
+test remote::tcp::subscription::tests::subscription_source_has_no_retired_reader_poll_family ... ok
+test remote::tcp::tests::conversation_ids_are_stable ... ok
+test remote::tcp::tests::publish_ack_maps_to_accept ... ok
+test remote::tcp::tests::publish_error_maps_to_backpressure ... ok
+test remote::tcp::tests::schema_ids_are_deterministic_and_distinct ... ok
+test remote::tests::builder_switches_channel_mode_by_config ... ok
+test remote::tests::remote_config_requires_server_address ... ok
+test remote::tests::remote_handle_uses_lifecycle_and_recovery_on_reconnect ... ok
+test remote::websocket::subscription::tests::the_named_setup_deadline_is_the_ratified_five_seconds ... ok
+test remote::websocket::subscription::tests::websocket_subscription_source_has_no_retired_reader_poll_family ... ok
+test remote::tcp::flush::tests::budget_expiry_counts_unresolved_and_is_not_an_error ... ok
+test remote::tcp::push_client::tests::a_supplied_setup_deadline_bounds_the_control_frame_reply ... ok
+test remote::tcp::push_client::tests::connect_survives_a_control_reply_slower_than_the_retired_poll_cadence ... ok
+test remote::tcp::subscription::tests::open_preserves_deliveries_coalesced_with_the_subscribe_ack ... ok
+test remote::tcp::subscription::tests::open_survives_control_replies_slower_than_the_retired_poll_cadence ... ok
+test remote::tcp::push_client::tests::a_peer_that_never_answers_the_handshake_is_refused_at_the_named_deadline ... ok
+test remote::framing::tests::a_pump_read_spends_the_callers_budget_not_one_receive_window ... ok
+test remote::framing::tests::a_real_socket_survives_a_reply_slower_than_its_receive_window ... ok
+
+failures:
+
+---- remote::participant::tests::the_recovery_probe_is_a_first_act_with_no_timer_in_front_of_it stdout ----
+Error: Custom { kind: Other, error: "loopback observed no such request" }
+
+---- remote::participant::tests::the_driver_re_presents_the_exact_retained_envelope stdout ----
+
+thread 'remote::participant::tests::the_driver_re_presents_the_exact_retained_envelope' (33937066) panicked at crates/liminal-sdk/src/remote/participant/tests.rs:770:5:
+assertion failed: matches!(restored.recover_lost_credential_attach()?,
+    RemoteCredentialAttachRecovery::HealedFromReceipt { .. })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    remote::participant::tests::the_driver_re_presents_the_exact_retained_envelope
+    remote::participant::tests::the_recovery_probe_is_a_first_act_with_no_timer_in_front_of_it
+
+test result: FAILED. 80 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.20s
+
+error: test failed, to rerun pass `-p liminal-sdk --lib`
+TRUE EXIT: 101

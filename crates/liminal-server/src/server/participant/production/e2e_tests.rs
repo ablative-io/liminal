@@ -46,6 +46,9 @@ pub(super) use socket_fixture::{OutboxOwnerFacts, SdkSocketFixture, SocketFixtur
 #[path = "e2e_sdk_tests.rs"]
 mod e2e_sdk_tests;
 
+#[path = "e2e_p195_orphan_recovery.rs"]
+mod e2e_p195_orphan_recovery;
+
 #[path = "tests_endpoint_ack.rs"]
 mod tests_endpoint_ack;
 

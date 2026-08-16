@@ -9,9 +9,10 @@ mod recovery;
 mod replay_apply;
 
 pub use recovery::{
-    RemoteDetachReplayOutcome, RemoteExpectedOperationRecovery, RemoteLostOperationResolution,
-    RemoteLostReconnectResolution, RemoteReconnectAttemptOutcome, RemoteReconnectPermitRecovery,
-    RemoteReplayApplyOutcome, RemoteTransportLossOutcome,
+    CredentialAttachReissueReason, LostCredentialAttachRefusalReason,
+    RemoteCredentialAttachRecovery, RemoteDetachReplayOutcome, RemoteExpectedOperationRecovery,
+    RemoteLostOperationResolution, RemoteLostReconnectResolution, RemoteReconnectAttemptOutcome,
+    RemoteReconnectPermitRecovery, RemoteReplayApplyOutcome, RemoteTransportLossOutcome,
 };
 
 use alloc::sync::Arc;
