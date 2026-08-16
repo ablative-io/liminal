@@ -1,0 +1,21 @@
+   Compiling liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a52a4918b27f91dbd/crates/liminal-sdk)
+   Compiling liminal-server v0.8.2 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a52a4918b27f91dbd/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.95s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-17af7e5dd70ff256)
+
+running 1 test
+
+thread 'server::participant::production::e2e_tests::e2e_p195_orphan_recovery::the_driver_leaves_a_detachs_testimony_untouched' (33999076) panicked at crates/liminal-server/src/server/participant/production/e2e_p195_orphan_recovery.rs:819:5:
+the detach's own resolution must still be available, got Refused { reason: NoPendingTestimony }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::the_driver_leaves_a_detachs_testimony_untouched ... FAILED
+
+failures:
+
+failures:
+    server::participant::production::e2e_tests::e2e_p195_orphan_recovery::the_driver_leaves_a_detachs_testimony_untouched
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 766 filtered out; finished in 0.54s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE EXIT: 101

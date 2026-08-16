@@ -408,13 +408,18 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
     ) -> Result<RemoteCredentialAttachRecovery, RemoteParticipantError> {
         // 1. Look before consuming. The take-once atom must survive a driver
         //    that turns out not to own this case.
-        let Some(verdict) = self.lost_credential_attach_pending()? else {
-            return Ok(RemoteCredentialAttachRecovery::NotPending {
-                reason: LostCredentialAttachRefusalReason::NoPendingTestimony,
-            });
-        };
-        if let Some(reason) = verdict {
-            return Ok(RemoteCredentialAttachRecovery::NotPending { reason });
+        match self.lost_credential_attach_pending()? {
+            PendingTestimonyVerdict::IssuedCredentialAttach => {}
+            PendingTestimonyVerdict::Nothing => {
+                return Ok(RemoteCredentialAttachRecovery::NotPending {
+                    reason: LostCredentialAttachRefusalReason::NoPendingTestimony,
+                });
+            }
+            PendingTestimonyVerdict::OtherOperation => {
+                return Ok(RemoteCredentialAttachRecovery::NotPending {
+                    reason: LostCredentialAttachRefusalReason::NotAnIssuedCredentialAttach,
+                });
+            }
         }
 
         // 2. Consume the testimony. The peek above proved this is an issued
@@ -491,24 +496,17 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
     }
 
     /// Classifies the pending operation-domain testimony WITHOUT consuming it.
-    ///
-    /// `None` means no testimony is pending at all. `Some(None)` means the
-    /// pending testimony is this driver's case — an issued credential attach.
-    /// `Some(Some(reason))` means testimony is pending for an operation class
-    /// this driver does not own, and the atom is still untouched.
     fn lost_credential_attach_pending(
         &self,
-    ) -> Result<Option<Option<LostCredentialAttachRefusalReason>>, RemoteParticipantError> {
+    ) -> Result<PendingTestimonyVerdict, RemoteParticipantError> {
         let mut state = self.state.lock();
         let aggregate = take_aggregate(&mut state)?;
         let verdict = if aggregate.lost_credential_attach().is_some() {
-            Some(None)
+            PendingTestimonyVerdict::IssuedCredentialAttach
         } else if aggregate.lost_operation_testimony().is_some() {
-            Some(Some(
-                LostCredentialAttachRefusalReason::NotAnIssuedCredentialAttach,
-            ))
+            PendingTestimonyVerdict::OtherOperation
         } else {
-            None
+            PendingTestimonyVerdict::Nothing
         };
         state.aggregate = Some(aggregate);
         Ok(verdict)
@@ -817,6 +815,21 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
             }
         }
     }
+}
+
+/// What the pending operation-domain testimony is, read without consuming it.
+///
+/// Three cases, kept distinct because the driver must act differently on each:
+/// drive it, decline it while leaving the atom for the path that owns it, or
+/// report that nothing is owed at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingTestimonyVerdict {
+    /// No operation-domain testimony is pending.
+    Nothing,
+    /// An issued credential attach — this driver's case.
+    IssuedCredentialAttach,
+    /// Testimony for an operation class this driver does not own.
+    OtherOperation,
 }
 
 /// Classifies the answer to one recovery probe.

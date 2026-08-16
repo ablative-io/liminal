@@ -1,0 +1,4 @@
+    Checking liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a52a4918b27f91dbd/crates/liminal-sdk)
+    Checking liminal-server v0.8.2 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a52a4918b27f91dbd/crates/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 19.28s
+TRUE EXIT: 0

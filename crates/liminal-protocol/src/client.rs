@@ -67,6 +67,15 @@
 //!     [`ClientOperationRecordRefusalReason::DetachReplayIncompatible`]
 //!     (r2, 2026-07-18), closing the round-4 door that revived expected-detach
 //!     authority over an inactive replay.
+//! 21. [`ClientParticipantAggregate::lost_credential_attach`] is a pure READ of
+//!     pending testimony, added because [`resolve_lost_operation_authority`] is
+//!     destructive by design (#195, 2026-08-16). A recovery driver that owns one
+//!     operation class had no way to ask whether the pending testimony was its
+//!     class without already having spent the take-once atom on a path that
+//!     still needed it — detach replay, or a tokenless abandonment. It mints
+//!     nothing, consumes nothing, and moves no state, so it adds no row to the
+//!     audit below and cannot widen any existing one; it only lets a caller
+//!     decline a case without destroying it.
 //!
 //! # Exhaustive constructible-state audit
 //!
