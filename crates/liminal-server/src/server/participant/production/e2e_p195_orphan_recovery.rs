@@ -597,11 +597,6 @@ fn a_never_committed_credential_attach_commits_fresh_on_re_presentation()
     drop(witness);
     server.stop()?;
 
-    // The victim checkpoints the attach as issued and dies there. `send_operation`
-    // persists the issued state before it touches the socket, so this is the real
-    // crash window between the durable write and the wire write -- not a
-    // contrived one.
-    store.die_after_next_write();
     let unseen = attach_request(
         participant_id,
         retained_generation,
@@ -615,6 +610,11 @@ fn a_never_committed_credential_attach_commits_fresh_on_re_presentation()
             return Err(format!("SDK refused the unseen attach {request:?}: {reason:?}").into());
         }
     };
+    // The victim dies with the ISSUED checkpoint as its last durable act.
+    // `send_operation` persists the issued state before it touches the socket,
+    // so accepting exactly one more write lands the process squarely in the real
+    // crash window between the durable write and the wire write.
+    store.die_after_next_write();
     // Whether the write lands in a dead socket or fails outright is not this
     // pin's business; either way the server never saw it and the checkpoint above
     // is what the process left behind.

@@ -13,10 +13,11 @@ use liminal_protocol::outcome::ReconnectState;
 use liminal_protocol::wire::{ClientRequest, DetachRequest, Generation, ServerValue};
 
 use super::{
-    OperationDurability, ParticipantResumeStore, RemoteOperationTransportFate,
-    RemoteParticipantError, RemoteParticipantHandle, RemoteParticipantOperation,
-    RemoteParticipantSendOutcome, RemoteReconnectPermit, RemoteReconnectPermitOutcome,
-    persist_retaining, record_connection_fate, record_operation_transport_fate, take_aggregate,
+    OperationDurability, ParticipantResumeStore, RemoteOperationRecordOutcome,
+    RemoteOperationTransportFate, RemoteParticipantError, RemoteParticipantHandle,
+    RemoteParticipantInbound, RemoteParticipantOperation, RemoteParticipantSendOutcome,
+    RemoteReconnectPermit, RemoteReconnectPermitOutcome, persist_retaining,
+    record_connection_fate, record_operation_transport_fate, take_aggregate,
 };
 
 /// Result of releasing a committed cold-restored operation.
@@ -405,17 +406,64 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
     pub fn recover_lost_credential_attach(
         &self,
     ) -> Result<RemoteCredentialAttachRecovery, RemoteParticipantError> {
-        let Some(reason) = self.lost_credential_attach_pending()? else {
+        // 1. Look before consuming. The take-once atom must survive a driver
+        //    that turns out not to own this case.
+        let Some(verdict) = self.lost_credential_attach_pending()? else {
             return Ok(RemoteCredentialAttachRecovery::NotPending {
                 reason: LostCredentialAttachRefusalReason::NoPendingTestimony,
             });
         };
-        if let Some(reason) = reason {
+        if let Some(reason) = verdict {
             return Ok(RemoteCredentialAttachRecovery::NotPending { reason });
         }
-        Ok(RemoteCredentialAttachRecovery::NotPending {
-            reason: LostCredentialAttachRefusalReason::NoPendingTestimony,
-        })
+
+        // 2. Consume the testimony. The peek above proved this is an issued
+        //    credential attach, so `Recorded` is the only reachable arm; the
+        //    others fall through to a typed refusal rather than a panic.
+        let request = match self.resolve_lost_operation_authority()? {
+            RemoteLostOperationResolution::Recorded { request, .. } => request,
+            RemoteLostOperationResolution::DetachParked { .. }
+            | RemoteLostOperationResolution::Refused { .. } => {
+                return Ok(RemoteCredentialAttachRecovery::NotPending {
+                    reason: LostCredentialAttachRefusalReason::NotAnIssuedCredentialAttach,
+                });
+            }
+        };
+
+        // 3. Re-record the EXACT retained envelope. Nothing is minted and
+        //    nothing is advanced: same attempt token, same generation, same old
+        //    secret. The crate admits it because the retained binding still
+        //    matches it, and server-side token dedup keeps it at-most-once.
+        let operation = match self.record_operation(request)? {
+            RemoteOperationRecordOutcome::Recorded(operation)
+            | RemoteOperationRecordOutcome::Continuous(operation) => operation,
+            RemoteOperationRecordOutcome::Refused { request, reason } => {
+                return Ok(RemoteCredentialAttachRecovery::RerecordRefused { request, reason });
+            }
+        };
+
+        // 4. THE PROBE, on this call. No backoff, no timer, no retry loop: the
+        //    receipt window is what this is spending, and a delay here would be
+        //    spent out of it.
+        match self.send_operation(operation)? {
+            RemoteParticipantSendOutcome::Sent { .. } => {}
+            RemoteParticipantSendOutcome::TransportLost {
+                error,
+                operation_fate,
+                reconnect,
+            } => {
+                return Ok(RemoteCredentialAttachRecovery::TransportLost {
+                    error,
+                    operation_fate,
+                    reconnect,
+                });
+            }
+        }
+
+        // 5. Apply the answer through the crate's ordinary inbound path, then
+        //    classify what it applied. The application is the crate's; the
+        //    classification below reads the applied value and invents nothing.
+        Ok(classify_recovery_answer(self.receive()?))
     }
 
     /// Borrows a copy of the retained credential-attach envelope this handle
@@ -768,6 +816,79 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
                 ))
             }
         }
+    }
+}
+
+/// Classifies the answer to one recovery probe.
+///
+/// Every arm reads a value the crate has ALREADY applied (or refused). Nothing
+/// here re-derives a decision the crate made, and nothing is relabelled: the
+/// four classified arms are the four exhaustive server answers to a same-token
+/// re-presentation, and everything else is handed back verbatim.
+fn classify_recovery_answer(inbound: RemoteParticipantInbound) -> RemoteCredentialAttachRecovery {
+    let (value, provenance) = match inbound {
+        RemoteParticipantInbound::Applied { value, provenance } => (value, provenance),
+        RemoteParticipantInbound::Refused {
+            value,
+            reason,
+            provenance,
+        } => {
+            return RemoteCredentialAttachRecovery::AnswerRefused {
+                value,
+                reason,
+                provenance,
+            };
+        }
+        RemoteParticipantInbound::Push { value, provenance } => {
+            return RemoteCredentialAttachRecovery::PushedBeforeAnswer { value, provenance };
+        }
+    };
+    match &value {
+        // The committed outcome, replayed. `Bound` and `UnboundReceipt` differ
+        // only in whether the receipt still names a live origin binding; both
+        // carry the rotation, and the crate has already adopted it.
+        ServerValue::Bound(liminal_protocol::wire::ReceiptReplay::CredentialAttach(_))
+        | ServerValue::UnboundReceipt(liminal_protocol::wire::ReceiptReplay::CredentialAttach(
+            _,
+        )) => RemoteCredentialAttachRecovery::HealedFromReceipt { value, provenance },
+        // Never committed before, committed now.
+        ServerValue::AttachBound(_) => {
+            RemoteCredentialAttachRecovery::CommittedFresh { value, provenance }
+        }
+        // Past the receipt window, inside provenance: the server can still name
+        // the generation the lost commit produced.
+        ServerValue::ReceiptExpired(liminal_protocol::wire::ReceiptExpired::CredentialAttach {
+            result_generation,
+            current_generation,
+            reason,
+            ..
+        }) => {
+            let (result_generation, current_generation, reason) = (
+                Some(*result_generation),
+                *current_generation,
+                CredentialAttachReissueReason::ReceiptExpired(*reason),
+            );
+            RemoteCredentialAttachRecovery::ReissueRequired {
+                result_generation,
+                current_generation,
+                reason,
+                value,
+                provenance,
+            }
+        }
+        // Past provenance: the server claims no commit proof, so no result
+        // generation is reported rather than one being inferred.
+        ServerValue::StaleOrUnknownReceipt(stale) => {
+            let current_generation = stale.current_generation;
+            RemoteCredentialAttachRecovery::ReissueRequired {
+                result_generation: None,
+                current_generation,
+                reason: CredentialAttachReissueReason::StaleOrUnknownReceipt,
+                value,
+                provenance,
+            }
+        }
+        _ => RemoteCredentialAttachRecovery::Answered { value, provenance },
     }
 }
 

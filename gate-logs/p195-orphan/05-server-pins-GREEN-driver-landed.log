@@ -1,0 +1,15 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.84s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-17af7e5dd70ff256)
+
+running 7 tests
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::the_driver_leaves_a_detachs_testimony_untouched ... ok
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::an_expired_receipt_surfaces_the_typed_reissue_terminal ... ok
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_client_killed_mid_attach_cannot_re_attach_from_its_retained_credential ... ok
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_stale_or_unknown_receipt_surfaces_the_same_terminal_without_a_commit_claim ... ok
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_lost_credential_attach_heals_from_the_servers_receipt_replay ... ok
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_healed_client_round_trips_through_one_more_restart ... ok
+test server::participant::production::e2e_tests::e2e_p195_orphan_recovery::a_never_committed_credential_attach_commits_fresh_on_re_presentation ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 760 filtered out; finished in 8.93s
+
+TRUE EXIT: 0
