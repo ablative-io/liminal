@@ -3,6 +3,67 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
+## 0.6.0 — 2026-08-18
+
+`liminal-rs` 0.5.5 → 0.6.0, `liminal-server` 0.8.2 → 0.9.0;
+`liminal-protocol` 0.7.0 and `liminal-sdk` 0.7.0 (both unchanged).
+
+**This is a breaking release, and the break is inherited rather than authored.**
+No liminal item was added, removed or resignatured; the wire protocol did not
+move; no contract text changed. What moved is the major version of two
+dependencies whose types liminal carries in its own public API, which under
+0.x semver makes this a minor bump for both crates rather than a patch.
+
+### Changed
+
+- **beamr 0.17.1 → 0.19.1 and haematite 0.8.3 → 0.9.0, in one motion.** The two
+  pins move together and may never move apart: haematite's public API carries
+  beamr types across the crate boundary, so two beamr versions in one tree are
+  two incompatible types with identical names. haematite is pinned exactly
+  (`=0.9.0`) for that reason. Pinned by published artifact:
+
+  | crate | version | sha256 |
+  |---|---|---|
+  | beamr | 0.19.1 | `bd7d2a8b408452efead5933fb672bee795b64666873f2aa6dbf717451c8b2dd7` |
+  | haematite | 0.9.0 | `60b8566825e2647cc4b1b25395972d06eb722b66f2fe398de9651c191c9135e1` |
+  | gleam-types | 0.4.4 | `d584956cc629238409467c899f7fb219bb60bfb78afef3a715842c6bed87f9e2` |
+
+  gleam-types rides along because beamr 0.19.1 requires `^0.4.4`.
+
+- **Scheduler construction now declares its native-BIF surface.** beamr 0.19
+  added a required `NativeBifs` argument to `Scheduler::new` and
+  `Scheduler::with_services`, with no `Default` and no `From`, so every embedder
+  must state its answer. All three of liminal's schedulers declare
+  `NativeBifs::none()`, which is correct because none of them loads bytecode:
+  the two hand-built actor modules carry empty function tables, the connection
+  scheduler registers no module at all, and the six opcodes liminal emits
+  (`Label`, `Wait`, `RemoveMessage`, `LoopRec`, `CallOnly`, `CallExt`) contain
+  no arithmetic, comparison or type guard — the only place the declaration can
+  bite. **This is an internal change with no observable effect**; it is recorded
+  because it is the entire compile-forced surface of the beamr major bump.
+
+### Why this is breaking, stated precisely
+
+Both published crates expose the moved dependencies in public signatures, so a
+consumer that names those types must recompile against the new majors:
+
+- `liminal-rs` — `haematite::ApiError` is a variant of the public
+  `DurabilityError` (`durability/error.rs:10`); `HaematiteStore::new` takes
+  `Arc<haematite::EventStore>` (`durability/store.rs:87`);
+  `ChannelSupervisor::scheduler` returns `Arc<beamr::Scheduler>`
+  (`channel/supervisor.rs:193`); `ParticipantStatus::exit_reason` is a public
+  field of type `Option<beamr::ExitReason>` (`conversation/types.rs:210`).
+- `liminal-server` — beamr types are public throughout `cluster::{discovery,
+  membership, sync}` (e.g. `MembershipDelta::joined: Vec<Atom>` at
+  `cluster/membership.rs:104`, `membership::start` taking `&Arc<Scheduler>` at
+  `:542`) and via `ConnectionSupervisor::scheduler`
+  (`server/connection/supervisor.rs:249`). haematite, by contrast, is fully
+  encapsulated in this crate — private functions and `cfg(test)` only — so its
+  bump reaches `liminal-server` only transitively through `liminal-rs`.
+
+`liminal-protocol` and `liminal-sdk` name neither dependency and are not
+resignatured, so their versions do not move.
+
 ## 0.5.1 — 2026-07-29
 
 `liminal-rs` 0.5.1, `liminal-server` 0.5.1, `liminal-sdk` 0.5.1;
