@@ -52,7 +52,11 @@ clap = "4"
 # re-enabling default features it disabled, so the lean base is the only base that
 # can satisfy both.)
 futures-core = { version = "0.3", default-features = false }
-haematite = "0.8.1"
+# INTERIM EXACT PIN — haematite ^0.8.1 would admit 0.8.3 (beamr ^0.17.1) and split
+# this tree into two beamr copies (the #9 duplicate-copy class). The beamr-0.18
+# migration row (ablative/stack/aion/builds entry c591a424) replaces this with the
+# checksum-verified admitting release in one motion; do not widen it before then.
+haematite = "=0.8.1"
 js-sys = "0.3.102"
 jsonschema = { version = "0.46.5", default-features = false }
 rand = "0.10.1"
