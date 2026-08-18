@@ -5,6 +5,12 @@ Each crate is versioned and published independently (`liminal-rs`,
 `liminal-server`, `liminal-protocol`, `liminal-sdk`); a release entry names
 the versions it actually moves.
 
+Wave headings and the `liminal-v*` tag series both track **liminal-server's
+version** (a single-crate release that does not move the server gets a
+crate-named heading instead, e.g. "liminal-protocol 0.7.1"). Stated here
+because a heading named after another crate's version collided once
+(2026-08-18, "0.6.0") and was corrected in place below.
+
 ## liminal-protocol 0.7.1 — 2026-08-18
 
 `liminal-protocol` 0.7.0 → 0.7.1; no other crate moves.
