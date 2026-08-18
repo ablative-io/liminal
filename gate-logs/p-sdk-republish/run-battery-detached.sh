@@ -45,8 +45,14 @@ entry_block() {
 # Proven both ways against the live file before arming: entries 1 and 2 (real
 # markers, "DONE 2026-08-18T07:57:57Z") matched, entries 3 and 4 (unfinished,
 # one of them carrying the decoy phrase) did not.
+# r2 FIX (18:0xZ): the mark itself can WRAP -- entry 8's real mark was
+# "**DONE\n   2026-08-18T16:35:41Z", DONE and its date on DIFFERENT lines,
+# invisible to any line-based grep however block-scoped. Join the block into
+# one line first. Proven both ways on the live file: entries 1-9 (incl. the
+# wrapped mark) match, entries 10-11 (carrying "clean-at-DONE" decoy prose
+# with no date) do not.
 entry_done() {
-  entry_block "$1" | grep -qE 'DONE[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}'
+  entry_block "$1" | tr '\n' ' ' | grep -qE 'DONE[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}'
 }
 
 one_min_load() { sysctl -n vm.loadavg | awk '{print $2}'; }
