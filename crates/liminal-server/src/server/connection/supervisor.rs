@@ -17,7 +17,8 @@ use beamr::module::ModuleRegistry;
 use beamr::native::native_process::NativeHandlerFactory;
 use beamr::process::ExitReason;
 use beamr::scheduler::{
-    ExitEvent, ExitEventSubscription, ReadinessToken, Scheduler, SchedulerConfig, SchedulerServices,
+    ExitEvent, ExitEventSubscription, NativeBifs, ReadinessToken, Scheduler, SchedulerConfig,
+    SchedulerServices,
 };
 use beamr::timer::TimerRef;
 
@@ -1135,6 +1136,13 @@ impl SupervisorInner {
             },
             SchedulerServices::from_config().owned_readiness(),
             registry,
+            // The strongest of the three cases: `registry` here is a bare
+            // `ModuleRegistry::new()` with NO module ever inserted, so this
+            // scheduler cannot execute a single bytecode instruction, let alone
+            // a guard BIF. Connections run as native processes via
+            // `NativeHandlerFactory`. beamr 0.19 requires the answer be written
+            // down rather than inherited; the answer is none.
+            NativeBifs::none(),
         )
         .map_err(|message| ServerError::ListenerAccept {
             message: format!("failed to start connection scheduler: {message}"),

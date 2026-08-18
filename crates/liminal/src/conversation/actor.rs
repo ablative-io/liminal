@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use beamr::atom::{Atom, AtomTable};
 use beamr::module::ModuleRegistry;
-use beamr::scheduler::{Scheduler, SchedulerConfig};
+use beamr::scheduler::{NativeBifs, Scheduler, SchedulerConfig};
 
 mod backend;
 mod beam;
@@ -293,6 +293,13 @@ impl SupervisorInner {
                 ..SchedulerConfig::default()
             },
             registry,
+            // No bytecode is loaded into this scheduler and no native BIFs are
+            // resolved -- see the fuller note at channel/supervisor.rs. The one
+            // module registered is `actor_module`, whose `function_table` is
+            // empty (conversation/actor/beam.rs:162) and whose instructions
+            // contain no arithmetic, comparison or type guard, which is the only
+            // place `NativeBifs::none()` can bite.
+            NativeBifs::none(),
         )
         .map_err(|message| LiminalError::ConversationFailed { message })?;
         Ok(Self {

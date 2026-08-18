@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 use beamr::atom::{Atom, AtomTable};
 use beamr::distribution::{DistributionConfig, Resolver};
 use beamr::module::ModuleRegistry;
-use beamr::scheduler::{Scheduler, SchedulerConfig};
+use beamr::scheduler::{NativeBifs, Scheduler, SchedulerConfig};
 
 use crate::channel::actor::{ActorRuntime, ChannelActorCore, actor_module, private_data};
 use crate::channel::observer::ClusterObserver;
@@ -159,6 +159,21 @@ impl ChannelSupervisor {
                 ..SchedulerConfig::default()
             },
             registry,
+            // This scheduler runs ONLY native actors and loads no bytecode, so
+            // it resolves no native BIFs. beamr 0.19 removed the ability to
+            // inherit this answer (`NativeBifs` has no `Default` and no `From`),
+            // so it is written down here deliberately. The declaration is safe
+            // by construction, not by hope: the only module in `registry` is
+            // `actor_module` above, whose entire instruction set is Label /
+            // LoopRec / RemoveMessage / CallExt / CallOnly / Wait, with an empty
+            // `function_table` (channel/actor/beam.rs:141). `NativeBifs::none()`
+            // only bites at guard-BIF execution -- arithmetic, comparison or
+            // type guards -- and this module emits none of those, so
+            // `ExecError::GuardBifUnavailable` is unreachable here. The single
+            // `CallExt` resolves through module-level native resolution
+            // (`ResolvedImportTarget::Native`), which is a different mechanism
+            // from the BIF registry and is unaffected by this declaration.
+            NativeBifs::none(),
         )
         .map_err(|message| LiminalError::ConversationFailed { message })?;
         Ok(Self {
