@@ -249,6 +249,7 @@ impl Fixture {
             shard_count: 4,
             distributed: None,
             executor_threads: None,
+            node_cache_budget: Some(haematite::NodeCacheBudget::Unlimited),
         })?;
         let store: Arc<dyn DurableStore> =
             Arc::new(HaematiteStore::new(Arc::new(EventStore::new(database))));

@@ -90,6 +90,7 @@ fn create_store(
         shard_count: 2,
         distributed: None,
         executor_threads: None,
+        node_cache_budget: Some(haematite::NodeCacheBudget::Unlimited),
     })?;
     Ok(Arc::new(HaematiteStore::new(Arc::new(EventStore::new(
         database,

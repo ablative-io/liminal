@@ -1,0 +1,44 @@
+    Checking fnv v1.0.7
+    Checking getrandom v0.3.4
+    Checking bit-vec v0.8.0
+    Checking gimli v0.33.0
+    Checking liminal-protocol v0.7.0 (/Users/tom/Developer/ablative/stack/liminal-wt-dep-hop/crates/liminal-protocol)
+    Checking futures-core v0.3.32
+    Checking winnow v1.0.4
+    Checking serde_spanned v1.1.1
+    Checking toml_datetime v1.1.1+spec-1.1.0
+    Checking toml_writer v1.1.2+spec-1.1.0
+    Checking target-triple v1.0.1
+    Checking glob v0.3.3
+    Checking ahash v0.8.12
+    Checking termcolor v1.4.1
+    Checking rand_core v0.9.5
+    Checking bit-set v0.8.0
+    Checking ppv-lite86 v0.2.21
+    Checking wait-timeout v0.2.1
+    Checking quick-error v1.2.3
+    Checking unarray v0.1.4
+    Checking rusty-fork v0.3.1
+    Checking rand v0.9.5
+    Checking referencing v0.46.5
+    Checking rand_xorshift v0.4.0
+    Checking liminal-ts-wasm v0.3.0 (/Users/tom/Developer/ablative/stack/liminal-wt-dep-hop/sdks/liminal-ts/wasm-src)
+    Checking fancy-regex v0.18.0
+    Checking rand_chacha v0.9.0
+    Checking toml_parser v1.1.2+spec-1.1.0
+    Checking proptest v1.11.0
+    Checking toml v1.1.3+spec-1.1.0
+    Checking jsonschema v0.46.5
+    Checking trybuild v1.0.118
+    Checking cranelift-codegen v0.131.2
+    Checking cranelift-module v0.131.2
+    Checking cranelift-native v0.131.2
+    Checking cranelift-frontend v0.131.2
+    Checking cranelift-jit v0.131.2
+    Checking beamr v0.17.1
+    Checking haematite v0.8.3
+    Checking liminal-rs v0.5.5 (/Users/tom/Developer/ablative/stack/liminal-wt-dep-hop/crates/liminal)
+    Checking liminal-server v0.8.2 (/Users/tom/Developer/ablative/stack/liminal-wt-dep-hop/crates/liminal-server)
+    Checking liminal-sdk v0.7.0 (/Users/tom/Developer/ablative/stack/liminal-wt-dep-hop/crates/liminal-sdk)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 54s
+CLIPPY_EXIT=0

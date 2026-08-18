@@ -1,0 +1,48 @@
+RERUN_PROTOCOL start 2026-08-18T06:03:52Z loadavg={ 27.66 37.77 85.68 }
+== inbox_overflow solo run 1 loadavg={ 27.66 37.77 85.68 }
+test inbox_overflow_sheds_the_offending_subscription_without_tearing_down_the_connection ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.25s
+RUN1_EXIT=0
+== inbox_overflow solo run 2 loadavg={ 27.87 43.40 74.73 }
+test inbox_overflow_sheds_the_offending_subscription_without_tearing_down_the_connection ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.35s
+RUN2_EXIT=0
+== inbox_overflow solo run 3 loadavg={ 27.87 43.40 74.73 }
+test inbox_overflow_sheds_the_offending_subscription_without_tearing_down_the_connection ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.31s
+RUN3_EXIT=0
+== inbox_overflow solo run 4 loadavg={ 27.87 43.40 74.73 }
+test inbox_overflow_sheds_the_offending_subscription_without_tearing_down_the_connection ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.29s
+RUN4_EXIT=0
+== inbox_overflow solo run 5 loadavg={ 27.87 43.40 74.73 }
+test inbox_overflow_sheds_the_offending_subscription_without_tearing_down_the_connection ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.30s
+RUN5_EXIT=0
+== subscription_e2e full suite loadavg={ 27.87 43.40 74.73 }
+test slow_reader_does_not_wedge_other_connections ... ok
+test subscription_publish_wakes_parked_connection_in_order ... ok
+test large_payload_is_delivered_intact ... ok
+test oversize_frame_survives_wouldblock_boundary_and_no_desync ... ok
+test inbox_overflow_sheds_the_offending_subscription_without_tearing_down_the_connection ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+SUITE_EXIT=0
+== starvation mixed-fate solo run 1 loadavg={ 27.87 43.40 74.73 }
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 3.09s
+MFRUN1_EXIT=0
+== starvation mixed-fate solo run 2 loadavg={ 32.91 38.04 68.01 }
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.35s
+MFRUN2_EXIT=0
+== starvation mixed-fate solo run 3 loadavg={ 35.48 38.49 67.99 }
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.04s
+MFRUN3_EXIT=0
+== starvation full suite loadavg={ 35.48 38.49 67.99 }
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... ok
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... ok
+test c_the_smallest_configurable_slice_budget_still_delivers_everything ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.96s
+STARVE_SUITE_EXIT=0
+SENTINEL_DONE at 2026-08-18T06:11:41Z loadavg={ 35.48 38.49 67.99 }

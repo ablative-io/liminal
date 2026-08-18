@@ -1531,6 +1531,16 @@ fn open_or_create_database(data_dir: &Path) -> Result<Database, ServerError> {
             shard_count: DEFAULT_SHARD_COUNT,
             distributed: None,
             executor_threads: None,
+            // haematite 0.8.3 requires this field and refuses `None` at
+            // validation; `Unlimited` is the crate's explicit spelling of the
+            // pre-budget (0.8.1) behaviour — the behaviour-preserving choice
+            // for a dependency hop. A real byte ceiling is a deployment
+            // decision for its own measured lane. ⚠ The `Database::open` arm
+            // above is unaffected on CREATE but a store whose `config.json`
+            // predates this field refuses to open (`MissingNodeCacheBudget`)
+            // until an operator writes a budget into that file — loud by
+            // haematite's design, named in this hop's lane report.
+            node_cache_budget: Some(haematite::NodeCacheBudget::Unlimited),
         })
     };
     result.map_err(|error| ServerError::ConfigValidation {

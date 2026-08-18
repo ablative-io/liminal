@@ -145,9 +145,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beamr"
-version = "0.16.3"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2055871ac77915291626ecbc45e1e3a7cb6851d22f4152d16f54253e383b3a1"
+checksum = "f9a16c4343642f0deff1da8b74370b1239370aa14f46c89814331c172dda560b"
 dependencies = [
  "base64",
  "cranelift-codegen",
@@ -831,9 +831,9 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "haematite"
-version = "0.8.1"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2bf4d64222be38309d0f51c7907a8934d475c9d491da9c2e4fa1732321e9415"
+checksum = "29ed98bb87be199d544cffd3727d7a608af8132ae46b7478defeb35cdfe2b0ca"
 dependencies = [
  "beamr",
  "blake3",

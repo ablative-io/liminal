@@ -24,6 +24,7 @@ fn disk_store() -> Result<(HaematiteStore, TempDir), Box<dyn std::error::Error>>
         shard_count: 4,
         distributed: None,
         executor_threads: None,
+        node_cache_budget: Some(haematite::NodeCacheBudget::Unlimited),
     })?;
     Ok((
         HaematiteStore::new(Arc::new(EventStore::new(database))),

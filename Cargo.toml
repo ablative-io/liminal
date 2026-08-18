@@ -42,7 +42,7 @@ liminal-server = { version = "0.8.2", path = "crates/liminal-server" }
 
 anyhow = "1"
 async-trait = "0.1"
-beamr = { version = "0.16.3", features = ["readiness"] }
+beamr = { version = "0.17.1", features = ["readiness"] }
 blake3 = "1"
 chrono = "0.4.45"
 clap = "4"
@@ -52,11 +52,16 @@ clap = "4"
 # re-enabling default features it disabled, so the lean base is the only base that
 # can satisfy both.)
 futures-core = { version = "0.3", default-features = false }
-# INTERIM EXACT PIN — haematite ^0.8.1 would admit 0.8.3 (beamr ^0.17.1) and split
-# this tree into two beamr copies (the #9 duplicate-copy class). The beamr-0.18
-# migration row (ablative/stack/aion/builds entry c591a424) replaces this with the
-# checksum-verified admitting release in one motion; do not widen it before then.
-haematite = "=0.8.1"
+# EXACT PIN, moved =0.8.1 → =0.8.3 in ONE MOTION with the beamr 0.16.3 → 0.17.1
+# hop above (Tom's dependency word 2026-08-18, relayed meridian 2bf2782d; haematite
+# 0.8.3 declares beamr ^0.17.1, so moving either pin alone splits this tree into
+# two beamr copies — the #9 duplicate-copy class). Registry checksum verified at
+# the sparse index: 29ed98bb87be…. The beamr migration row (ablative/stack/
+# aion/builds entry c591a424) replaces BOTH pins in its own one motion when a
+# haematite admitting beamr ≥0.18 publishes — the target version is re-measured
+# at that trigger (0.19.0 per the 08-18 relay), never transliterated from the
+# row's original 0.18.2 wording. Do not widen either pin before then.
+haematite = "=0.8.3"
 js-sys = "0.3.102"
 jsonschema = { version = "0.46.5", default-features = false }
 rand = "0.10.1"

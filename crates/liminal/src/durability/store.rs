@@ -602,6 +602,13 @@ fn open_ephemeral_in(
         shard_count,
         distributed: None,
         executor_threads: None,
+        // haematite 0.8.3 requires this field and refuses `None` at validation;
+        // `Unlimited` is the crate's explicit spelling of the pre-budget
+        // (0.8.1) behaviour, said out loud — the behaviour-preserving choice
+        // for a dependency hop. Selecting a real byte ceiling is a deployment
+        // decision (box size, shard count, leaf weight) that belongs to its
+        // own measured lane, not to this bump.
+        node_cache_budget: Some(haematite::NodeCacheBudget::Unlimited),
     })
     .map_err(|error| DurabilityError::EphemeralStoreOpen(error.to_string()))?;
     Ok(EphemeralHaematiteStore::new(database, ephemeral_dir))
