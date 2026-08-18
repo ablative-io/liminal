@@ -42,10 +42,13 @@ frame's lock, where the duplicate guard refuses the fork by design).
 - Version only. The `embedded` feature's edges now require `liminal-rs`
   0.6.0 and `liminal-server` 0.9.0 (checksums in the entry below).
 
-## 0.6.0 — 2026-08-18
+## 0.9.0 — 2026-08-18
 
 `liminal-rs` 0.5.5 → 0.6.0, `liminal-server` 0.8.2 → 0.9.0;
 `liminal-protocol` 0.7.0 and `liminal-sdk` 0.7.0 (both unchanged).
+(Heading follows the `liminal-v` tag series, which tracks liminal-server's
+version — tag `liminal-v0.9.0`. Corrected 2026-08-18 from "0.6.0", which
+collided with the 2026-08-10 wave below.)
 
 **This is a breaking release, and the break is inherited rather than authored.**
 No liminal item was added, removed or resignatured; the wire protocol did not
@@ -102,6 +105,59 @@ consumer that names those types must recompile against the new majors:
 
 `liminal-protocol` and `liminal-sdk` name neither dependency and are not
 resignatured, so their versions do not move.
+
+> The eight entries below (0.5.2 through 0.8.2) were added retroactively on
+> 2026-08-18 under the publish-verification order: the releases shipped with
+> tags and release commits but no changelog entries. Versions and dates are
+> measured from the tags' own manifests; the tag and its release commit are
+> each entry's primary record.
+
+## 0.8.2 — 2026-08-14
+
+`liminal-server` 0.8.1 → 0.8.2; no other crate moves. The marker-ownership
+wave (tag `liminal-v0.8.2`).
+
+## 0.8.1 — 2026-08-14
+
+`liminal-server` 0.8.0 → 0.8.1; no other crate moves. The fossil-reclaim
+wave (tag `liminal-v0.8.1`).
+
+## 0.8.0 — 2026-08-13
+
+`liminal-protocol` 0.6.0 → 0.7.0, `liminal-server` 0.7.0 → 0.8.0,
+`liminal-sdk` 0.6.2 → 0.7.0; `liminal-rs` 0.5.5 (unchanged). The
+breaking-window wave (tag `liminal-v0.8.0`).
+
+## 0.7.0 — 2026-08-13
+
+`liminal-protocol` 0.5.1 → 0.6.0, `liminal-server` 0.6.1 → 0.7.0,
+`liminal-sdk` 0.6.1 → 0.6.2; `liminal-rs` 0.5.5 (unchanged). Tag
+`liminal-v0.7.0`.
+
+## 0.6.1 — 2026-08-10
+
+`liminal-protocol` 0.5.0 → 0.5.1, `liminal-rs` 0.5.4 → 0.5.5,
+`liminal-server` 0.6.0 → 0.6.1, `liminal-sdk` 0.6.0 → 0.6.1 — all four
+crates. Tag `liminal-v0.6.1`.
+
+## 0.6.0 — 2026-08-10
+
+`liminal-protocol` 0.4.1 → 0.5.0, `liminal-rs` 0.5.3 → 0.5.4,
+`liminal-server` 0.5.3 → 0.6.0, `liminal-sdk` 0.5.3 → 0.6.0. Tag
+`liminal-v0.6.0`.
+
+## 0.5.3 — 2026-08-09
+
+`liminal-protocol` 0.4.0 → 0.4.1, `liminal-rs` 0.5.2 → 0.5.3,
+`liminal-server` 0.5.2 → 0.5.3, `liminal-sdk` 0.5.1 → 0.5.3 (0.5.2 was
+never published for the sdk; the release stripped the sdk dev-dep version
+after the publish cycle bit at the feature). Tag `liminal-v0.5.3`.
+
+## 0.5.2 — 2026-08-07
+
+`liminal-protocol` 0.3.2 → 0.4.0, `liminal-rs` 0.5.1 → 0.5.2,
+`liminal-server` 0.5.1 → 0.5.2; `liminal-sdk` 0.5.1 (unchanged). The
+beamr-floor release (tag `liminal-v0.5.2`, branch `release-0.5.2-beamr-floor`).
 
 ## 0.5.1 — 2026-07-29
 
