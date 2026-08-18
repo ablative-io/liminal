@@ -1,7 +1,9 @@
 # Changelog
 
-All notable changes to liminal are recorded here. Versions follow semver;
-`liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
+All notable changes to liminal are recorded here. Versions follow semver.
+Each crate is versioned and published independently (`liminal-rs`,
+`liminal-server`, `liminal-protocol`, `liminal-sdk`); a release entry names
+the versions it actually moves.
 
 ## 0.6.0 — 2026-08-18
 
