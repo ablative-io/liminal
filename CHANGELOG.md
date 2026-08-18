@@ -5,6 +5,24 @@ Each crate is versioned and published independently (`liminal-rs`,
 `liminal-server`, `liminal-protocol`, `liminal-sdk`); a release entry names
 the versions it actually moves.
 
+## liminal-sdk 0.8.0 — 2026-08-18
+
+`liminal-sdk` 0.7.0 → 0.8.0; no other crate moves.
+
+**A breaking release with zero code change.** No liminal-sdk item was added,
+removed or resignatured, and the crate's own API names neither moved
+dependency. The break is transitive: the optional `embedded` feature carries
+`liminal-rs` and `liminal-server`, which moved to 0.6.0 / 0.9.0 in the
+release below. A consumer with `embedded` enabled resolves the new family
+through this release; published 0.7.0's `liminal-rs ^0.5.5` edge cannot
+unify with 0.6.0 and would fork a consumer's lock two-versions (measured at
+frame's lock, where the duplicate guard refuses the fork by design).
+
+### Changed
+
+- Version only. The `embedded` feature's edges now require `liminal-rs`
+  0.6.0 and `liminal-server` 0.9.0 (checksums in the entry below).
+
 ## 0.6.0 — 2026-08-18
 
 `liminal-rs` 0.5.5 → 0.6.0, `liminal-server` 0.8.2 → 0.9.0;
