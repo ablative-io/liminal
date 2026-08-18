@@ -5,6 +5,25 @@ Each crate is versioned and published independently (`liminal-rs`,
 `liminal-server`, `liminal-protocol`, `liminal-sdk`); a release entry names
 the versions it actually moves.
 
+## liminal-protocol 0.7.1 — 2026-08-18
+
+`liminal-protocol` 0.7.0 → 0.7.1; no other crate moves.
+
+**An additive cut that closes silent in-tree drift.** The tree's protocol had
+carried one public item the published 0.7.0 does not:
+`ClientParticipantAggregate::lost_credential_attach` (added by the #195
+peek-verdict work; total drift measured at client.rs +43/−0, nothing removed
+or resignatured). The gap was latent — every in-workspace build resolves the
+path crate — and surfaced the first time a standalone consumer needed the
+symbol: `liminal-sdk` 0.8.0's package verification builds against PUBLISHED
+dependencies and failed on the missing method. Additive-only under 0.x is a
+patch; `^0.7.0` requirements resolve this release without edits.
+
+### Added
+
+- `ClientParticipantAggregate::lost_credential_attach` — peek at a retained
+  credential-attach request on the client aggregate (`client.rs`).
+
 ## liminal-sdk 0.8.0 — 2026-08-18
 
 `liminal-sdk` 0.7.0 → 0.8.0; no other crate moves.

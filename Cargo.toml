@@ -24,7 +24,7 @@ authors = [
 # because the bare name is taken on crates.io, but is imported as `liminal`.
 [workspace.dependencies]
 liminal = { package = "liminal-rs", version = "0.6.0", path = "crates/liminal" }
-liminal-protocol = { version = "0.7.0", path = "crates/liminal-protocol" }
+liminal-protocol = { version = "0.7.1", path = "crates/liminal-protocol" }
 # PATH-ONLY, deliberately: the sole consumer is `liminal-server`'s
 # dev-dependency (the loopback pins need the SDK client with `embedded` on),
 # and a version here would flow into server's GENERATED manifest at publish
