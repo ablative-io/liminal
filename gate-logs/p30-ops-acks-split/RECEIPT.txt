@@ -1,0 +1,26 @@
+lane            p30 ops_acks.rs god-file split
+base rev        cc81488e0b08e7a76aa688778e5f4e4a5b357ba3
+generated       2026-08-18T03:11:49Z
+
+== test-name-set identity (the receipt) ==
+instrument      normalize-list.awk: tags every '--list' name with the suite
+                binary that emitted it, then sorts. Proven BOTH ways before
+                use: a one-line perturbation diffs (exit 1), self-diff is
+                empty (exit 0).
+
+base names      2102 lines  sha256=8d8971eee7ff13489f9e7eec579d0d349d090474ac13a4dee892b69de2bb4dd3
+tip names       2102 lines  sha256=8d8971eee7ff13489f9e7eec579d0d349d090474ac13a4dee892b69de2bb4dd3
+diff exit       0  (0 = identical; test-name-set.diff is empty by construction)
+suites w/ tests 51
+
+== battery (cargo test --workspace --no-fail-fast) ==
+totals          2097 passed / 2 failed / 3 ignored over 56 suites (sum 2102)
+TRUE exit       101  (cargo test's code for a failing suite; the two known F8 reds)
+failures BY NAME:
+    server::participant::production::tests_f8_marker_poison::a_refused_connection_fate_leaves_no_durable_residue
+    server::participant::production::tests_f8_marker_poison::the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server
+
+== clippy --all-targets ==
+TRUE exit       0
+diagnostics     none (a bare grep for 'warning|error' over the log matches only
+                the dependency crate NAMES thiserror/quick-error -- checked, not assumed)
