@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on package cache
+    Checking liminal-server v0.8.2 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-aeccf347c111168f9/crates/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 51.49s
+TRUE_EXIT=0
