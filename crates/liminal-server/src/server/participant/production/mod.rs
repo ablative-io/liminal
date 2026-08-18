@@ -175,6 +175,8 @@ mod tests_p0_64_live_extension;
 #[cfg(test)]
 mod tests_p0_76_marker_ownership;
 #[cfg(test)]
+mod tests_p65_live_owner_growth;
+#[cfg(test)]
 mod tests_pending_died_live_reachability;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]

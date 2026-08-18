@@ -1,0 +1,33 @@
+   Compiling liminal-server v0.8.2 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-aeccf347c111168f9/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.69s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-17af7e5dd70ff256)
+
+running 4 tests
+
+thread 'server::participant::production::tests_p65_live_owner_growth::discharged_records_leave_their_obligation_sequences_behind' (14531529) panicked at crates/liminal-server/src/server/participant/production/tests_p65_live_owner_growth.rs:454:5:
+64 further admissions added only 64 retained obligation sequences (33 at history 32, 97 at history 96). Board #65 measures this set as never shed; a bounding lane inverts this pin
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test server::participant::production::tests_p65_live_owner_growth::discharged_records_leave_their_obligation_sequences_behind ... FAILED
+
+thread 'server::participant::production::tests_p65_live_owner_growth::the_outbox_retains_every_produced_batch_body_for_the_owners_life' (14531531) panicked at crates/liminal-server/src/server/participant/production/tests_p65_live_owner_growth.rs:406:5:
+64 further admissions retained only 64 further source batches (34 at history 32, 98 at history 96)
+test server::participant::production::tests_p65_live_owner_growth::the_outbox_retains_every_produced_batch_body_for_the_owners_life ... FAILED
+
+thread 'server::participant::production::tests_p65_live_owner_growth::every_committed_admission_permanently_occupies_the_dedup_map' (14531530) panicked at crates/liminal-server/src/server/participant/production/tests_p65_live_owner_growth.rs:291:5:
+assertion `left == right` failed: 64 further admissions added 64 entries to committed_admissions (32 at history 32, 96 at history 96). Board #65 measures this map as one permanent entry per committed admission with no shedding site; a bounding lane inverts this pin to its stated ceiling
+  left: 64
+ right: 0
+test server::participant::production::tests_p65_live_owner_growth::every_committed_admission_permanently_occupies_the_dedup_map ... FAILED
+test server::participant::production::tests_p65_live_owner_growth::admissions_project_no_observer_progress_witnesses_on_either_path ... ok
+
+failures:
+
+failures:
+    server::participant::production::tests_p65_live_owner_growth::discharged_records_leave_their_obligation_sequences_behind
+    server::participant::production::tests_p65_live_owner_growth::every_committed_admission_permanently_occupies_the_dedup_map
+    server::participant::production::tests_p65_live_owner_growth::the_outbox_retains_every_produced_batch_body_for_the_owners_life
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 767 filtered out; finished in 48.91s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE_EXIT=101

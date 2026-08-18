@@ -1,0 +1,17 @@
+   Compiling liminal-server v0.8.2 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-aeccf347c111168f9/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 46.33s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-17af7e5dd70ff256)
+
+running 4 tests
+test server::participant::production::tests_p65_live_owner_growth::admissions_project_no_observer_progress_witnesses_on_either_path has been running for over 60 seconds
+test server::participant::production::tests_p65_live_owner_growth::discharged_records_leave_their_obligation_sequences_behind has been running for over 60 seconds
+test server::participant::production::tests_p65_live_owner_growth::every_committed_admission_permanently_occupies_the_dedup_map has been running for over 60 seconds
+test server::participant::production::tests_p65_live_owner_growth::the_outbox_retains_every_produced_batch_body_for_the_owners_life has been running for over 60 seconds
+test server::participant::production::tests_p65_live_owner_growth::the_outbox_retains_every_produced_batch_body_for_the_owners_life ... ok
+test server::participant::production::tests_p65_live_owner_growth::discharged_records_leave_their_obligation_sequences_behind ... ok
+test server::participant::production::tests_p65_live_owner_growth::every_committed_admission_permanently_occupies_the_dedup_map ... ok
+test server::participant::production::tests_p65_live_owner_growth::admissions_project_no_observer_progress_witnesses_on_either_path ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 767 filtered out; finished in 149.58s
+
+TRUE_EXIT=0
