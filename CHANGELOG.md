@@ -11,6 +11,35 @@ crate-named heading instead, e.g. "liminal-protocol 0.7.1"). Stated here
 because a heading named after another crate's version collided once
 (2026-08-18, "0.6.0") and was corrected in place below.
 
+## liminal-sdk 0.7.1 — 2026-08-19
+
+`liminal-sdk` 0.7.0 → 0.7.1; no other crate moves.
+
+**A registry-graph repair on the 0.7 line.** Published 0.7.0's `embedded`
+edge `liminal-rs ^0.5.5` broke on fresh resolutions when haematite 0.8.3
+went live: liminal-rs 0.5.5 requires `haematite ^0.8.1`, and 0.8.3's
+`DatabaseConfig` gained a required `node_cache_budget` field mid-0.8-line,
+so liminal-rs 0.5.5 fails E0063 on any resolution taken today (measured at
+aion's publish-verify, which compiles the registry graph after git sources
+are stripped). This cut carries the same code as 0.8.0 — the sdk crate is
+byte-identical from 8a36db0 through this tree; the whole 8a36db0..main delta
+across all four crates is two version strings — with the manifest edges
+moved to `liminal-rs ^0.6.0`, `liminal-server ^0.9.0`,
+`liminal-protocol ^0.7.1`, so `^0.7` consumers resolve the repaired family
+without edits. The same dependency move shipped as a breaking minor in the
+0.8.0 entry below; on the 0.7 line it ships as a patch by explicit
+coordination (Waffles/Vesper, 2026-08-19): the known `^0.7` consumer is
+aion at git pin 8a36db0, whose tree compiled exactly these bytes against
+exactly these dependency versions, and the unrepaired edge cannot resolve
+at all.
+
+### Changed
+
+- Version only. `embedded` edges now require `liminal-rs` 0.6.0 and
+  `liminal-server` 0.9.0; the protocol edge requires 0.7.1 (this code calls
+  `ClientParticipantAggregate::lost_credential_attach`, which published
+  0.7.0 lacks — the drift closed in the entry below).
+
 ## liminal-protocol 0.7.1 — 2026-08-18
 
 `liminal-protocol` 0.7.0 → 0.7.1; no other crate moves.
