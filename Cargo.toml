@@ -23,7 +23,7 @@ authors = [
 # `cargo publish` ships to crates.io). `liminal` is published as `liminal-rs`
 # because the bare name is taken on crates.io, but is imported as `liminal`.
 [workspace.dependencies]
-liminal = { package = "liminal-rs", version = "0.6.0", path = "crates/liminal" }
+liminal = { package = "liminal-rs", version = "0.6.1", path = "crates/liminal" }
 liminal-protocol = { version = "0.7.1", path = "crates/liminal-protocol" }
 # PATH-ONLY, deliberately: the sole consumer is `liminal-server`'s
 # dev-dependency (the loopback pins need the SDK client with `embedded` on),
@@ -42,7 +42,7 @@ liminal-server = { version = "0.9.0", path = "crates/liminal-server" }
 
 anyhow = "1"
 async-trait = "0.1"
-beamr = { version = "0.19.1", features = ["readiness"] }
+beamr = { version = "0.19.2", features = ["readiness"] }
 blake3 = "1"
 chrono = "0.4.45"
 clap = "4"
@@ -52,14 +52,13 @@ clap = "4"
 # re-enabling default features it disabled, so the lean base is the only base that
 # can satisfy both.)
 futures-core = { version = "0.3", default-features = false }
-# EXACT PIN, moved =0.8.3 → =0.9.0 in ONE MOTION with the beamr 0.17.1 → 0.19.1
-# hop above. The trigger the previous note fenced on HAS FIRED: haematite 0.9.0
-# published 2026-08-18 ~09:49Z declaring beamr ^0.19.0 (normal AND dev) plus
-# beamr-wasm ^0.9.0, so a haematite admitting beamr ≥0.18 now exists and both
-# pins move together. Pinned BY PUBLISHED ARTIFACT, checksums read at the sparse
-# index at fire time:
-#   haematite 0.9.0 = 60b8566825e2647cc4b1b25395972d06eb722b66f2fe398de9651c191c9135e1
-#   beamr     0.19.1 = bd7d2a8b408452efead5933fb672bee795b64666873f2aa6dbf717451c8b2dd7
+# EXACT PIN, moved =0.9.0 → =0.9.1 in ONE MOTION with the beamr 0.19.1 → 0.19.2
+# hop above (2026-08-19; haematite 0.9.1 declares beamr ^0.19.2 on both manifest
+# edges — its whole delta vs 0.9.0 is that floor plus cfg(test)-only tests,
+# verified at the bytes by Apollo, relayed via Waffles). Pinned BY PUBLISHED
+# ARTIFACT, checksums read at the sparse index at fire time:
+#   haematite 0.9.1 = a6a994659a8b8b1111489d33f6a19ad59737a0eda53f0b71cfb4b43e27458270
+#   beamr     0.19.2 = 0d7223be50040129327f4dec44029b7a426b857cf1837ffb56763a3c2a40f304
 # ONE BEAMR PER TREE IS STRUCTURAL, not a tidiness preference: haematite's
 # public API carries beamr types across the boundary, so two beamr copies in one
 # tree are two incompatible `beamr::` types with identical names — the #9
@@ -71,7 +70,7 @@ futures-core = { version = "0.3", default-features = false }
 # that beamr range publishes, and then both lines move in a single commit. The
 # target version is re-measured at the index at that trigger, never
 # transliterated from a plan's wording.
-haematite = "=0.9.0"
+haematite = "=0.9.1"
 js-sys = "0.3.102"
 jsonschema = { version = "0.49.9", default-features = false }
 rand = "0.10.1"

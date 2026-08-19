@@ -11,6 +11,24 @@ crate-named heading instead, e.g. "liminal-protocol 0.7.1"). Stated here
 because a heading named after another crate's version collided once
 (2026-08-18, "0.6.0") and was corrected in place below.
 
+## liminal-rs 0.6.1 — 2026-08-19
+
+`liminal-rs` 0.6.0 → 0.6.1; no other crate moves.
+
+**A dependency-currency patch, one motion.** haematite `=0.9.0` → `=0.9.1`
+and beamr 0.19.1 → 0.19.2 move together, per the one-beamr-per-tree law in
+the manifest's pin comment (haematite 0.9.1 declares `beamr ^0.19.2` on both
+manifest edges, so the pins cannot move apart). haematite 0.9.1's entire
+delta versus 0.9.0 is that beamr floor plus cfg(test)-only lock-release
+tests — no API or runtime change, verified at the bytes upstream. beamr
+0.19.2 carries the OTP-27 validator floor fix. No liminal code changes;
+`^0.6.0` consumers resolve this release without edits.
+
+### Changed
+
+- haematite `=0.9.0` → `=0.9.1`, beamr 0.19.1 → 0.19.2 (checksums in the
+  manifest pin comment).
+
 ## liminal-sdk 0.7.1 — 2026-08-19
 
 `liminal-sdk` 0.7.0 → 0.7.1; no other crate moves.

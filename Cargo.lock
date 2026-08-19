@@ -145,9 +145,9 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "beamr"
-version = "0.19.1"
+version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd7d2a8b408452efead5933fb672bee795b64666873f2aa6dbf717451c8b2dd7"
+checksum = "0d7223be50040129327f4dec44029b7a426b857cf1837ffb56763a3c2a40f304"
 dependencies = [
  "base64",
  "cranelift-codegen",
@@ -824,9 +824,9 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "haematite"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60b8566825e2647cc4b1b25395972d06eb722b66f2fe398de9651c191c9135e1"
+checksum = "a6a994659a8b8b1111489d33f6a19ad59737a0eda53f0b71cfb4b43e27458270"
 dependencies = [
  "beamr",
  "blake3",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "liminal-rs"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "beamr",
