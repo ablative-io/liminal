@@ -58,6 +58,23 @@ class Fatal(Exception):
     """Instrument failure: the gate could not measure. Never a verdict."""
 
 
+class NotFound(Fatal):
+    """An HTTP 404 by STATUS CODE — the index's documented not-found answer.
+
+    Subclasses Fatal so that any site NOT explicitly prepared to conclude
+    absence (only published_cksum's index read is) treats a 404 as an
+    instrument failure — e.g. a 404 on the crate DOWNLOAD when the index
+    row exists is an inconsistency, contained per crate like any Fatal.
+
+    Distinct from Fatal so absence is only ever concluded from the one
+    signal the registry documents as absence; every other failure is an
+    instrument failure (CANNOT-TELL), never "not published". A string
+    match on the error text ("404" in str(error)) is not a discriminator:
+    an instrument failure whose text happens to contain 404 would wear
+    the face of absence (estate propagation 2026-08-19, from a live
+    UA-policy refusal misread as a missing version at another seat)."""
+
+
 def index_path(name: str) -> str:
     n = len(name)
     if n == 1:
@@ -74,7 +91,11 @@ def fetch(url: str) -> bytes:
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             return response.read()
-    except Exception as error:  # noqa: BLE001 - every failure is FATAL here
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            raise NotFound(url) from error
+        raise Fatal(f"fetch failed for {url}: HTTP {error.code} {error.reason}") from error
+    except Exception as error:  # noqa: BLE001 - every other failure is FATAL
         raise Fatal(f"fetch failed for {url}: {error}") from error
 
 
@@ -88,10 +109,8 @@ def published_cksum(name: str, version: str) -> str | None:
     url = f"{INDEX_BASE}/{index_path(name)}"
     try:
         body = fetch(url)
-    except Fatal as error:
-        if "404" in str(error):
-            return None
-        raise
+    except NotFound:
+        return None
     for line in body.decode("utf-8").splitlines():
         row = json.loads(line)
         if row["vers"] == version:
