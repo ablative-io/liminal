@@ -25,7 +25,7 @@ struct FinalizeProbe {
 }
 
 impl ConversationResource for FinalizeProbe {
-    fn message(&self, _envelope: &MessageEnvelope) -> Result<(), ServerError> {
+    fn message(&self, _envelope: &MessageEnvelope, _op_id: Option<u64>) -> Result<(), ServerError> {
         Ok(())
     }
 
@@ -102,6 +102,7 @@ impl ConnectionServices for NoopServices {
         &self,
         _conversation: &ConnectionConversation,
         _envelope: &MessageEnvelope,
+        _op_id: Option<u64>,
     ) -> Result<(), ServerError> {
         Ok(())
     }

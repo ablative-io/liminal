@@ -66,8 +66,26 @@ pub(super) struct ParticipantRuntime {
     registrations: Mutex<HashMap<u64, ParticipantRegistration>>,
 }
 
+/// Where a participant-produced reply belongs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReplyExpectation {
+    /// Ordinary liminal `send`/`receive` usage, outside the server correlation table.
+    Local,
+    /// A server reply-requested operation, correlated by its connection-local id.
+    Operation(u64),
+    /// Fire-and-forget traffic: behaviour may produce a value, but the runner drops it.
+    None,
+}
+
+/// One participant request with its in-process reply-routing marker.
+#[derive(Debug)]
+pub(super) struct ForwardedRequest {
+    envelope: Envelope,
+    reply_expectation: ReplyExpectation,
+}
+
 /// Shared forwarding queue of requests awaiting processing by a participant.
-type RequestQueue = Arc<Mutex<VecDeque<Envelope>>>;
+type RequestQueue = Arc<Mutex<VecDeque<ForwardedRequest>>>;
 
 /// A participant snapshot: its forwarding queue, behaviour, and owning core.
 type ParticipantSnapshot = (RequestQueue, Arc<dyn ParticipantBehaviour>, Weak<ActorCore>);
@@ -187,12 +205,15 @@ impl ParticipantRuntime {
             };
             let Some(request) = request else { break };
             processed += 1;
-            if let Some(reply) = behaviour.process(&request) {
+            if let Some(reply) = behaviour.process(&request.envelope) {
+                if request.reply_expectation == ReplyExpectation::None {
+                    continue;
+                }
                 if let Some(core) = core.upgrade() {
                     // Deliver the reply into the conversation. A failure here means
                     // the conversation is already closed/failed; the reply is then
                     // genuinely undeliverable and dropping it is correct.
-                    let _ = core.deliver_participant_reply(reply);
+                    let _ = core.deliver_participant_reply(request.reply_expectation, reply);
                 }
             }
         }
@@ -242,10 +263,14 @@ impl ParticipantChannel {
     pub(super) fn forward(
         &self,
         request: Envelope,
+        reply_expectation: ReplyExpectation,
         scheduler: &Scheduler,
         wakeup_atom: Atom,
     ) -> Result<(), LiminalError> {
-        lock(&self.inbox)?.push_back(request);
+        lock(&self.inbox)?.push_back(ForwardedRequest {
+            envelope: request,
+            reply_expectation,
+        });
         if scheduler.enqueue_atom_message(self.pid.get(), wakeup_atom) {
             Ok(())
         } else {

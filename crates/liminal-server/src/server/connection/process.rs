@@ -749,7 +749,7 @@ impl<T: ConnectionTransport> TransportConnectionProcess<T> {
         for frame in self.state.pending_replies.expire_due(now) {
             self.outbound.enqueue_frame(&frame)?;
         }
-        for conversation_id in self.state.pending_replies.conversations_awaiting_reply() {
+        for conversation_id in self.state.pending_replies.conversations_with_entries() {
             let Some(conversation) = self.state.conversations.get(&conversation_id) else {
                 // The conversation closed while entries were pending: sweep them
                 // (the close-sweep tombstone-reclamation trigger) rather than poll a
@@ -760,13 +760,13 @@ impl<T: ConnectionTransport> TransportConnectionProcess<T> {
                 continue;
             };
             // Drain every buffered reply for this conversation this slice, matching
-            // each FIFO. `try_receive_reply` is non-blocking, so an empty queue ends
-            // the loop immediately (no slice is ever blocked).
-            while let Some(reply) = conversation.try_receive_reply() {
-                if let Some(frame) = self
-                    .state
-                    .pending_replies
-                    .match_reply(conversation_id, reply)
+            // each exact operation id. `try_receive_reply` is non-blocking, so an
+            // empty queue ends the loop immediately (no slice is ever blocked).
+            while let Some((op_id, reply)) = conversation.try_receive_reply() {
+                if let Some(frame) =
+                    self.state
+                        .pending_replies
+                        .match_reply(conversation_id, op_id, reply)
                 {
                     self.outbound.enqueue_frame(&frame)?;
                 } else {
@@ -904,7 +904,7 @@ impl<T: ConnectionTransport> TransportConnectionProcess<T> {
             || self
                 .state
                 .pending_replies
-                .conversations_awaiting_reply()
+                .conversations_with_entries()
                 .into_iter()
                 .filter_map(|id| self.state.conversations.get(&id))
                 .any(super::conversation::ConnectionConversation::has_pending_reply);

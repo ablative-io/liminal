@@ -18,6 +18,10 @@ impl ConversationHandleBackend for ActorBackend {
         self.core.submit_send(message)
     }
 
+    fn send_with_op_id(&self, message: Envelope, op_id: Option<u64>) -> Result<(), LiminalError> {
+        self.core.submit_send_with_op_id(message, op_id)
+    }
+
     fn receive(&self) -> Result<Envelope, LiminalError> {
         self.core.submit_receive()
     }

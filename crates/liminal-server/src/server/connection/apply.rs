@@ -707,7 +707,7 @@ fn conversation_message(
     // before. The reply leg is purely additive and only runs when the client
     // explicitly asked for a correlated reply on this frame.
     if flags & CONVERSATION_REPLY_REQUESTED_FLAG == 0 {
-        if let Err(error) = services.conversation_message(conversation, envelope) {
+        if let Err(error) = services.conversation_message(conversation, envelope, None) {
             return conversation_error(stream_id, conversation_id, &error.to_string());
         }
         return FrameAction::NoResponse;
@@ -740,7 +740,7 @@ fn conversation_message(
             ));
         }
     };
-    if let Err(error) = services.conversation_message(conversation, envelope) {
+    if let Err(error) = services.conversation_message(conversation, envelope, Some(op_id)) {
         state.pending_replies.cancel(op_id);
         return conversation_error(stream_id, conversation_id, &error.to_string());
     }

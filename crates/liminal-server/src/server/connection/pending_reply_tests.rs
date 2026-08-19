@@ -1,4 +1,4 @@
-//! R1(vi) (§1.2(3b)) pending-reply state-machine tests. Every tombstone/FIFO/cap
+//! R1(vi) (§1.2(3b)) pending-reply state-machine tests. Every tombstone/identity/cap
 //! ruling in the design text is pinned here at the table level — the state machine
 //! is where the subtle correctness lives (never-match-younger, self-wedge,
 //! scope-not-time reclamation), so it is exercised directly and deterministically.
@@ -31,24 +31,23 @@ fn later(base: Instant) -> Instant {
 }
 
 #[test]
-fn multiple_pipelined_replies_on_one_conversation_match_fifo() {
+fn multiple_pipelined_replies_match_exact_operation_ids_out_of_order() {
     let mut t = table();
     let base = now();
     // Three reply-requested frames pipelined on conversation 1, streams 10/11/12.
-    t.admit(1, 10, base).expect("admit 1");
-    t.admit(1, 11, base).expect("admit 2");
-    t.admit(1, 12, base).expect("admit 3");
+    let op1 = t.admit(1, 10, base).expect("admit 1");
+    let op2 = t.admit(1, 11, base).expect("admit 2");
+    let op3 = t.admit(1, 12, base).expect("admit 3");
     assert_eq!(t.pending_for(1), 3);
 
-    // Replies arrive; each matches the OLDEST pending entry (FIFO) — stream 10
-    // first, then 11, then 12.
-    for stream in [10_u32, 11, 12] {
+    // Arrival order is irrelevant: ownership is the exact operation id.
+    for (op_id, stream) in [(op3, 12_u32), (op1, 10), (op2, 11)] {
         let frame = t
-            .match_reply(1, test_reply_envelope(b"r"))
+            .match_reply(1, op_id, test_reply_envelope(b"r"))
             .expect("a pending entry matches");
         assert!(
             matches!(frame, Frame::ConversationMessage { stream_id, conversation_id: 1, .. } if stream_id == stream),
-            "FIFO: reply matches the oldest pending entry (stream {stream})"
+            "reply operation {op_id} must match its owning stream {stream}"
         );
     }
     assert_eq!(t.len(), 0, "all entries consumed");
@@ -59,11 +58,11 @@ fn replies_are_correlated_per_conversation() {
     let mut t = table();
     let base = now();
     t.admit(1, 10, base).expect("admit c1");
-    t.admit(2, 20, base).expect("admit c2");
+    let op2 = t.admit(2, 20, base).expect("admit c2");
 
     // A reply for conversation 2 matches conversation 2's entry, not c1's.
     let frame = t
-        .match_reply(2, test_reply_envelope(b"r"))
+        .match_reply(2, op2, test_reply_envelope(b"r"))
         .expect("c2 match");
     assert!(matches!(
         frame,
@@ -80,7 +79,7 @@ fn replies_are_correlated_per_conversation() {
 fn timeout_then_late_reply_then_new_request() {
     let mut t = table();
     let base = now();
-    t.admit(1, 10, base).expect("admit");
+    let old_op = t.admit(1, 10, base).expect("admit");
 
     // Deadline passes: the entry tombstones and a timeout frame is produced.
     let expired = t.expire_due(later(base));
@@ -99,7 +98,8 @@ fn timeout_then_late_reply_then_new_request() {
     // The LATE reply arrives: it consumes the tombstone (discarded), never
     // delivered late.
     assert!(
-        t.match_reply(1, test_reply_envelope(b"late")).is_none(),
+        t.match_reply(1, old_op, test_reply_envelope(b"late"))
+            .is_none(),
         "a late reply is discarded, not delivered"
     );
     assert_eq!(
@@ -109,9 +109,9 @@ fn timeout_then_late_reply_then_new_request() {
     );
 
     // A NEW request on the same conversation is admitted cleanly now.
-    t.admit(1, 11, base).expect("new admit after recovery");
+    let fresh_op = t.admit(1, 11, base).expect("new admit after recovery");
     let frame = t
-        .match_reply(1, test_reply_envelope(b"fresh"))
+        .match_reply(1, fresh_op, test_reply_envelope(b"fresh"))
         .expect("match");
     assert!(matches!(
         frame,
@@ -123,11 +123,14 @@ fn timeout_then_late_reply_then_new_request() {
 fn capacity_recovers_via_late_reply_consume() {
     let mut t = table();
     let base = now();
-    t.admit(1, 10, base).expect("admit");
+    let op_id = t.admit(1, 10, base).expect("admit");
     t.expire_due(later(base)); // -> tombstone
     assert_eq!(t.tombstones_for(1), 1);
     // Consume the tombstone via its late reply: capacity is freed.
-    assert!(t.match_reply(1, test_reply_envelope(b"late")).is_none());
+    assert!(
+        t.match_reply(1, op_id, test_reply_envelope(b"late"))
+            .is_none()
+    );
     assert_eq!(t.len(), 0, "late-reply consume frees the slot");
 }
 
@@ -180,9 +183,9 @@ fn wedged_conversation_refuses_while_siblings_proceed() {
     );
 
     // A SIBLING conversation proceeds entirely unaffected.
-    t.admit(2, 20, base).expect("sibling conversation proceeds");
+    let sibling_op = t.admit(2, 20, base).expect("sibling conversation proceeds");
     let frame = t
-        .match_reply(2, test_reply_envelope(b"r"))
+        .match_reply(2, sibling_op, test_reply_envelope(b"r"))
         .expect("sibling match");
     assert!(matches!(
         frame,
@@ -201,19 +204,19 @@ fn slow_actor_late_reply_never_matches_a_younger_entry() {
     let mut t = table();
     let base = now();
     // Conversation 1: admit, time out -> tombstone (the "slow, not dead" actor).
-    t.admit(1, 10, base).expect("admit old");
+    let old_op = t.admit(1, 10, base).expect("admit old");
     t.expire_due(later(base));
     assert_eq!(t.tombstones_for(1), 1);
 
     // A NEW request is admitted under the sub-cap (younger entry, stream 11).
-    t.admit(1, 11, base).expect("admit young");
+    let young_op = t.admit(1, 11, base).expect("admit young");
     assert_eq!(t.pending_for(1), 1);
 
     // The very-late reply for the OLD request finally arrives. FIFO consumes the
     // OLDEST entry — the tombstone — discarding the reply. It must NOT be
     // delivered on stream 11 (the younger request), which is still pending.
     assert!(
-        t.match_reply(1, test_reply_envelope(b"very-late"))
+        t.match_reply(1, old_op, test_reply_envelope(b"very-late"))
             .is_none(),
         "the very-late reply is discarded via the tombstone, not delivered"
     );
@@ -226,7 +229,7 @@ fn slow_actor_late_reply_never_matches_a_younger_entry() {
 
     // The younger request's OWN reply then matches it correctly.
     let frame = t
-        .match_reply(1, test_reply_envelope(b"young"))
+        .match_reply(1, young_op, test_reply_envelope(b"young"))
         .expect("young match");
     assert!(matches!(
         frame,
@@ -290,6 +293,11 @@ fn conversations_awaiting_reply_lists_only_pending_conversations() {
     );
     t.admit(3, 30, base).expect("admit c3 pending");
     assert_eq!(t.conversations_awaiting_reply(), vec![3]);
+    assert_eq!(
+        t.conversations_with_entries(),
+        vec![1, 2, 3],
+        "reply drains must keep polling tombstone-only conversations so their late replies can reclaim ownership entries"
+    );
 }
 
 #[test]

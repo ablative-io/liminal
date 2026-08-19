@@ -259,6 +259,7 @@ pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
         &self,
         conversation: &ConnectionConversation,
         envelope: &MessageEnvelope,
+        op_id: Option<u64>,
     ) -> Result<(), ServerError>;
 
     /// Delegates conversation close to the liminal library.
@@ -1783,8 +1784,9 @@ impl ConnectionServices for LiminalConnectionServices {
         &self,
         conversation: &ConnectionConversation,
         envelope: &MessageEnvelope,
+        op_id: Option<u64>,
     ) -> Result<(), ServerError> {
-        conversation.message(envelope)
+        conversation.message(envelope, op_id)
     }
 
     fn close_conversation(&self, conversation: ConnectionConversation) -> Result<(), ServerError> {

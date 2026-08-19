@@ -401,6 +401,21 @@ impl ConversationHandle {
         self.backend.send(message.into())
     }
 
+    /// Sends a message with the server's in-process reply correlation marker.
+    /// `Some(op_id)` routes a produced reply to the correlated server queue;
+    /// `None` marks fire-and-forget traffic whose produced reply is discarded by
+    /// the participant runner. The marker never enters an [`Envelope`] or the wire.
+    ///
+    /// # Errors
+    /// Returns a [`LiminalError`] when the actor cannot accept or process the message.
+    pub fn send_with_op_id(
+        &self,
+        message: impl Into<Envelope>,
+        op_id: Option<u64>,
+    ) -> Result<(), LiminalError> {
+        self.backend.send_with_op_id(message.into(), op_id)
+    }
+
     /// Receives the next available envelope from the conversation actor.
     ///
     /// # Errors
@@ -440,6 +455,7 @@ impl ConversationHandle {
 
 pub(crate) trait ConversationHandleBackend: std::fmt::Debug + Send + Sync {
     fn send(&self, message: Envelope) -> Result<(), LiminalError>;
+    fn send_with_op_id(&self, message: Envelope, op_id: Option<u64>) -> Result<(), LiminalError>;
     fn receive(&self) -> Result<Envelope, LiminalError>;
     fn close(&self) -> Result<(), LiminalError>;
     fn query_state(&self) -> Result<ConversationState, LiminalError>;

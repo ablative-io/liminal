@@ -24,7 +24,7 @@ pub trait ConversationResource: std::fmt::Debug + Send {
     ///
     /// # Errors
     /// Returns [`ServerError`] when the liminal library rejects the conversation message.
-    fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError>;
+    fn message(&self, envelope: &MessageEnvelope, op_id: Option<u64>) -> Result<(), ServerError>;
 
     /// Returns the participant PIDs linked to the supervised conversation, if any.
     ///
@@ -66,7 +66,7 @@ pub trait ConversationResource: std::fmt::Debug + Send {
     /// path: the connection polls this on its own slice and correlates the reply
     /// through its pending-reply table. Defaulted to `None` for resources with no
     /// live reply queue (trace-only / test stand-ins).
-    fn try_receive_reply(&self) -> Option<MessageEnvelope> {
+    fn try_receive_reply(&self) -> Option<(u64, MessageEnvelope)> {
         None
     }
 
@@ -113,8 +113,12 @@ impl ConnectionConversation {
         Self { resource }
     }
 
-    pub(super) fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError> {
-        self.resource.message(envelope)
+    pub(super) fn message(
+        &self,
+        envelope: &MessageEnvelope,
+        op_id: Option<u64>,
+    ) -> Result<(), ServerError> {
+        self.resource.message(envelope, op_id)
     }
 
     /// Returns the participant PIDs linked to the supervised conversation.
@@ -147,7 +151,7 @@ impl ConnectionConversation {
     }
 
     /// R1(vi)(a): non-blocking drain of one buffered participant reply.
-    pub(super) fn try_receive_reply(&self) -> Option<MessageEnvelope> {
+    pub(super) fn try_receive_reply(&self) -> Option<(u64, MessageEnvelope)> {
         self.resource.try_receive_reply()
     }
 
@@ -237,7 +241,7 @@ impl LiminalConversationResource {
 }
 
 impl ConversationResource for LiminalConversationResource {
-    fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError> {
+    fn message(&self, envelope: &MessageEnvelope, op_id: Option<u64>) -> Result<(), ServerError> {
         // If the participant has already crashed (structural EXIT observed),
         // refuse the message rather than forwarding into a failed conversation.
         if self.poll_exit_signal().is_some() || self.actor_phase_failed() {
@@ -252,7 +256,7 @@ impl ConversationResource for LiminalConversationResource {
         let message = Envelope::new(payload, None, SchemaId::new(), PublisherId::default());
         self.actor
             .handle()
-            .send(message)
+            .send_with_op_id(message, op_id)
             .map_err(|error| ServerError::ListenerAccept {
                 message: format!("conversation message delivery failed: {error}"),
             })
@@ -298,15 +302,18 @@ impl ConversationResource for LiminalConversationResource {
         ))
     }
 
-    fn try_receive_reply(&self) -> Option<MessageEnvelope> {
+    fn try_receive_reply(&self) -> Option<(u64, MessageEnvelope)> {
         // Non-blocking host-side drain of one buffered participant reply, framed
         // as the wire reply envelope (schema/causal metadata are not bridged in
         // v1, matching the removed blocking `receive_reply`).
-        let reply = self.actor.try_take_reply()?;
-        Some(MessageEnvelope::new(
-            ProtocolSchemaId::new([0; ProtocolSchemaId::WIRE_LEN]),
-            ProtocolCausalContext::independent(),
-            reply.payload,
+        let (op_id, reply) = self.actor.try_take_reply()?;
+        Some((
+            op_id,
+            MessageEnvelope::new(
+                ProtocolSchemaId::new([0; ProtocolSchemaId::WIRE_LEN]),
+                ProtocolCausalContext::independent(),
+                reply.payload,
+            ),
         ))
     }
 

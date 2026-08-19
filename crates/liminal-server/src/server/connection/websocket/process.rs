@@ -601,18 +601,18 @@ impl WebSocketConnectionProcess {
         for frame in self.state.pending_replies.expire_due(now) {
             self.outbound.enqueue_frame(&frame)?;
         }
-        for conversation_id in self.state.pending_replies.conversations_awaiting_reply() {
+        for conversation_id in self.state.pending_replies.conversations_with_entries() {
             let Some(conversation) = self.state.conversations.get(&conversation_id) else {
                 self.state
                     .pending_replies
                     .remove_conversation(conversation_id);
                 continue;
             };
-            while let Some(reply) = conversation.try_receive_reply() {
-                if let Some(frame) = self
-                    .state
-                    .pending_replies
-                    .match_reply(conversation_id, reply)
+            while let Some((op_id, reply)) = conversation.try_receive_reply() {
+                if let Some(frame) =
+                    self.state
+                        .pending_replies
+                        .match_reply(conversation_id, op_id, reply)
                 {
                     self.outbound.enqueue_frame(&frame)?;
                 }
@@ -877,7 +877,7 @@ impl WebSocketConnectionProcess {
             || self
                 .state
                 .pending_replies
-                .conversations_awaiting_reply()
+                .conversations_with_entries()
                 .into_iter()
                 .filter_map(|id| self.state.conversations.get(&id))
                 .any(super::super::conversation::ConnectionConversation::has_pending_reply);

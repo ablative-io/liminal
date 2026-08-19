@@ -346,8 +346,10 @@ impl ConnectionServices for QuiesceAfterAdmission {
         &self,
         conversation: &ConnectionConversation,
         envelope: &MessageEnvelope,
+        op_id: Option<u64>,
     ) -> Result<(), ServerError> {
-        self.inner.conversation_message(conversation, envelope)
+        self.inner
+            .conversation_message(conversation, envelope, op_id)
     }
 
     fn close_conversation(&self, conversation: ConnectionConversation) -> Result<(), ServerError> {

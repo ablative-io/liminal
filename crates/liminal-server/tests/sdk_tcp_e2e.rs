@@ -553,6 +553,34 @@ fn sdk_tcp_conversation_request_then_receive_correlates() -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// liminal #22 control: an echo reply produced for fire-and-forget traffic must
+/// never become the answer to a younger reply-requested operation on the same
+/// conversation.
+#[test]
+fn fire_and_forget_reply_cannot_poison_younger_request() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let config = connect_remote_config(server.address(), CHANNEL, "reply-fifo")?;
+    server.wait_for_connection()?;
+
+    let conversation = RemoteConversationHandle::new(&config);
+    conversation.send(DispatchRequest {
+        activity: "A".to_owned(),
+    })?;
+    conversation.request(DispatchRequest {
+        activity: "B".to_owned(),
+    })?;
+    let reply: DispatchRequest = block_on(conversation.receive())??;
+
+    assert_eq!(
+        reply.activity, "B",
+        "fire-and-forget reply poisoned the per-conversation FIFO: expected request payload B, got {:?}",
+        reply.activity
+    );
+
+    server.shutdown()?;
+    Ok(())
+}
+
 /// 13-L1 load-bearing proof over the real socket: a publish carrying an
 /// idempotency key returns a GENUINE delivery ack the caller can observe, and a
 /// duplicate of the same key returns a non-ack (dedup-on-delivery suppressed it).

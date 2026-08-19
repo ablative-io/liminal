@@ -1,5 +1,6 @@
 use std::sync::mpsc;
 
+use crate::conversation::participant::ReplyExpectation;
 use crate::conversation::types::ConversationState;
 use crate::envelope::Envelope;
 use crate::error::LiminalError;
@@ -14,6 +15,7 @@ pub(super) enum QueuedCommandKind {
         reply: mpsc::SyncSender<Result<(), LiminalError>>,
     },
     Send {
+        reply_expectation: ReplyExpectation,
         message: Envelope,
         reply: mpsc::SyncSender<Result<(), LiminalError>>,
     },

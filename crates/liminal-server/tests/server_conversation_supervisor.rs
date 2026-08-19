@@ -73,7 +73,7 @@ fn conversation_message_drives_real_actor() -> Result<(), Box<dyn Error>> {
     let services = LiminalConnectionServices::empty()?;
     let conversation = services.open_conversation(11, "msg-subject")?;
 
-    services.conversation_message(&conversation, &message_envelope(b"hello"))?;
+    services.conversation_message(&conversation, &message_envelope(b"hello"), Some(1))?;
 
     services.close_conversation(conversation)?;
     services.conversation_supervisor().shutdown();
@@ -104,7 +104,7 @@ fn request_reply_message_is_really_processed_by_the_participant() -> Result<(), 
     let conversation = services.open_conversation(99, "request-reply")?;
 
     let request = b"request-reply-proof-payload";
-    services.conversation_message(&conversation, &message_envelope(request))?;
+    services.conversation_message(&conversation, &message_envelope(request), Some(1))?;
 
     // Drain the participant's reply (bounded). A real participant processed the
     // forwarded request and delivered this reply back through the conversation;
@@ -173,7 +173,7 @@ fn registered_responder_handles_its_subject_instead_of_echo() -> Result<(), Box<
     );
 
     let request = b"ping";
-    services.conversation_message(&conversation, &message_envelope(request))?;
+    services.conversation_message(&conversation, &message_envelope(request), Some(1))?;
 
     let reply = conversation.receive_reply(REPLY_GUARD)?;
     assert_eq!(
@@ -202,7 +202,7 @@ fn unregistered_subject_still_echoes() -> Result<(), Box<dyn Error>> {
     let conversation = services.open_conversation(1002, "unregistered-subject")?;
 
     let request = b"echo-me";
-    services.conversation_message(&conversation, &message_envelope(request))?;
+    services.conversation_message(&conversation, &message_envelope(request), Some(1))?;
 
     let reply = conversation.receive_reply(REPLY_GUARD)?;
     assert_eq!(
@@ -257,7 +257,8 @@ fn participant_crash_is_detected_via_structural_linked_exit() -> Result<(), Box<
 
     // A message after the crash is rejected honestly rather than silently
     // forwarded into a failed conversation.
-    let after_crash = services.conversation_message(&conversation, &message_envelope(b"late"));
+    let after_crash =
+        services.conversation_message(&conversation, &message_envelope(b"late"), Some(1));
     assert!(
         after_crash.is_err(),
         "messages after a participant crash must be rejected, not silently dropped"

@@ -1057,6 +1057,7 @@ impl ConnectionServices for FlushFailingServices {
         &self,
         conversation: &crate::server::connection::ConnectionConversation,
         envelope: &liminal::protocol::MessageEnvelope,
+        _op_id: Option<u64>,
     ) -> Result<(), crate::ServerError> {
         let _ = (conversation, envelope);
         Ok(())

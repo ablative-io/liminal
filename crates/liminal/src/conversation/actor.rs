@@ -195,7 +195,7 @@ impl ConversationActor {
     /// The connection polls this on its own slice (woken by the reply-availability
     /// notifier) instead of blocking the slice on `receive_timeout`.
     #[must_use]
-    pub fn try_take_reply(&self) -> Option<Envelope> {
+    pub fn try_take_reply(&self) -> Option<(u64, Envelope)> {
         self.core.try_take_reply()
     }
 

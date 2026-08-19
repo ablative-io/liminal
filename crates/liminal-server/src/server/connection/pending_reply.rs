@@ -209,21 +209,23 @@ impl PendingReplyTable {
         }
     }
 
-    /// Correlates a reply that became available for `conversation_id` against the
-    /// OLDEST entry for that conversation (FIFO).
+    /// Correlates a reply by its exact connection-local operation id.
     ///
-    /// - Oldest is `Pending`: it is removed and the correlated reply frame
+    /// - Exact entry is `Pending`: it is removed and the correlated reply frame
     ///   returned to write on the connection's slice.
-    /// - Oldest is a `Tombstone`: this is the timed-out request's late reply — the
-    ///   tombstone is consumed (freed) and the reply DISCARDED (`None`). A late
-    ///   reply can therefore never FIFO-match a younger entry.
-    /// - No entry: the reply is discarded (`None`) — nothing correlates it.
+    /// - Exact entry is a `Tombstone`: this is the timed-out request's late reply —
+    ///   the tombstone is consumed (freed) and the reply DISCARDED (`None`).
+    /// - Unknown id or wrong conversation: the reply is discarded (`None`).
     pub(super) fn match_reply(
         &mut self,
         conversation_id: u64,
+        op_id: u64,
         reply: MessageEnvelope,
     ) -> Option<Frame> {
-        let index = self.oldest_index_for(conversation_id)?;
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.op_id == op_id && entry.conversation_id == conversation_id)?;
         let entry = self.entries.remove(index);
         self.retire_timer(entry.timer);
         match entry.state {
@@ -267,13 +269,28 @@ impl PendingReplyTable {
     }
 
     /// Conversations that currently hold at least one `Pending` entry — the set
-    /// the connection slice polls for available replies. Bounded by the caps, so
+    /// used for active-deadline bookkeeping. Bounded by the caps, so
     /// this is a small scan, not an unbounded one.
+    #[cfg(test)]
     pub(super) fn conversations_awaiting_reply(&self) -> Vec<u64> {
         let mut ids: Vec<u64> = self
             .entries
             .iter()
             .filter(|entry| entry.state == EntryState::Pending)
+            .map(|entry| entry.conversation_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Conversations holding any ownership entry, pending or tombstoned. Reply
+    /// drains and post-arm probes use this set so a late reply can consume a
+    /// tombstone even when no younger operation is pending on the conversation.
+    pub(super) fn conversations_with_entries(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self
+            .entries
+            .iter()
             .map(|entry| entry.conversation_id)
             .collect();
         ids.sort_unstable();
@@ -373,19 +390,6 @@ impl PendingReplyTable {
                 entry.conversation_id == conversation_id && entry.state == EntryState::Tombstone
             })
             .count()
-    }
-
-    /// Index of the oldest entry (smallest `op_id`) for `conversation_id`. Keyed on
-    /// the monotonic `op_id` rather than Vec position, so FIFO order is robust to
-    /// any future reordering of the backing store — a late reply always consumes
-    /// the genuinely oldest entry, never a younger one.
-    fn oldest_index_for(&self, conversation_id: u64) -> Option<usize> {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.conversation_id == conversation_id)
-            .min_by_key(|(_, entry)| entry.op_id)
-            .map(|(index, _)| index)
     }
 }
 

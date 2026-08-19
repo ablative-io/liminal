@@ -121,6 +121,7 @@ impl ConnectionServices for ParticipantOnlyServices {
         &self,
         _conversation: &ConnectionConversation,
         _envelope: &MessageEnvelope,
+        _op_id: Option<u64>,
     ) -> Result<(), ServerError> {
         Err(Self::unsupported("conversation message"))
     }

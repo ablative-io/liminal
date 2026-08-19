@@ -107,8 +107,9 @@ impl ConnectionServices for RecordingServices {
         &self,
         conversation: &ConnectionConversation,
         envelope: &MessageEnvelope,
+        op_id: Option<u64>,
     ) -> Result<(), ServerError> {
-        conversation.message(envelope)
+        conversation.message(envelope, op_id)
     }
 
     fn close_conversation(&self, conversation: ConnectionConversation) -> Result<(), ServerError> {
@@ -141,7 +142,7 @@ impl SubscriptionResource for TestSubscription {
 struct TestConversation;
 
 impl ConversationResource for TestConversation {
-    fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError> {
+    fn message(&self, envelope: &MessageEnvelope, _op_id: Option<u64>) -> Result<(), ServerError> {
         if envelope.payload.is_empty() {
             return Err(ServerError::ListenerAccept {
                 message: "empty test payload".to_owned(),
@@ -1746,6 +1747,7 @@ impl ConnectionServices for ForwardCountingServices {
         &self,
         _conversation: &ConnectionConversation,
         _envelope: &MessageEnvelope,
+        _op_id: Option<u64>,
     ) -> Result<(), ServerError> {
         if self
             .fail_forwards
@@ -1851,6 +1853,7 @@ fn cap_refused_request_never_reaches_the_participant() -> Result<(), ServerError
         .pending_replies
         .match_reply(
             1,
+            1,
             crate::server::connection::pending_reply::test_reply_envelope(b"r1"),
         )
         .ok_or_else(|| ServerError::ListenerAccept {
@@ -1876,6 +1879,7 @@ fn cap_refused_request_never_reaches_the_participant() -> Result<(), ServerError
         .pending_replies
         .match_reply(
             1,
+            2,
             crate::server::connection::pending_reply::test_reply_envelope(b"r3"),
         )
         .ok_or_else(|| ServerError::ListenerAccept {
@@ -2063,6 +2067,7 @@ fn conversation_close_sweeps_pending_and_tombstone_entries() -> Result<(), Serve
         .pending_replies
         .match_reply(
             1,
+            3,
             crate::server::connection::pending_reply::test_reply_envelope(b"fresh"),
         )
         .ok_or_else(|| ServerError::ListenerAccept {

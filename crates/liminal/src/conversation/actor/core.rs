@@ -20,6 +20,7 @@ use super::exit::ExitNotifierRegistry;
 use super::queue::{QueuedCommand, QueuedCommandKind};
 use super::sync::{self, lock, send_reply, wait_for};
 use super::{ParticipantChannel, SupervisorInner};
+use crate::conversation::participant::ReplyExpectation;
 use crate::conversation::types::{
     ConversationConfig, ConversationPhase, ConversationState, CrashPolicy, ParticipantHealth,
     ParticipantPid,
@@ -46,6 +47,7 @@ pub struct ActorCore {
     pub(super) config: ConversationConfig,
     state: Mutex<ConversationState>,
     inbox: Mutex<VecDeque<Envelope>>,
+    operation_replies: Mutex<VecDeque<(u64, Envelope)>>,
     pending_receives: Mutex<VecDeque<mpsc::SyncSender<Result<Envelope, LiminalError>>>>,
     commands: Mutex<VecDeque<QueuedCommand>>,
     current_pid: Mutex<Option<ParticipantPid>>,
@@ -103,6 +105,7 @@ impl ActorCore {
             config,
             state: Mutex::new(state),
             inbox: Mutex::new(VecDeque::new()),
+            operation_replies: Mutex::new(VecDeque::new()),
             pending_receives: Mutex::new(VecDeque::new()),
             commands: Mutex::new(VecDeque::new()),
             current_pid: Mutex::new(None),
@@ -135,17 +138,21 @@ impl ActorCore {
     /// waiting on the conversation scheduler. Pops directly from the buffered
     /// inbox, symmetric with how [`Self::deliver_participant_reply`] pushes to it
     /// host-side; a finalized conversation drains nothing.
-    pub(crate) fn try_take_reply(&self) -> Option<Envelope> {
+    pub(crate) fn try_take_reply(&self) -> Option<(u64, Envelope)> {
         if self.is_finalized() {
             return None;
         }
-        self.inbox.lock().ok()?.pop_front()
+        self.operation_replies.lock().ok()?.pop_front()
     }
 
     /// Non-consuming reply availability query for a connection's post-arm
     /// pre-Wait race barrier.
     pub(crate) fn has_pending_reply(&self) -> bool {
-        !self.is_finalized() && self.inbox.lock().is_ok_and(|inbox| !inbox.is_empty())
+        !self.is_finalized()
+            && self
+                .operation_replies
+                .lock()
+                .is_ok_and(|replies| !replies.is_empty())
     }
 
     /// Fires the reply-availability notifier once, if installed. Called on the
@@ -235,9 +242,33 @@ impl ActorCore {
     }
 
     pub(super) fn submit_send(self: &Arc<Self>, message: Envelope) -> Result<(), LiminalError> {
+        self.submit_send_with_expectation(message, ReplyExpectation::Local)
+    }
+
+    pub(super) fn submit_send_with_op_id(
+        self: &Arc<Self>,
+        message: Envelope,
+        op_id: Option<u64>,
+    ) -> Result<(), LiminalError> {
+        let reply_expectation = op_id.map_or(ReplyExpectation::None, ReplyExpectation::Operation);
+        self.submit_send_with_expectation(message, reply_expectation)
+    }
+
+    fn submit_send_with_expectation(
+        self: &Arc<Self>,
+        message: Envelope,
+        reply_expectation: ReplyExpectation,
+    ) -> Result<(), LiminalError> {
         let pid = self.ensure_running()?;
         let (reply, response) = mpsc::sync_channel(1);
-        self.enqueue_for_pid(pid, QueuedCommandKind::Send { message, reply })?;
+        self.enqueue_for_pid(
+            pid,
+            QueuedCommandKind::Send {
+                reply_expectation,
+                message,
+                reply,
+            },
+        )?;
         wait_for(&response, "conversation send")
     }
 
@@ -332,8 +363,12 @@ impl ActorCore {
             QueuedCommandKind::Boot { reply } => {
                 send_reply(&reply, beam::link_participants(self, context));
             }
-            QueuedCommandKind::Send { message, reply } => {
-                send_reply(&reply, self.apply_send(message));
+            QueuedCommandKind::Send {
+                reply_expectation,
+                message,
+                reply,
+            } => {
+                send_reply(&reply, self.apply_send(message, reply_expectation));
             }
             QueuedCommandKind::Receive { reply } => {
                 self.apply_receive(reply);
@@ -351,7 +386,11 @@ impl ActorCore {
         Ok(Term::atom(Atom::OK))
     }
 
-    fn apply_send(&self, message: Envelope) -> Result<(), LiminalError> {
+    fn apply_send(
+        &self,
+        message: Envelope,
+        reply_expectation: ReplyExpectation,
+    ) -> Result<(), LiminalError> {
         {
             let mut state = lock(&self.state, "conversation state")?;
             state.activate()?;
@@ -365,6 +404,7 @@ impl ActorCore {
         if let Some(channel) = self.participant_channels.first() {
             return channel.forward(
                 message,
+                reply_expectation,
                 &self.supervisor.scheduler,
                 self.supervisor.participant_wakeup_atom,
             );
@@ -398,39 +438,61 @@ impl ActorCore {
     ///
     /// # Errors
     /// Returns [`LiminalError`] when a conversation lock is poisoned.
-    pub fn deliver_participant_reply(&self, reply: Envelope) -> Result<(), LiminalError> {
-        let waiter = { lock(&self.pending_receives, "pending receives")?.pop_front() };
-        let mut state = lock(&self.state, "conversation state")?;
-        state.record_received(reply.clone());
-        drop(state);
-        if let Some(waiter) = waiter {
-            send_reply(&waiter, Ok(reply));
-        } else {
-            // R1(vi)(a): fire the reply-availability notifier on the reply queue's
-            // empty→non-empty edge (only when this reply is the first buffered one
-            // — coalescing is R6-harmless), so a parked connection wakes to drain
-            // it. A reply that satisfied a waiter directly needs no wake.
-            let fire = {
-                let mut inbox = lock(&self.inbox, "conversation inbox")?;
-                let was_empty = inbox.is_empty();
-                inbox.push_back(reply);
-                was_empty
-            };
-            if fire {
-                self.fire_reply_notifier();
+    pub(in crate::conversation) fn deliver_participant_reply(
+        &self,
+        reply_expectation: ReplyExpectation,
+        reply: Envelope,
+    ) -> Result<(), LiminalError> {
+        match reply_expectation {
+            ReplyExpectation::None => {
+                unreachable!("participant runner must discard replies for fire-and-forget requests")
+            }
+            ReplyExpectation::Local => {
+                let waiter = { lock(&self.pending_receives, "pending receives")?.pop_front() };
+                lock(&self.state, "conversation state")?.record_received(reply.clone());
+                if let Some(waiter) = waiter {
+                    send_reply(&waiter, Ok(reply));
+                } else {
+                    lock(&self.inbox, "conversation inbox")?.push_back(reply);
+                }
+                Ok(())
+            }
+            ReplyExpectation::Operation(op_id) => {
+                lock(&self.state, "conversation state")?.record_received(reply.clone());
+                // Operation replies never satisfy an ordinary local receive waiter:
+                // doing so would erase the ownership id before the connection can
+                // exact-match it in the pending-reply table.
+                let fire = {
+                    let mut replies = lock(&self.operation_replies, "operation replies")?;
+                    let was_empty = replies.is_empty();
+                    replies.push_back((op_id, reply));
+                    was_empty
+                };
+                if fire {
+                    self.fire_reply_notifier();
+                }
+                Ok(())
             }
         }
-        Ok(())
     }
 
     fn apply_receive(&self, reply: mpsc::SyncSender<Result<Envelope, LiminalError>>) {
-        let envelope = match lock(&self.inbox, "conversation inbox") {
+        let mut envelope = match lock(&self.inbox, "conversation inbox") {
             Ok(mut inbox) => inbox.pop_front(),
             Err(error) => {
                 send_reply(&reply, Err(error));
                 return;
             }
         };
+        if envelope.is_none() {
+            envelope = match lock(&self.operation_replies, "operation replies") {
+                Ok(mut replies) => replies.pop_front().map(|(_, envelope)| envelope),
+                Err(error) => {
+                    send_reply(&reply, Err(error));
+                    return;
+                }
+            };
+        }
         {
             let mut state = match lock(&self.state, "conversation state") {
                 Ok(state) => state,
@@ -884,6 +946,14 @@ impl ActorCore {
         self.pending_receives
             .lock()
             .map_or(0, |pending| pending.len())
+    }
+
+    /// Number of participant replies currently buffered for host-side draining.
+    #[cfg(test)]
+    pub(super) fn reply_queue_len(&self) -> usize {
+        self.operation_replies
+            .lock()
+            .map_or(0, |replies| replies.len())
     }
 }
 

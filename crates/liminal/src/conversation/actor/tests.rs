@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use beamr::process::ExitReason;
 
@@ -6,7 +7,7 @@ use std::sync::Arc;
 
 use super::{ConversationActor, ConversationSupervisor};
 use crate::channel::ChannelMode;
-use crate::conversation::participant::EchoBehaviour;
+use crate::conversation::participant::{EchoBehaviour, ParticipantBehaviour};
 use crate::conversation::types::{
     ConversationConfig, ConversationContextEntry, ConversationPhase, CrashPolicy,
     ParticipantHealth, ParticipantPid,
@@ -412,6 +413,127 @@ fn boot_discovered_death_under_fail_policy_fails_conversation_honestly()
         matches!(received, Err(LiminalError::ParticipantCrashed { .. })),
         "receive against the failed conversation must report the crash, got {received:?}"
     );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// liminal #22 growth control: fire-and-forget messages may still be processed by
+/// the participant, but replies they produce must die at the runner and never
+/// accumulate in the conversation's host-side reply queue.
+#[test]
+fn fire_and_forget_replies_do_not_grow_reply_queue() -> Result<(), Box<dyn Error>> {
+    #[derive(Debug)]
+    struct CountingEcho {
+        processed: Arc<AtomicUsize>,
+    }
+
+    impl ParticipantBehaviour for CountingEcho {
+        fn process(&self, request: &Envelope) -> Option<Envelope> {
+            self.processed.fetch_add(1, Ordering::Release);
+            Some(request.clone())
+        }
+    }
+
+    const MESSAGE_COUNT: usize = 16;
+    let supervisor = ConversationSupervisor::new()?;
+    let processed = Arc::new(AtomicUsize::new(0));
+    let (actor, _participant) = supervisor.spawn_with_participant(
+        Arc::new(CountingEcho {
+            processed: Arc::clone(&processed),
+        }),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+
+    for index in 0..MESSAGE_COUNT {
+        actor.handle().send_with_op_id(
+            test_envelope(format!("fire-and-forget-{index}").as_bytes()),
+            None,
+        )?;
+    }
+
+    for _ in 0..10_000 {
+        if processed.load(Ordering::Acquire) == MESSAGE_COUNT {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        processed.load(Ordering::Acquire),
+        MESSAGE_COUNT,
+        "the participant must genuinely process every fire-and-forget message"
+    );
+    // The behaviour increments immediately before returning its reply, so allow
+    // the final runner delivery to finish before measuring the pre-fix queue.
+    for _ in 0..10_000 {
+        if actor.core.reply_queue_len() == MESSAGE_COUNT {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        actor.core.reply_queue_len(),
+        0,
+        "fire-and-forget replies must be discarded at source instead of accumulating"
+    );
+
+    actor.handle().close()?;
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Correlated operation replies retain their ownership even when an ordinary
+/// local receive is already parked on the same conversation.
+#[test]
+fn correlated_reply_cannot_be_stolen_by_local_receive() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let (actor, _participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+
+    let local_receiver = {
+        let handle = actor.handle();
+        std::thread::spawn(move || handle.receive())
+    };
+    for _ in 0..10_000 {
+        if actor.core.pending_receive_count() == 1 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(actor.core.pending_receive_count(), 1);
+
+    actor
+        .handle()
+        .send_with_op_id(test_envelope(b"correlated"), Some(42))?;
+    for _ in 0..10_000 {
+        if actor.has_pending_reply() {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let (op_id, reply) = actor
+        .try_take_reply()
+        .ok_or("correlated reply never reached its owned queue")?;
+    assert_eq!(op_id, 42);
+    assert_eq!(reply.payload, b"correlated");
+    assert_eq!(
+        actor.core.pending_receive_count(),
+        1,
+        "the unrelated local waiter must remain parked"
+    );
+
+    actor.handle().send(test_envelope(b"local"))?;
+    let local = local_receiver
+        .join()
+        .map_err(|_| "local receiver thread panicked")??;
+    assert_eq!(local.payload, b"local");
+
+    actor.handle().close()?;
     supervisor.shutdown();
     Ok(())
 }

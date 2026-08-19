@@ -104,6 +104,7 @@ impl ConnectionServices for WorkerFrontDoorServices {
         &self,
         _conversation: &ConnectionConversation,
         _envelope: &MessageEnvelope,
+        _op_id: Option<u64>,
     ) -> Result<(), ServerError> {
         // Unreachable: no `ConnectionConversation` can exist because
         // `open_conversation` always rejects. `apply_frame` rejects a
