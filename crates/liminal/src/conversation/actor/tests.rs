@@ -7,9 +7,7 @@ use std::sync::Arc;
 
 use super::{ConversationActor, ConversationSupervisor};
 use crate::channel::ChannelMode;
-use crate::conversation::participant::{
-    EchoBehaviour, ParticipantBehaviour, ReplyExpectation,
-};
+use crate::conversation::participant::{EchoBehaviour, ParticipantBehaviour, ReplyExpectation};
 use crate::conversation::types::{
     ConversationConfig, ConversationContextEntry, ConversationPhase, CrashPolicy,
     ParticipantHealth, ParticipantPid,
@@ -588,10 +586,9 @@ fn finalized_conversation_refuses_reply_consumer_registration() -> Result<(), Bo
     actor.register_reply_notifier(Arc::new(move || {
         observed.fetch_add(1, Ordering::AcqRel);
     }));
-    actor.core.deliver_participant_reply(
-        ReplyExpectation::Operation(42),
-        test_envelope(b"late"),
-    )?;
+    actor
+        .core
+        .deliver_participant_reply(ReplyExpectation::Operation(42), test_envelope(b"late"))?;
 
     assert_eq!(callbacks.load(Ordering::Acquire), 0);
     assert_eq!(

@@ -1793,8 +1793,8 @@ fn open_frame(conversation_id: u64) -> Frame {
 /// replies and drains them by polling every slice. Opening must therefore register
 /// the server consumer even when the installed notifier is a no-op.
 #[test]
-fn scheduler_free_conversation_still_routes_replies_to_operation_drain(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn scheduler_free_conversation_still_routes_replies_to_operation_drain()
+-> Result<(), Box<dyn std::error::Error>> {
     let services = Arc::new(LiminalConnectionServices::empty()?);
     let runtime = ConnectionRuntime::for_tests(Arc::clone(&services) as Arc<_>);
     assert!(
