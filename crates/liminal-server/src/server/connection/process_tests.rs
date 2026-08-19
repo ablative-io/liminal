@@ -22,7 +22,7 @@ use crate::ServerError;
 use crate::server::connection::conversation::{ConnectionConversation, ConversationResource};
 use crate::server::connection::notifier::ConnectionNotifier;
 use crate::server::connection::services::{
-    ConnectionSubscription, PublishOutcome, SubscriptionResource,
+    ConnectionSubscription, LiminalConnectionServices, PublishOutcome, SubscriptionResource,
 };
 use crate::server::connection::worker_front_door::WorkerFrontDoorServices;
 use crate::server::mount::MountKind;
@@ -1787,6 +1787,56 @@ fn open_frame(conversation_id: u64) -> Frame {
         conversation_id,
         subject: "s".to_owned(),
     }
+}
+
+/// A scheduler-free connection has no READY waker, but it still owns operation
+/// replies and drains them by polling every slice. Opening must therefore register
+/// the server consumer even when the installed notifier is a no-op.
+#[test]
+fn scheduler_free_conversation_still_routes_replies_to_operation_drain(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let services = Arc::new(LiminalConnectionServices::empty()?);
+    let runtime = ConnectionRuntime::for_tests(Arc::clone(&services) as Arc<_>);
+    assert!(
+        runtime.ready_waker(TEST_PID).is_none(),
+        "the control runtime must exercise scheduler-free busy-loop mode"
+    );
+    let mut state = ConnectionProcessState::default();
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, open_frame(1)),
+        FrameAction::NoResponse
+    ));
+    assert!(matches!(
+        apply_frame(
+            TEST_PID,
+            &runtime,
+            &mut state,
+            reply_requested_message(1, 10),
+        ),
+        FrameAction::NoResponse
+    ));
+
+    let mut received = None;
+    for _ in 0..100_000 {
+        received = state
+            .conversations
+            .get(&1)
+            .and_then(ConnectionConversation::try_receive_reply);
+        if received.is_some() {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let (op_id, reply) = received.ok_or("tagged reply never reached the operation drain")?;
+    assert_eq!(op_id, 1);
+    assert_eq!(reply.payload, b"request");
+
+    let Some(conversation) = state.conversations.remove(&1) else {
+        return Err("opened conversation disappeared before cleanup".into());
+    };
+    conversation.finalize();
+    services.conversation_supervisor().shutdown();
+    Ok(())
 }
 
 /// Review round 1 item 1 (BLOCKER): admission comes BEFORE the forward. A

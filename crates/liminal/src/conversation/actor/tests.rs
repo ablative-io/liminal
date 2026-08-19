@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use super::{ConversationActor, ConversationSupervisor};
 use crate::channel::ChannelMode;
-use crate::conversation::participant::{EchoBehaviour, ParticipantBehaviour};
+use crate::conversation::participant::{
+    EchoBehaviour, ParticipantBehaviour, ReplyExpectation,
+};
 use crate::conversation::types::{
     ConversationConfig, ConversationContextEntry, ConversationPhase, CrashPolicy,
     ParticipantHealth, ParticipantPid,
@@ -483,8 +485,35 @@ fn fire_and_forget_replies_do_not_grow_reply_queue() -> Result<(), Box<dyn Error
     Ok(())
 }
 
+/// A tagged reply belongs to the embedded conversation's ordinary receive path
+/// when no server-side operation drain is registered for that conversation.
+#[test]
+fn correlated_reply_reaches_local_receive_without_registered_drain() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let (actor, _participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+
+    actor
+        .handle()
+        .send_with_op_id(test_envelope(b"embedded-correlated"), Some(42))?;
+    let reply = actor.handle().receive()?;
+    assert_eq!(reply.payload, b"embedded-correlated");
+    assert!(
+        actor.try_take_reply().is_none(),
+        "without a registered server drain, the legitimate local consumer owns the reply"
+    );
+
+    actor.handle().close()?;
+    supervisor.shutdown();
+    Ok(())
+}
+
 /// Correlated operation replies retain their ownership even when an ordinary
-/// local receive is already parked on the same conversation.
+/// local receive is already parked on the same server-drained conversation.
 #[test]
 fn correlated_reply_cannot_be_stolen_by_local_receive() -> Result<(), Box<dyn Error>> {
     let supervisor = ConversationSupervisor::new()?;
@@ -494,6 +523,9 @@ fn correlated_reply_cannot_be_stolen_by_local_receive() -> Result<(), Box<dyn Er
         ChannelMode::Ephemeral,
         CrashPolicy::Fail,
     )?;
+
+    // Server conversations register this drain permanently at open.
+    actor.register_reply_notifier(Arc::new(|| {}));
 
     let local_receiver = {
         let handle = actor.handle();
@@ -534,6 +566,39 @@ fn correlated_reply_cannot_be_stolen_by_local_receive() -> Result<(), Box<dyn Er
     assert_eq!(local.payload, b"local");
 
     actor.handle().close()?;
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Finalization permanently closes notifier registration: a late registration
+/// cannot restore server ownership or fire a callback after teardown.
+#[test]
+fn finalized_conversation_refuses_reply_consumer_registration() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let (actor, _participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    actor.finalize();
+
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&callbacks);
+    actor.register_reply_notifier(Arc::new(move || {
+        observed.fetch_add(1, Ordering::AcqRel);
+    }));
+    actor.core.deliver_participant_reply(
+        ReplyExpectation::Operation(42),
+        test_envelope(b"late"),
+    )?;
+
+    assert_eq!(callbacks.load(Ordering::Acquire), 0);
+    assert_eq!(
+        actor.core.reply_queue_len(),
+        0,
+        "finalization must prevent late registration from restoring the server drain"
+    );
     supervisor.shutdown();
     Ok(())
 }

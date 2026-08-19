@@ -659,11 +659,16 @@ fn conversation_open(
             // the park-flip wake source. The notifier is cleared by the
             // conversation core at close/finalize, so a marker never fires after
             // teardown.
-            if let Some(waker) = runtime.ready_waker(pid) {
-                conversation.register_reply_notifier(std::sync::Arc::new(move || {
-                    waker.fire();
-                }));
-            }
+            let reply_notifier: std::sync::Arc<dyn Fn() + Send + Sync> =
+                match runtime.ready_waker(pid) {
+                    Some(waker) => std::sync::Arc::new(move || {
+                        waker.fire();
+                    }),
+                    None => std::sync::Arc::new(|| {}),
+                };
+            // Ownership registration is mandatory even without a wake handle: the
+            // busy-loop connection still polls the tagged reply queue every slice.
+            conversation.register_reply_notifier(reply_notifier);
             state.conversations.insert(conversation_id, conversation);
             FrameAction::NoResponse
         }

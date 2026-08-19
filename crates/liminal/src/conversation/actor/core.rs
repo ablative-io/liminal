@@ -42,6 +42,12 @@ fn closed_error() -> LiminalError {
     }
 }
 
+#[derive(Default)]
+struct OperationReplyConsumer {
+    registered: bool,
+    notifier: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
 pub struct ActorCore {
     supervisor: Arc<SupervisorInner>,
     pub(super) config: ConversationConfig,
@@ -72,15 +78,12 @@ pub struct ActorCore {
     /// linked to it during boot so actor death is observed even when no handle
     /// operation ever runs again.
     watcher_pid: Mutex<Option<ParticipantPid>>,
-    /// R1(vi)(a) reply-availability notifier, installed PERMANENTLY at conversation
-    /// open (not per-message). Fired on the reply queue's (inbox's) empty→non-empty
-    /// transition and on terminal actor error, so a parked connection wakes to
-    /// drain a reply that landed on another scheduler's slice. `None` until the
-    /// connection installs it; removed at close/finalize so a marker never fires
-    /// after teardown. It captures the CONNECTION scheduler's enqueue handle
-    /// (§1.2(3a), Vesper advisory 3) — the connection installs a closure that fires
-    /// its own `READY` marker, never this (conversation) scheduler's.
-    reply_notifier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// R1(vi)(a) server-drain ownership and reply-availability notifier, published
+    /// together at conversation open. Ownership is monotonic; teardown clears only
+    /// the closure so late replies remain server-owned without firing markers into
+    /// a dead connection. The closure captures the CONNECTION scheduler's enqueue
+    /// handle (§1.2(3a), Vesper advisory 3), never this conversation scheduler's.
+    operation_reply_consumer: Mutex<OperationReplyConsumer>,
 }
 
 impl std::fmt::Debug for ActorCore {
@@ -116,7 +119,7 @@ impl ActorCore {
             finalized: AtomicBool::new(false),
             close_terminations: Mutex::new(HashSet::new()),
             watcher_pid: Mutex::new(None),
-            reply_notifier: Mutex::new(None),
+            operation_reply_consumer: Mutex::new(OperationReplyConsumer::default()),
         }
     }
 
@@ -124,8 +127,15 @@ impl ActorCore {
     /// queue's empty→non-empty transition and on terminal actor error. Installed
     /// permanently at conversation open; cleared at close/finalize.
     pub(crate) fn register_reply_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) {
-        if let Ok(mut slot) = self.reply_notifier.lock() {
-            *slot = Some(notifier);
+        if let Ok(mut consumer) = self.operation_reply_consumer.lock() {
+            // Finalization publishes its terminal marker before taking this same
+            // lock to clear the notifier. Checking while locked makes teardown win
+            // permanently: registration either precedes the clear or is refused.
+            if self.is_finalized() {
+                return;
+            }
+            consumer.notifier = Some(notifier);
+            consumer.registered = true;
         }
     }
 
@@ -155,24 +165,34 @@ impl ActorCore {
                 .is_ok_and(|replies| !replies.is_empty())
     }
 
+    /// Whether this conversation has registered a server-side operation-reply
+    /// consumer. Registration happens permanently at server conversation open;
+    /// embedded users that consume through ordinary `receive` leave it absent.
+    fn has_operation_reply_consumer(&self) -> bool {
+        self.operation_reply_consumer
+            .lock()
+            .is_ok_and(|consumer| consumer.registered)
+    }
+
     /// Fires the reply-availability notifier once, if installed. Called on the
     /// reply-queue empty→non-empty edge and on terminal actor error.
     fn fire_reply_notifier(&self) {
-        let notifier = self
-            .reply_notifier
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone());
-        if let Some(notifier) = notifier {
-            notifier();
+        if let Ok(consumer) = self.operation_reply_consumer.lock() {
+            // Invoke while holding the lifecycle lock: teardown's clear waits for
+            // an already-started callback, and once clear returns no later callback
+            // can acquire a notifier. The registered server callback only enqueues
+            // a READY marker and never re-enters this conversation core.
+            if let Some(notifier) = &consumer.notifier {
+                notifier();
+            }
         }
     }
 
     /// Clears the reply notifier at close/finalize so no marker fires after
     /// teardown (§1.2(3a): markers arriving after close are discarded).
     fn clear_reply_notifier(&self) {
-        if let Ok(mut slot) = self.reply_notifier.lock() {
-            *slot = None;
+        if let Ok(mut consumer) = self.operation_reply_consumer.lock() {
+            consumer.notifier = None;
         }
     }
 
@@ -430,9 +450,26 @@ impl ActorCore {
         Ok(())
     }
 
+    fn deliver_local_reply(&self, reply: Envelope) -> Result<(), LiminalError> {
+        // Hold the waiter lock until either an existing waiter is selected or the
+        // reply is buffered. `apply_receive` uses the same lock as its
+        // inbox-empty→waiter-published barrier, so neither side can pass the other.
+        let mut pending = lock(&self.pending_receives, "pending receives")?;
+        let waiter = pending.pop_front();
+        lock(&self.state, "conversation state")?.record_received(reply.clone());
+        if let Some(waiter) = waiter {
+            drop(pending);
+            send_reply(&waiter, Ok(reply));
+        } else {
+            lock(&self.inbox, "conversation inbox")?.push_back(reply);
+        }
+        Ok(())
+    }
+
     /// Delivers a reply produced by a real participant process back into the
-    /// conversation: it satisfies a pending `receive` immediately, or is buffered
-    /// in the inbox for the next `receive`. This is the reply leg of the
+    /// conversation according to its registered consumer. Local consumers use a
+    /// pending `receive` or the inbox; registered server drains retain operation
+    /// ownership in the tagged queue. This is the reply leg of the
     /// request-reply path — the participant's processing result flowing back to
     /// the caller through the conversation.
     ///
@@ -447,21 +484,19 @@ impl ActorCore {
             ReplyExpectation::None => {
                 unreachable!("participant runner must discard replies for fire-and-forget requests")
             }
-            ReplyExpectation::Local => {
-                let waiter = { lock(&self.pending_receives, "pending receives")?.pop_front() };
-                lock(&self.state, "conversation state")?.record_received(reply.clone());
-                if let Some(waiter) = waiter {
-                    send_reply(&waiter, Ok(reply));
-                } else {
-                    lock(&self.inbox, "conversation inbox")?.push_back(reply);
-                }
-                Ok(())
-            }
+            ReplyExpectation::Local => self.deliver_local_reply(reply),
             ReplyExpectation::Operation(op_id) => {
+                // The operation id identifies the reply, but the conversation's
+                // registered consumer owns its delivery route. A server-opened
+                // conversation installs the operation-drain notifier permanently,
+                // so its tagged replies must bypass local waiters and retain the id
+                // for exact pending-table correlation. An embedded conversation has
+                // no registered drain; its legitimate consumer is ordinary
+                // `receive`, so route the same tagged reply through the local path.
+                if !self.has_operation_reply_consumer() {
+                    return self.deliver_local_reply(reply);
+                }
                 lock(&self.state, "conversation state")?.record_received(reply.clone());
-                // Operation replies never satisfy an ordinary local receive waiter:
-                // doing so would erase the ownership id before the connection can
-                // exact-match it in the pending-reply table.
                 let fire = {
                     let mut replies = lock(&self.operation_replies, "operation replies")?;
                     let was_empty = replies.is_empty();
@@ -477,22 +512,23 @@ impl ActorCore {
     }
 
     fn apply_receive(&self, reply: mpsc::SyncSender<Result<Envelope, LiminalError>>) {
-        let mut envelope = match lock(&self.inbox, "conversation inbox") {
+        // This lock is the atomic handoff barrier shared with
+        // `deliver_local_reply`: while it is held, an empty inbox can become a
+        // published waiter without a participant reply slipping between the two.
+        let mut pending = match lock(&self.pending_receives, "pending receives") {
+            Ok(pending) => pending,
+            Err(error) => {
+                send_reply(&reply, Err(error));
+                return;
+            }
+        };
+        let envelope = match lock(&self.inbox, "conversation inbox") {
             Ok(mut inbox) => inbox.pop_front(),
             Err(error) => {
                 send_reply(&reply, Err(error));
                 return;
             }
         };
-        if envelope.is_none() {
-            envelope = match lock(&self.operation_replies, "operation replies") {
-                Ok(mut replies) => replies.pop_front().map(|(_, envelope)| envelope),
-                Err(error) => {
-                    send_reply(&reply, Err(error));
-                    return;
-                }
-            };
-        }
         {
             let mut state = match lock(&self.state, "conversation state") {
                 Ok(state) => state,
@@ -512,10 +548,12 @@ impl ActorCore {
                         message: "conversation participant crashed".to_owned(),
                     }),
                 );
+                drop(pending);
                 return;
             }
             if let Err(error) = state.activate() {
                 send_reply(&reply, Err(error));
+                drop(pending);
                 return;
             }
             if let Some(envelope) = &envelope {
@@ -523,24 +561,16 @@ impl ActorCore {
             }
         }
         if let Some(envelope) = envelope {
+            drop(pending);
             send_reply(&reply, Ok(envelope));
+        } else if self.is_finalized() {
+            drop(pending);
+            send_reply(&reply, Err(closed_error()));
         } else {
-            match lock(&self.pending_receives, "pending receives") {
-                // Recheck finalization under the pending-queue lock before
-                // publishing the waiter: this receive was popped from the command
-                // queue before finalization drained it, so a plain push here
-                // could land AFTER finalization's own pending drain and block its
-                // caller forever. The mutex orders the check against the drain —
-                // whichever runs second sees the other's work.
-                Ok(mut pending) => {
-                    if self.is_finalized() {
-                        send_reply(&reply, Err(closed_error()));
-                    } else {
-                        pending.push_back(reply);
-                    }
-                }
-                Err(error) => send_reply(&reply, Err(error)),
-            }
+            // Recheck finalization under the pending-queue lock before publishing
+            // the waiter. The mutex orders this against both finalization's drain
+            // and participant delivery's waiter-or-buffer decision.
+            pending.push_back(reply);
         }
     }
 
