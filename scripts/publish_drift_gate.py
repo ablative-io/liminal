@@ -8,13 +8,22 @@ ceremony changelog leg owns that path). Any fetch/transport failure is
 FATAL, never "not published" — an absence is a measurement of the
 instrument until a positive control proves otherwise.
 
-Exit codes: 0 = all faces green · 1 = drift RED (refusal on stdout) ·
-2 = FATAL instrument failure. `--self-test` runs the positive / negative /
-instrument controls and exits 0 only if every control behaves.
+Exit codes: 0 = every published crate byte- and dep-equal · 1 = drift RED
+somewhere (unmeasured crates named alongside; RED dominates because proven
+drift is actionable regardless) · 2 = no drift proven but at least one
+crate unmeasurable. Either way nonzero refuses. `--self-test` runs the
+instrument / negative / positive-byte / positive-dep controls, each
+contained (a Fatal in one control fails that control, never aborts the
+rest), and exits 0 only if every control behaves.
+
+The byte compare excludes the GENERATED Cargo.toml (cargo-version
+normalization) but its dependency tables are compared semantically — the
+generated manifest is the only file where workspace-inherited requirement
+changes materialize, so excluding it wholesale would blind the gate to
+exactly the drift class its row was minted for (found by this script's own
+first execution, 2026-08-19).
 
 Design: ablative/docs/design/liminal-publish-drift-gate-20260819.md.
-STATUS: UNTESTED-DRAFT until its controls have run (no cargo invocations
-during the 2026-08-19 publication chain, per ruling).
 """
 
 import hashlib
@@ -24,16 +33,24 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import contextlib
+import io
+import tomllib
 import urllib.request
 from pathlib import Path
 
 USER_AGENT = "hermes-crumpet-liminal-seat (dean@ablative.com.au)"
 INDEX_BASE = "https://index.crates.io"
 CRATE_BASE = "https://static.crates.io/crates"
-# Files excluded from the byte comparison, each for a stated reason:
+# Files excluded from the BYTE comparison, each for a stated reason:
 # .cargo_vcs_info.json carries the packaging commit's sha (differs by
 # construction on any new commit); the GENERATED Cargo.toml is normalized
 # by the packaging cargo's own version (Cargo.toml.orig IS compared).
+# The generated Cargo.toml is NOT thereby uninspected: it is the ONLY file
+# where workspace-inherited requirements materialize (Cargo.toml.orig keeps
+# `workspace = true` byte-identical under a workspace-pin change), so its
+# dependency tables are compared SEMANTICALLY via dep_map() — a wholesale
+# exclusion here would swallow exactly the drift class this gate hunts.
 EXCLUDED = {".cargo_vcs_info.json", "Cargo.toml"}
 
 
@@ -156,6 +173,34 @@ def file_map(root: Path) -> dict[str, bytes]:
     return mapping
 
 
+def dep_map(manifest_bytes: bytes) -> dict[tuple[str, str], dict]:
+    """(table, dep-name) -> normalized entry from a GENERATED Cargo.toml.
+
+    Both sides of the comparison are cargo-generated manifests, so table
+    shapes match; entries are normalized (bare string -> {"version": ...},
+    feature lists sorted) to be immune to formatting, not to meaning.
+    """
+    data = tomllib.loads(manifest_bytes.decode("utf-8"))
+    tables: list[tuple[str, dict]] = []
+    for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
+        if kind in data:
+            tables.append((kind, data[kind]))
+    for target, target_data in data.get("target", {}).items():
+        for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
+            if kind in target_data:
+                tables.append((f"target.{target}.{kind}", target_data[kind]))
+    mapping: dict[tuple[str, str], dict] = {}
+    for table, deps in tables:
+        for dep_name, entry in deps.items():
+            if isinstance(entry, str):
+                entry = {"version": entry}
+            entry = dict(entry)
+            if "features" in entry:
+                entry["features"] = sorted(entry["features"])
+            mapping[(table, dep_name)] = entry
+    return mapping
+
+
 def package_local(workspace_root: Path, name: str, scratch: Path) -> Path:
     """cargo package --no-verify: resolution only, no compile."""
     result = subprocess.run(
@@ -176,7 +221,14 @@ def package_local(workspace_root: Path, name: str, scratch: Path) -> Path:
     return packages[0]
 
 
-def compare(name: str, version: str, published: dict[str, bytes], local: dict[str, bytes]) -> list[str]:
+def compare(
+    name: str,
+    version: str,
+    published: dict[str, bytes],
+    local: dict[str, bytes],
+    published_manifest: bytes,
+    local_manifest: bytes,
+) -> list[str]:
     problems = []
     for path in sorted(set(published) | set(local)):
         if path not in local:
@@ -185,31 +237,64 @@ def compare(name: str, version: str, published: dict[str, bytes], local: dict[st
             problems.append(f"extra in tree package: {path}")
         elif published[path] != local[path]:
             problems.append(f"differs: {path} (published {len(published[path])}B, tree {len(local[path])}B)")
+    published_deps = dep_map(published_manifest)
+    local_deps = dep_map(local_manifest)
+    for key in sorted(set(published_deps) | set(local_deps)):
+        table, dep_name = key
+        if key not in local_deps:
+            problems.append(f"dep missing from tree package: [{table}] {dep_name}")
+        elif key not in published_deps:
+            problems.append(f"dep added in tree package: [{table}] {dep_name} = {local_deps[key]}")
+        elif published_deps[key] != local_deps[key]:
+            problems.append(
+                f"dep differs: [{table}] {dep_name} — published {published_deps[key]}, tree {local_deps[key]}"
+            )
     return problems
 
 
 def run_gate(workspace_root: Path) -> int:
-    verdict = 0
+    """0 = every published crate byte- and dep-equal; 1 = drift PROVEN
+    somewhere (unmeasured crates, if any, are named alongside); 2 = no drift
+    proven but at least one crate could not be measured. RED dominates FATAL
+    because proven drift is actionable regardless of what else could not be
+    measured; a no-RED run with any FATAL must not read as green. Either way
+    nonzero refuses."""
+    reds = 0
+    fatals: list[str] = []
     with tempfile.TemporaryDirectory(prefix="drift-gate-") as scratch_str:
         scratch = Path(scratch_str)
         for name, version, _crate_dir in workspace_publish_set(workspace_root):
-            cksum = published_cksum(name, version)
-            if cksum is None:
-                print(f"PASS {name} {version}: not on the index — the changelog leg governs the cut")
-                continue
-            crate_bytes = fetch(f"{CRATE_BASE}/{name}/{name}-{version}.crate")
-            actual = hashlib.sha256(crate_bytes).hexdigest()
-            if actual != cksum:
-                raise Fatal(
-                    f"{name} {version}: downloaded crate sha256 {actual} != index cksum "
-                    f"{cksum} — transport damage, NOT a tree verdict"
+            try:
+                cksum = published_cksum(name, version)
+                if cksum is None:
+                    print(f"PASS {name} {version}: not on the index — the changelog leg governs the cut")
+                    continue
+                crate_bytes = fetch(f"{CRATE_BASE}/{name}/{name}-{version}.crate")
+                actual = hashlib.sha256(crate_bytes).hexdigest()
+                if actual != cksum:
+                    raise Fatal(
+                        f"{name} {version}: downloaded crate sha256 {actual} != index cksum "
+                        f"{cksum} — transport damage, NOT a tree verdict"
+                    )
+                published_root = extract_crate(crate_bytes, scratch / f"pub-{name}")
+                local_crate = package_local(workspace_root, name, scratch / f"pkg-{name}")
+                local_root = extract_crate(local_crate.read_bytes(), scratch / f"loc-{name}")
+                problems = compare(
+                    name,
+                    version,
+                    file_map(published_root),
+                    file_map(local_root),
+                    (published_root / "Cargo.toml").read_bytes(),
+                    (local_root / "Cargo.toml").read_bytes(),
                 )
-            published = file_map(extract_crate(crate_bytes, scratch / f"pub-{name}"))
-            local_crate = package_local(workspace_root, name, scratch / f"pkg-{name}")
-            local = file_map(extract_crate(local_crate.read_bytes(), scratch / f"loc-{name}"))
-            problems = compare(name, version, published, local)
+            except Fatal as error:
+                # Contained per crate so the rest still get measured; the
+                # inability is preserved in the exit rule, never absorbed.
+                fatals.append(f"{name} {version}: {error}")
+                print(f"FATAL {name} {version} (instrument, not verdict): {error}")
+                continue
             if problems:
-                verdict = 1
+                reds += 1
                 print(f"RED {name} {version}: SILENT IN-TREE DRIFT under a published version")
                 for problem in problems:
                     print(f"  {problem}")
@@ -219,7 +304,11 @@ def run_gate(workspace_root: Path) -> int:
                 )
             else:
                 print(f"GREEN {name} {version}: tree bytes equal published bytes")
-    return verdict
+    if fatals:
+        print(f"UNMEASURED: {len(fatals)} crate(s) — a green over these would be vacuous")
+    if reds:
+        return 1
+    return 2 if fatals else 0
 
 
 def self_test(workspace_root: Path) -> int:
@@ -250,16 +339,35 @@ def self_test(workspace_root: Path) -> int:
         else:
             print("control instrument-2 OK: corrupted bytes fail the cksum predicate")
 
-    # Positive + negative controls need cargo package on a scratch copy: run
-    # the REAL gate over the workspace (negative: expected all GREEN/PASS on a
-    # clean tree), then doctor a scratch copy of one published crate's source
-    # by one byte and require RED naming that file.
+    # Positive + negative controls need cargo package on a scratch copy. Every
+    # control runs the REAL gate captured and contained: a Fatal inside one
+    # control is that control's FAILURE, never an abort of the remaining
+    # controls (an aborted control would read as a passed control).
+    def captured_gate(root: Path) -> tuple[int | None, str]:
+        buffer = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buffer):
+                verdict = run_gate(root)
+        except Fatal as error:
+            buffer.write(f"FATAL escaped run_gate: {error}\n")
+            verdict = None
+        return verdict, buffer.getvalue()
+
     print("control negative: running the real gate over the clean tree")
-    if run_gate(workspace_root) != 0:
-        failures.append("negative: clean tree reported drift (or the tree really has drifted — investigate before trusting the gate)")
+    verdict, output = captured_gate(workspace_root)
+    print(output, end="")
+    if verdict != 0:
+        failures.append(
+            f"negative: clean tree did not report green (exit {verdict}) — either the "
+            "gate is broken or the tree really has drifted; investigate WHICH before "
+            "trusting anything, the two are different emergencies"
+        )
     else:
         print("control negative OK: clean tree green")
 
+    # Positive 1 — source-byte drift: doctor one source file of a published
+    # crate and require RED naming THAT FILE for THAT CRATE. Exit 1 alone is
+    # not enough: pre-existing drift elsewhere would satisfy it vacuously.
     with tempfile.TemporaryDirectory(prefix="drift-positive-") as copy_str:
         doctored = Path(copy_str) / "ws"
         shutil.copytree(
@@ -268,15 +376,60 @@ def self_test(workspace_root: Path) -> int:
         )
         victims = sorted((doctored / "crates" / "liminal" / "src").rglob("*.rs"))
         if not victims:
-            failures.append("positive: no source file found to doctor")
+            failures.append("positive-byte: no source file found to doctor")
         else:
             victim = victims[0]
             victim.write_bytes(victim.read_bytes() + b"\n// drift-gate positive control\n")
-            print(f"control positive: doctored {victim.relative_to(doctored)} by one line")
-            if run_gate(doctored) != 1:
-                failures.append("positive: the gate did NOT red on a known-present drift")
+            victim_rel = victim.relative_to(doctored / "crates" / "liminal")
+            print(f"control positive-byte: doctored {victim.relative_to(doctored)} by one line")
+            verdict, output = captured_gate(doctored)
+            print(output, end="")
+            if verdict != 1:
+                failures.append(f"positive-byte: gate exit {verdict}, wanted 1 (drift RED)")
+            elif f"differs: {victim_rel}" not in output:
+                failures.append(
+                    f"positive-byte: exit 1 but the doctored file {victim_rel} is not "
+                    "named — the red belongs to something else (vacuous pass refused)"
+                )
             else:
-                print("control positive OK: known drift detected RED")
+                print("control positive-byte OK: doctored file named RED")
+
+    # Positive 2 — workspace-pin drift, the class invisible to the byte
+    # compare: doctor the workspace serde requirement (resolvable either way)
+    # and require a dep-differs RED naming serde. This exercises the SAME
+    # predicate (dep_map over generated manifests) the gate uses.
+    with tempfile.TemporaryDirectory(prefix="drift-positive-dep-") as copy_str:
+        doctored = Path(copy_str) / "ws"
+        shutil.copytree(
+            workspace_root, doctored,
+            ignore=shutil.ignore_patterns("target", ".git", "gate-logs", ".claude"),
+        )
+        root_manifest = doctored / "Cargo.toml"
+        text = root_manifest.read_text()
+        needle = 'serde = { version = "1",'
+        if needle not in text:
+            failures.append(
+                "positive-dep: workspace serde pin not found to doctor — the "
+                "substrate moved; update this control, do not skip it"
+            )
+        else:
+            root_manifest.write_text(text.replace(needle, 'serde = { version = "1.0",', 1))
+            print('control positive-dep: doctored workspace serde req "1" -> "1.0"')
+            verdict, output = captured_gate(doctored)
+            print(output, end="")
+            dep_lines = [
+                line for line in output.splitlines()
+                if line.strip().startswith("dep differs:") and " serde " in line
+            ]
+            if verdict != 1:
+                failures.append(f"positive-dep: gate exit {verdict}, wanted 1 (drift RED)")
+            elif not dep_lines:
+                failures.append(
+                    "positive-dep: exit 1 but no dep-differs line names serde — the "
+                    "workspace-pin class is still invisible (vacuous pass refused)"
+                )
+            else:
+                print("control positive-dep OK: workspace-pin drift named RED")
 
     if failures:
         print("SELF-TEST FAILURES:")
